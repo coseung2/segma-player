@@ -6,6 +6,7 @@ import {
   createMediaFetchLeaseRegistry,
   createMediaFetchRuleIdAllocator,
   exactMediaFetchRule,
+  OFFSCREEN_DOCUMENT_TAB_ID,
 } from "./media-fetch-lease.js";
 
 test("media lease rules match one complete URL, including its query token", () => {
@@ -37,6 +38,24 @@ test("long tokenized URLs avoid the compiled-regex size limit", () => {
   assert.equal(rule.condition.regexFilter, undefined);
   assert.equal(rule.condition.urlFilter, `|${url}|`);
   assert.deepEqual(rule.condition.tabIds, [18]);
+});
+
+test("offscreen downloads use Chrome's tabless request id", () => {
+  const rule = exactMediaFetchRule({
+    ruleId: 102,
+    tabId: OFFSCREEN_DOCUMENT_TAB_ID,
+    url: "https://cdn.example/video.mp4",
+  });
+  assert.deepEqual(rule.condition.tabIds, [-1]);
+
+  const registry = createMediaFetchLeaseRegistry({ leaseIdFactory: () => "offscreen-lease" });
+  const lease = registry.create({
+    tabId: OFFSCREEN_DOCUMENT_TAB_ID,
+    url: "https://cdn.example/video.mp4",
+    ruleId: 102,
+  });
+  assert.equal(lease.tabId, -1);
+  assert.equal(registry.forTab(-1).length, 1);
 });
 
 test("media lease URL and referrer validation uses the canonical HTTP contract", () => {

@@ -1,6 +1,7 @@
 import { canonicalHttpUrl } from "./candidate.js";
 
 export const PROGRESSIVE_REDIRECT_CACHE_TTL_MS = 60_000;
+export const PROGRESSIVE_REDIRECT_MAX_HOPS = 10;
 
 export class ProgressiveRedirectError extends Error {
   constructor(code, message = code) {
@@ -91,6 +92,7 @@ export function createProgressiveRedirectResolver({
   ensureRoutes,
   fetchImpl = globalThis.fetch,
   getRequestHeaders = () => ({}),
+  getRedirectTarget = () => null,
   now = () => Date.now(),
   cacheTtlMs = PROGRESSIVE_REDIRECT_CACHE_TTL_MS,
 } = {}) {
@@ -108,7 +110,34 @@ export function createProgressiveRedirectResolver({
     const referrer = rawReferrer ? canonicalHttpUrl(rawReferrer)?.href : "";
     if (rawReferrer && !referrer) throw new ProgressiveRedirectError("invalid-probe-referrer");
 
-    await ensureRoutes([initial.href]);
+    const preparedRoutes = new Map();
+    async function ensureRoute(url) {
+      if (preparedRoutes.has(url)) return preparedRoutes.get(url);
+      const result = await ensureRoutes([url]);
+      preparedRoutes.set(url, result);
+      return result;
+    }
+
+    async function prepareKnownRedirects() {
+      let current = initial.href;
+      let prepared = 0;
+      const visited = new Set([current]);
+      for (let hop = 0; hop < PROGRESSIVE_REDIRECT_MAX_HOPS; hop += 1) {
+        const redirectValue = await getRedirectTarget(current);
+        if (!redirectValue) break;
+        const redirect = canonicalHttpUrl(redirectValue);
+        if (!redirect) throw new ProgressiveRedirectError("invalid-probe-response-url");
+        if (visited.has(redirect.href)) break;
+        visited.add(redirect.href);
+        if (!preparedRoutes.has(redirect.href)) {
+          await ensureRoute(redirect.href);
+          prepared += 1;
+        }
+        current = redirect.href;
+      }
+      return prepared;
+    }
+
     const key = `${initial.href}\n${referrer}`;
     const currentTime = now();
     const cached = cache.get(key);
@@ -123,19 +152,34 @@ export function createProgressiveRedirectResolver({
     }
     if (cached) cache.delete(key);
 
+    let headers = requestHeaders;
+    if (headers === undefined) headers = await getRequestHeaders(initial.href);
+    const fetchOptions = {
+      method: "GET",
+      headers: normalizedHeaders(headers),
+      credentials: "include",
+      redirect: "follow",
+      ...(referrer ? { referrer, referrerPolicy: "unsafe-url" } : {}),
+    };
+
+    // Fetch intentionally keeps atomic redirect handling. Chrome's webRequest
+    // observer records each Location target before a failed follow completes;
+    // route those newly observed hosts, then retry the bounded probe.
+    await prepareKnownRedirects();
     let response;
-    try {
-      let headers = requestHeaders;
-      if (headers === undefined) headers = await getRequestHeaders(initial.href);
-      response = await fetchImpl(initial.href, {
-        method: "GET",
-        headers: normalizedHeaders(headers),
-        credentials: "include",
-        redirect: "follow",
-        ...(referrer ? { referrer, referrerPolicy: "unsafe-url" } : {}),
-      });
-    } catch {
-      throw new ProgressiveRedirectError("media-probe-failed");
+    while (true) {
+      try {
+        response = await fetchImpl(initial.href, fetchOptions);
+        break;
+      } catch {
+        const prepared = await prepareKnownRedirects();
+        if (prepared) continue;
+        if (!preparedRoutes.has(initial.href)) {
+          await ensureRoute(initial.href);
+          continue;
+        }
+        throw new ProgressiveRedirectError("media-probe-failed");
+      }
     }
 
     const responseUrl = typeof response?.url === "string" && response.url ? response.url : initial.href;
@@ -146,7 +190,7 @@ export function createProgressiveRedirectResolver({
       throw new ProgressiveRedirectError("media-probe-failed");
     }
 
-    const routeResult = await ensureRoutes([final.href]);
+    const routeResult = await ensureRoute(final.href);
     const expiresAtMs = expiryFromRoute(routeResult, now(), cacheTtlMs);
     cache.set(key, { url: final.href, expiresAtMs });
     return { url: final.href, referrer, cached: false };

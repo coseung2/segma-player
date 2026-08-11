@@ -2,6 +2,7 @@ import { canonicalHttpUrl } from "./candidate.js";
 
 export const MEDIA_FETCH_RESOURCE_TYPES = Object.freeze(["xmlhttprequest", "other"]);
 export const MEDIA_FETCH_RULE_ID_START = 1_000_000_000;
+export const OFFSCREEN_DOCUMENT_TAB_ID = -1;
 const MAX_RULE_ID = 2_147_483_647;
 const MAX_EXACT_REGEX_URL_LENGTH = 1800;
 
@@ -21,7 +22,9 @@ export function exactMediaFetchRule({ ruleId, tabId, url, referrer = "", request
   if (!Number.isInteger(ruleId) || ruleId <= 0 || ruleId > MAX_RULE_ID) {
     throw new Error("invalid-media-fetch-rule-id");
   }
-  if (!Number.isInteger(tabId) || tabId <= 0) throw new Error("invalid-media-fetch-tab");
+  if (!Number.isInteger(tabId) || (tabId <= 0 && tabId !== OFFSCREEN_DOCUMENT_TAB_ID)) {
+    throw new Error("invalid-media-fetch-tab");
+  }
   if (!canonicalMediaFetchUrl(url)) throw new Error("invalid-media-fetch-url");
   if (referrer && !canonicalMediaFetchReferrer(referrer)) {
     throw new Error("invalid-media-fetch-referrer");
@@ -87,7 +90,9 @@ export function createMediaFetchLeaseRegistry({
   const leases = new Map();
 
   function create({ tabId, url, referrer = "", ruleId, now = Date.now() }) {
-    if (!Number.isInteger(tabId) || tabId <= 0) throw new Error("invalid-media-fetch-tab");
+    if (!Number.isInteger(tabId) || (tabId <= 0 && tabId !== OFFSCREEN_DOCUMENT_TAB_ID)) {
+      throw new Error("invalid-media-fetch-tab");
+    }
     if (leases.size >= maxLeases) throw new Error("media-fetch-lease-limit");
     let leaseId = String(leaseIdFactory());
     while (leases.has(leaseId)) leaseId = String(leaseIdFactory());

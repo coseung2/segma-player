@@ -48,6 +48,9 @@
     for (const element of document.querySelectorAll("video, audio, source")) {
       const url = element.currentSrc || element.src;
       if (typeof url !== "string" || url.length === 0) continue;
+      try {
+        if (/\.(?:avif|gif|jpe?g|png|webp)$/i.test(new URL(url, location.href).pathname)) continue;
+      } catch { /* keep browser-owned blob sources */ }
       const host = element.tagName === "SOURCE" ? element.parentElement : element;
       const area = visibleArea(host);
       result.push({
@@ -58,6 +61,25 @@
       });
     }
     return result;
+  }
+
+  function embeddedPlayerUrls() {
+    const urls = [];
+    const pattern = /\bvideo_url(?:_hd)?\s*:\s*(["'])([A-Za-z0-9+/]{8,}={0,2})\1/g;
+    for (const script of document.querySelectorAll("script")) {
+      const source = script.textContent || "";
+      if (!source.includes("video_url")) continue;
+      for (const match of source.matchAll(pattern)) {
+        try {
+          const decoded = atob(match[2]).trim();
+          const url = new URL(decoded, location.href);
+          if (/^https?:$/.test(url.protocol) && url.href.length <= MAX_URL_BYTES) urls.push(url.href);
+        } catch {
+          // Ignore unrelated or malformed player configuration values.
+        }
+      }
+    }
+    return [...new Set(urls)];
   }
 
   function reportMainFrames() {
@@ -109,6 +131,43 @@
     }
   }
 
+  function requestLevel5Key(url) {
+    return new Promise((resolve) => {
+      const requestId = crypto.randomUUID();
+      const timeout = window.setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        resolve({ ok: false, error: "page-bridge-timeout" });
+      }, 16_000);
+      function onMessage(event) {
+        if (event.source !== window || event.data?.type !== "aura-level5-key-response-v1"
+          || event.data.requestId !== requestId) return;
+        window.clearTimeout(timeout);
+        window.removeEventListener("message", onMessage);
+        if (!event.data.ok || typeof event.data.key !== "string") {
+          const error = typeof event.data.error === "string" && /^[a-z0-9-]{3,64}$/.test(event.data.error)
+            ? event.data.error : "level5-key-unavailable";
+          resolve({ ok: false, error });
+          return;
+        }
+        try {
+          const binary = atob(event.data.key);
+          if (binary.length !== 16 && binary.length !== 32) throw new Error("invalid-key");
+          resolve({ ok: true, key: [...binary].map((character) => character.charCodeAt(0)) });
+        } catch {
+          resolve({ ok: false, error: "invalid-level5-key" });
+        }
+      }
+      window.addEventListener("message", onMessage);
+      window.postMessage({ type: "aura-level5-key-request-v1", requestId, url }, "*");
+    });
+  }
+
+  function handleLevel5KeyRequest(message, sendResponse) {
+    if (message?.type !== "decode-level5-key" || typeof message.url !== "string") return false;
+    void requestLevel5Key(message.url).then(sendResponse);
+    return true;
+  }
+
   async function reportDoodPlayer() {
     const resolved = await resolveDoodDirect();
     if (!resolved) return;
@@ -152,6 +211,7 @@
       queueScan();
       return false;
     }
+    if (handleLevel5KeyRequest(message, sendResponse)) return true;
     if (handleDoodRequest(message, sendResponse)) return true;
     return handleDirectDownload(message, sendResponse);
   }
@@ -168,6 +228,7 @@
       if (!/^blob:/i.test(main.url)) mainUrl = main.url;
     }
     for (const item of elements) report(item.url, item.type, item.url === mainUrl, true);
+    for (const url of embeddedPlayerUrls()) report(url, "video/mp4", true, true);
     for (const entry of performance.getEntriesByType("resource")) report(entry.name);
     reportMainFrames();
     void reportDoodPlayer();

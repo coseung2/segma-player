@@ -16,7 +16,7 @@ function routeResult() {
   return { ok: true, expiresAtUtc: new Date(Date.now() + 300_000).toISOString() };
 }
 
-test("orders initial route, bounded probe, final route, and full fetch", async () => {
+test("probes through the current route before routing the final media host", async () => {
   const events = [];
   const resolver = createProgressiveRedirectResolver({
     ensureRoutes: async (urls) => {
@@ -42,17 +42,102 @@ test("orders initial route, bounded probe, final route, and full fetch", async (
   events.push(["full", prepared.url, prepared.referrer]);
 
   assert.deepEqual(events.map(([type, value]) => [type, value]), [
-    ["route", initialUrl],
     ["probe", initialUrl],
     ["cancel", undefined],
     ["route", finalUrl],
     ["full", finalUrl],
   ]);
-  assert.equal(events[1][2].headers.Authorization, "Bearer sample");
-  assert.equal(events[1][2].headers.Range, "bytes=0-0");
-  assert.equal(new Headers(events[1][2].headers).get("range"), "bytes=0-0");
-  assert.equal(events[1][2].referrer, referrer);
+  assert.equal(events[0][2].headers.Authorization, "Bearer sample");
+  assert.equal(events[0][2].headers.Range, "bytes=0-0");
+  assert.equal(new Headers(events[0][2].headers).get("range"), "bytes=0-0");
+  assert.equal(events[0][2].referrer, referrer);
   assert.equal(prepared.referrer, referrer);
+});
+
+test("routes an observed redirect target before retrying a failed probe", async () => {
+  const events = [];
+  const redirects = new Map();
+  let probes = 0;
+  const resolver = createProgressiveRedirectResolver({
+    ensureRoutes: async (urls) => {
+      events.push(["route", urls[0]]);
+      return routeResult();
+    },
+    getRedirectTarget: (url) => redirects.get(url) || null,
+    fetchImpl: async (url, options) => {
+      probes += 1;
+      events.push(["probe", url, options]);
+      if (probes === 1) {
+        redirects.set(initialUrl, finalUrl);
+        throw new TypeError("redirect target was not routed");
+      }
+      return {
+        ok: true,
+        status: 206,
+        url: finalUrl,
+        body: { cancel: async () => events.push(["cancel"]) },
+      };
+    },
+  });
+
+  const prepared = await resolver.resolve({ url: initialUrl, referrer });
+
+  assert.equal(prepared.url, finalUrl);
+  assert.deepEqual(events.map(([type, value]) => [type, value]), [
+    ["probe", initialUrl],
+    ["route", finalUrl],
+    ["probe", initialUrl],
+    ["cancel", undefined],
+  ]);
+});
+
+test("routes the initial host once when the current route cannot probe it", async () => {
+  const events = [];
+  let probes = 0;
+  const resolver = createProgressiveRedirectResolver({
+    ensureRoutes: async (urls) => {
+      events.push(["route", urls[0]]);
+      return routeResult();
+    },
+    fetchImpl: async (url) => {
+      probes += 1;
+      events.push(["probe", url]);
+      if (probes === 1) throw new TypeError("network failure");
+      return {
+        ok: true,
+        status: 206,
+        url: initialUrl,
+        body: { cancel: async () => events.push(["cancel"]) },
+      };
+    },
+  });
+
+  const prepared = await resolver.resolve({ url: initialUrl, referrer });
+
+  assert.equal(prepared.url, initialUrl);
+  assert.deepEqual(events.map(([type, value]) => [type, value]), [
+    ["probe", initialUrl],
+    ["route", initialUrl],
+    ["probe", initialUrl],
+    ["cancel", undefined],
+  ]);
+});
+
+test("stops after both current-route and routed probes fail", async () => {
+  let probes = 0;
+  const resolver = createProgressiveRedirectResolver({
+    ensureRoutes: async () => routeResult(),
+    fetchImpl: async () => {
+      probes += 1;
+      throw new TypeError("network failure");
+    },
+  });
+
+  await assert.rejects(
+    resolver.resolve({ url: initialUrl, referrer }),
+    (error) => error?.code === "media-probe-failed",
+  );
+  assert.equal(probes, 2);
 });
 
 test("filters recorded Range case-insensitively before replay or DNR rule conversion", () => {
@@ -116,7 +201,6 @@ test("does not start a full fetch when final route preparation fails", async () 
   );
   assert.equal(fullFetches, 0);
   assert.deepEqual(events.map(([type, value]) => [type, value]), [
-    ["route", initialUrl],
     ["probe", initialUrl],
     ["cancel", undefined],
     ["route", finalUrl],

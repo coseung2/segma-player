@@ -1,158 +1,129 @@
-const statusElement = document.querySelector("#status");
-const summaryElement = document.querySelector("#summary");
-const candidatesElement = document.querySelector("#candidates");
-const refreshButton = document.querySelector("#refresh");
-const rescanButton = document.querySelector("#rescan");
-const testModeElement = document.querySelector("#test-mode");
-const testDomainsElement = document.querySelector("#test-domains");
-const saveTestSettingsButton = document.querySelector("#save-test-settings");
-const testSettingsStatusElement = document.querySelector("#test-settings-status");
-const directUrlElement = document.querySelector("#direct-url");
-const downloadUrlButton = document.querySelector("#download-url");
-const directStatusElement = document.querySelector("#direct-status");
-const mainOnlyElement = document.querySelector("#main-only");
-const openSettingsButton = document.querySelector("#open-settings");
-const pendingDownloads = new Map();
+import { candidateDownloadErrorMessage } from "./download-errors.js";
+import { isDownloadableMediaType } from "./candidate.js";
+import { downloadJobView } from "./download-job-view.js";
+import { isSiteAllowed } from "./adblock/adblock-core.js";
+
+const byId = (id) => document.getElementById(id);
+const tabs = [...document.querySelectorAll('[role="tab"]')];
+const panels = [...document.querySelectorAll('[role="tabpanel"]')];
+const statusElement = byId("status");
+const candidatesElement = byId("candidates");
+const summaryElement = byId("summary");
+const mainOnlyElement = byId("main-only");
+const jobsElement = byId("download-jobs");
+const popupShell = document.querySelector(".popup-shell");
+const scrollMoreButton = byId("scroll-more");
 let lastCandidates = [];
-const TEST_MODE_KEY = "auraTestMode";
-const TEST_DOMAINS_KEY = "auraTestDomains";
+let scrollUpdateQueued = false;
 
-function setStatus(message) {
-  statusElement.textContent = message;
+function updateScrollMore() {
+  scrollUpdateQueued = false;
+  const remaining = popupShell.scrollHeight - popupShell.clientHeight - popupShell.scrollTop;
+  scrollMoreButton.hidden = remaining <= 12;
 }
 
-function createText(tag, className, text) {
-  const element = document.createElement(tag);
-  element.className = className;
-  element.textContent = text;
-  return element;
+function queueScrollUpdate() {
+  if (scrollUpdateQueued) return;
+  scrollUpdateQueued = true;
+  requestAnimationFrame(updateScrollMore);
 }
 
-function normalizeTestDomain(value) {
-  const input = String(value || "").trim().toLowerCase();
-  if (!input) return null;
-  try {
-    const url = new URL(input.includes("://") ? input : `https://${input}`);
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return null;
-    return url.hostname.replace(/\.$/, "");
-  } catch {
-    return null;
-  }
-}
-
-async function loadTestSettings() {
-  const settings = await chrome.storage.local.get({ [TEST_MODE_KEY]: false, [TEST_DOMAINS_KEY]: [] });
-  testModeElement.checked = Boolean(settings[TEST_MODE_KEY]);
-  testDomainsElement.value = Array.isArray(settings[TEST_DOMAINS_KEY]) ? settings[TEST_DOMAINS_KEY].join("\n") : "";
-}
-
-async function saveTestSettings() {
-  const domains = [...new Set(testDomainsElement.value.split(/[\s,]+/).map(normalizeTestDomain).filter(Boolean))];
-  await chrome.storage.local.set({ [TEST_MODE_KEY]: testModeElement.checked, [TEST_DOMAINS_KEY]: domains });
-  testDomainsElement.value = domains.join("\n");
-  testSettingsStatusElement.textContent = testModeElement.checked
-    ? `테스트 모드 켜짐 · ${domains.length}개 도메인`
-    : "테스트 모드 꺼짐";
+function text(tag, className, value) {
+  const node = document.createElement(tag);
+  node.className = className;
+  node.textContent = value;
+  return node;
 }
 
 function createPreview(candidate) {
   const preview = document.createElement("div");
   preview.className = "candidate-preview";
-  const previewUrl = typeof candidate.previewUrl === "string" ? candidate.previewUrl : "";
-  const displayUrl = typeof candidate.displayUrl === "string" ? candidate.displayUrl : "";
-  if (!previewUrl || /^(?:blob:|data:)/i.test(previewUrl)) {
-    preview.classList.add("preview-fallback");
-    preview.textContent = candidate.mediaType === "HLS_MASTER" || candidate.mediaType === "HLS_MEDIA"
-      ? "미리보기 없음"
-      : "▶";
+  const url = typeof candidate.previewUrl === "string" ? candidate.previewUrl : "";
+  if (candidate.mediaType === "PROGRESSIVE" && /^https?:\/\//i.test(url)) {
+    const video = document.createElement("video");
+    video.src = url;
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.setAttribute("aria-label", `${candidate.pageTitle || "미디어"} 미리보기`);
+    video.addEventListener("error", () => {
+      video.remove();
+      preview.append(text("span", "preview-label", "미리보기 없음"));
+    }, { once: true });
+    preview.append(video);
     return preview;
   }
-  try {
-    const url = new URL(previewUrl);
-    if (!["http:", "https:"].includes(url.protocol)) throw new Error("unsupported preview protocol");
-    if (candidate.mediaType === "PROGRESSIVE") {
-      const video = document.createElement("video");
-      video.src = url.href;
-      video.muted = true;
-      video.playsInline = true;
-      video.autoplay = true;
-      video.loop = true;
-      video.preload = "auto";
-      video.setAttribute("aria-label", `${candidate.pageTitle || "미디어"} 미리보기`);
-      video.addEventListener("loadeddata", () => {
-        if (Number.isFinite(video.duration) && video.duration > 0) video.currentTime = Math.min(0.1, video.duration / 10);
-        void video.play().catch(() => {});
-      }, { once: true });
-      video.addEventListener("error", () => {
-        preview.classList.add("preview-fallback");
-        preview.textContent = "미리보기 없음";
-      }, { once: true });
-      preview.append(video);
-      return preview;
-    }
-    if (/\.(?:jpg|jpeg|png|webp|gif)$/i.test(url.pathname)) {
-      const image = document.createElement("img");
-      image.src = url.href;
-      image.alt = `${candidate.pageTitle || "미디어"} 썸네일`;
-      image.loading = "lazy";
-      preview.append(image);
-      return preview;
-    }
-  } catch {
-    // Fall back to a neutral preview when the display URL is not usable.
-  }
-  preview.classList.add("preview-fallback");
-  preview.textContent = "▶";
+  preview.append(text("span", "preview-label", candidate.mediaType.startsWith("HLS") ? "HLS" : "미리보기 없음"));
   return preview;
 }
 
-function renderCandidates(candidates) {
-  lastCandidates = candidates;
-  candidatesElement.replaceChildren();
-  summaryElement.replaceChildren();
-  const sorted = [...candidates].reverse();
-  const mainFirst = [...sorted].sort((a, b) => (Number(b.main) - Number(a.main)));
-  const isUsableMain = (candidate) => candidate.main && !String(candidate.displayUrl || "").startsWith("blob:");
-  const hasMain = mainFirst.some(isUsableMain);
-  const filtered = mainOnlyElement.checked && hasMain
-    ? mainFirst.filter(isUsableMain)
-    : mainFirst;
-  summaryElement.append(
-    createText("strong", "", String(filtered.length)),
-    document.createTextNode(filtered.length !== sorted.length ? "개 후보 (메인만 표시)" : "개 후보 감지됨"),
-  );
+function showTab(name, focus = false) {
+  for (const tab of tabs) {
+    const active = tab.dataset.tab === name;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focus) tab.focus();
+  }
+  for (const panel of panels) panel.hidden = panel.id !== `panel-${name}`;
+  popupShell.scrollTop = 0;
+  queueScrollUpdate();
+  if (name === "downloads") void requestJobs();
+  if (name === "blocking") void refreshBlockingPanel();
+}
 
-  if (!filtered.length) {
-    const empty = createText("div", "empty-state", "");
-    empty.append(createText("strong", "", "아직 미디어가 없습니다"), createText("p", "", "영상이 재생된 페이지에서 다시 감지해 보세요."));
-    candidatesElement.append(empty);
+for (const tab of tabs) {
+  tab.addEventListener("click", () => showTab(tab.dataset.tab));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = tabs.indexOf(tab);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+      : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    showTab(tabs[next].dataset.tab, true);
+  });
+}
+
+function renderCandidates(candidates) {
+  const downloadable = candidates.filter((candidate) => isDownloadableMediaType(candidate.mediaType));
+  lastCandidates = downloadable;
+  const sorted = [...downloadable].reverse().sort((a, b) => Number(b.main) - Number(a.main));
+  const hasMain = sorted.some((item) => item.main && !String(item.displayUrl || "").startsWith("blob:"));
+  const shown = mainOnlyElement.checked && hasMain ? sorted.filter((item) => item.main) : sorted;
+  summaryElement.textContent = `${shown.length}개 후보`;
+  candidatesElement.replaceChildren();
+  if (!shown.length) {
+    candidatesElement.append(text("div", "empty-state", "영상을 재생한 뒤 다시 감지해 보세요."));
     return;
   }
-
-  for (const candidate of filtered) {
+  for (const candidate of shown) {
     const card = document.createElement("article");
     card.className = "candidate-card";
     card.append(
       createPreview(candidate),
-      createText("h2", "candidate-title", candidate.pageTitle || "제목 없음"),
-      createText("p", "candidate-origin", candidate.pageOrigin),
-      createText("p", "candidate-url", candidate.displayUrl),
+      text("h2", "candidate-title", candidate.pageTitle || "제목 없음"),
+      text("p", "candidate-origin", candidate.pageOrigin || ""),
+      text("p", "candidate-url", candidate.displayUrl || ""),
     );
-    if (candidate.mediaType === "HLS_MASTER" || candidate.mediaType === "HLS_MEDIA") {
-      card.append(createText("p", "candidate-hint", "HLS 스트림 · 화질별 항목이 여러 개 보여도 다운로드 시 최고 화질이 자동 선택됩니다."));
-    }
-
     const meta = document.createElement("div");
     meta.className = "candidate-meta";
-    meta.append(createText("span", "badge", candidate.mediaType));
-    if (candidate.main) meta.append(createText("span", "badge main", "메인 영상"));
-    const button = document.createElement("button");
-    button.className = "download-button";
+    meta.append(text("span", "badge", candidate.main ? `${candidate.mediaType} · 메인` : candidate.mediaType));
+    const button = text("button", "download-button", "다운로드");
     button.type = "button";
-    const canDownload = ["PROGRESSIVE", "HLS_MASTER", "HLS_MEDIA"].includes(candidate.mediaType);
-    button.textContent = canDownload ? "다운로드" : "직접 저장 불가";
-    button.disabled = !canDownload;
-    button.addEventListener("click", () => startDownload(candidate.id, button));
+    button.disabled = !isDownloadableMediaType(candidate.mediaType);
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "요청 중…";
+      try {
+        const response = await chrome.runtime.sendMessage({ type: "download-candidate", candidateId: candidate.id });
+        if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
+        showTab("downloads");
+      } catch (error) {
+        statusElement.textContent = error?.message || "다운로드를 시작하지 못했습니다.";
+        button.disabled = false;
+        button.textContent = "다시 시도";
+      }
+    });
     meta.append(button);
     card.append(meta);
     candidatesElement.append(card);
@@ -160,94 +131,206 @@ function renderCandidates(candidates) {
 }
 
 async function requestCandidates() {
-  setStatus("후보를 불러오는 중…");
+  statusElement.textContent = "현재 페이지의 미디어를 확인하는 중…";
   try {
     const response = await chrome.runtime.sendMessage({ type: "list-candidates" });
-    if (response?.type !== "candidates") throw new Error("candidate response unavailable");
-    renderCandidates(response.candidates || []);
-    setStatus("현재 브라우저에서 감지된 미디어");
+    renderCandidates(response?.candidates || []);
+    statusElement.textContent = "감지된 항목에서 다운로드를 누르세요.";
   } catch {
-    setStatus("확장 서비스를 다시 시작하는 중입니다. 팝오버를 다시 열어 주세요.");
+    statusElement.textContent = "확장 서비스를 다시 로드한 뒤 시도해 주세요.";
   }
 }
 
-async function startDownload(candidateId, button) {
-  if (pendingDownloads.has(candidateId)) return;
-  pendingDownloads.set(candidateId, button);
-  button.disabled = true;
-  button.textContent = "저장 중…";
-  try {
-    const response = await chrome.runtime.sendMessage({ type: "download-candidate", candidateId });
-    pendingDownloads.delete(candidateId);
-    button.disabled = false;
-    button.textContent = response?.ok
-      ? "저장 요청됨"
-      : response?.error === "test-domain-not-allowed" ? "테스트 도메인 필요" : "다시 시도";
-  } catch {
-    pendingDownloads.delete(candidateId);
-    button.disabled = false;
-    button.textContent = "다시 시도";
-  }
-}
-
-async function startUrlDownload() {
-  const url = directUrlElement.value.trim();
-  if (!url) {
-    directStatusElement.textContent = "주소를 입력해 주세요.";
+function renderJobs(jobs) {
+  jobsElement.replaceChildren();
+  if (!jobs.length) {
+    jobsElement.append(text("div", "empty-state", "아직 다운로드 기록이 없습니다."));
+    queueScrollUpdate();
     return;
   }
-  downloadUrlButton.disabled = true;
-  directStatusElement.textContent = "다운로드 요청 중…";
+  for (const job of jobs) {
+    const view = downloadJobView(job);
+    const card = document.createElement("article");
+    card.className = "job-card";
+    const head = document.createElement("div");
+    head.className = "job-head";
+    const title = text("h2", "job-title", view.title);
+    title.title = view.title;
+    const state = text("span", `job-state ${view.status}`, view.statusLabel);
+    head.append(title, state);
+
+    const progress = document.createElement("div");
+    progress.className = `job-progress ${view.progress.mode} status-${view.status}`;
+    if (view.progress.mode !== "failed") {
+      progress.setAttribute("role", "progressbar");
+      progress.setAttribute("aria-label", `${view.title} ${view.stage}`);
+      progress.setAttribute("aria-valuemin", "0");
+      progress.setAttribute("aria-valuemax", "100");
+      if (view.progress.value !== null) progress.setAttribute("aria-valuenow", String(view.progress.value));
+    }
+    const fill = document.createElement("span");
+    fill.className = "job-progress-fill";
+    if (view.progress.value !== null) fill.style.width = `${view.progress.value}%`;
+    progress.append(fill);
+
+    const status = text("p", "job-status", view.message);
+    if (view.status === "failed") status.setAttribute("role", "alert");
+    card.append(head, status, progress);
+    jobsElement.append(card);
+  }
+  queueScrollUpdate();
+}
+
+async function requestJobs() {
   try {
-    const response = await chrome.runtime.sendMessage({ type: "download-url", url });
-    directStatusElement.textContent = response?.ok
-      ? "다운로드 창을 열었습니다."
-      : response?.error === "player-page-unresolved"
-        ? "이 주소에서 영상을 찾지 못했습니다. 페이지를 새로고침한 뒤 영상을 재생하고, 확장 아이콘의 목록에서 다운로드해 보세요."
-      : response?.error === "invalid-url"
-        ? "올바른 http(s) 주소가 아닙니다."
-        : "다운로드에 실패했습니다.";
+    const response = await chrome.runtime.sendMessage({ type: "list-download-jobs" });
+    renderJobs(response?.jobs || []);
   } catch {
-    directStatusElement.textContent = "확장 서비스를 다시 시작한 뒤 다시 시도해 주세요.";
-  } finally {
-    downloadUrlButton.disabled = false;
+    renderJobs([]);
   }
 }
 
-async function rescanCurrentPage(clear = false) {
-  rescanButton.disabled = true;
-  setStatus("현재 페이지를 다시 확인하는 중…");
+async function directDownload() {
+  const input = byId("direct-url");
+  const output = byId("direct-status");
+  const button = byId("download-url");
+  if (!input.value.trim()) { output.textContent = "주소를 입력해 주세요."; return; }
+  button.disabled = true;
+  output.textContent = "주소를 확인하는 중…";
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "download-url", url: input.value.trim() });
+    if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
+    showTab("downloads");
+  } catch (error) {
+    output.textContent = error?.message || "다운로드를 시작하지 못했습니다.";
+  } finally { button.disabled = false; }
+}
+
+async function youtubeDownload() {
+  const input = byId("youtube-url");
+  const output = byId("youtube-status");
+  const button = byId("youtube-download");
+  if (!input.value.trim()) { output.textContent = "YouTube 주소를 입력해 주세요."; return; }
+  button.disabled = true;
+  output.textContent = "YouTube helper를 시작하는 중…";
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "youtube-download",
+      url: input.value.trim(),
+      quality: byId("youtube-quality").value,
+    });
+    if (!response?.ok) throw new Error(response?.error === "invalid-youtube-url" ? "올바른 YouTube 주소가 아닙니다." : "YouTube helper를 실행하지 못했습니다.");
+    showTab("downloads");
+  } catch (error) {
+    output.textContent = error?.message || "YouTube 다운로드를 시작하지 못했습니다.";
+  } finally { button.disabled = false; }
+}
+
+async function rescan() {
+  const button = byId("rescan");
+  button.disabled = true;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab?.id) {
-      if (clear) {
-        try {
-          await chrome.runtime.sendMessage({ type: "clear-tab", tabId: tab.id });
-        } catch { /* best-effort clear */ }
-      }
-      try {
-        await chrome.tabs.sendMessage(tab.id, { type: "rescan" });
-      } catch {
+      await chrome.runtime.sendMessage({ type: "clear-tab", tabId: tab.id }).catch(() => {});
+      await chrome.tabs.sendMessage(tab.id, { type: "rescan" }).catch(async () => {
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
-      }
+      });
     }
-  } catch {
-    setStatus("현재 페이지에 감지기를 연결하지 못했습니다.");
-  }
-  window.setTimeout(() => {
-    rescanButton.disabled = false;
-    void requestCandidates();
-  }, 250);
+    window.setTimeout(() => void requestCandidates(), 250);
+  } finally { button.disabled = false; }
 }
 
-refreshButton.addEventListener("click", () => void requestCandidates());
-rescanButton.addEventListener("click", () => void rescanCurrentPage(true));
-saveTestSettingsButton.addEventListener("click", () => void saveTestSettings());
-downloadUrlButton.addEventListener("click", () => void startUrlDownload());
-mainOnlyElement.addEventListener("change", () => renderCandidates(lastCandidates));
-openSettingsButton.addEventListener("click", () => void chrome.runtime.openOptionsPage());
-directUrlElement.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") void startUrlDownload();
+async function activeTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab || null;
+}
+
+function siteOf(tab) {
+  try {
+    return new URL(tab?.url || "").hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+async function refreshBlockingPanel() {
+  const site = siteOf(await activeTab());
+  const siteElement = byId("blocking-site");
+  const detailElement = byId("blocking-detail");
+  const toggleButton = byId("blocking-toggle");
+  if (!site) {
+    siteElement.textContent = "사이트 정보 없음";
+    detailElement.textContent = "http(s) 페이지에서만 차단 상태를 확인할 수 있습니다.";
+    toggleButton.hidden = true;
+    return;
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "adblock:get-state" });
+    if (!response?.ok) throw new Error("adblock-state-unavailable");
+    const { settings } = response;
+    const allowed = isSiteAllowed(site, settings.siteAllow);
+    siteElement.textContent = site;
+    detailElement.textContent = allowed
+      ? "이 사이트는 허용 목록에 있어 차단하지 않습니다."
+      : settings.enabled
+        ? "광고·추적기 요청을 차단하고 있습니다."
+        : "광고 차단이 꺼져 있습니다.";
+    toggleButton.hidden = !settings.enabled;
+    toggleButton.textContent = allowed ? "이 사이트에서 켜기" : "이 사이트에서 끄기";
+    toggleButton.dataset.allowed = String(allowed);
+    byId("stat-requests").textContent = String(settings.stats.blockedRequests);
+    byId("stat-elements").textContent = String(settings.stats.hiddenElements);
+    byId("stat-popups").textContent = String(settings.stats.suppressedPopups);
+  } catch {
+    siteElement.textContent = site;
+    detailElement.textContent = "차단 상태를 불러오지 못했습니다.";
+  }
+}
+
+async function toggleSiteBlocking() {
+  const tab = await activeTab();
+  const site = siteOf(tab);
+  const toggleButton = byId("blocking-toggle");
+  if (!site || !tab?.id) return;
+  const allowed = toggleButton.dataset.allowed !== "true";
+  toggleButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "adblock:set-site-allowed",
+      site,
+      allowed,
+    });
+    if (!response?.ok) throw new Error("adblock-toggle-failed");
+    await chrome.tabs.sendMessage(tab.id, { type: "adblock:refresh" }).catch(() => {});
+  } finally {
+    toggleButton.disabled = false;
+    await refreshBlockingPanel();
+  }
+}
+
+byId("refresh").addEventListener("click", () => {
+  const active = tabs.find((tab) => tab.getAttribute("aria-selected") === "true")?.dataset.tab;
+  if (active === "downloads") void requestJobs(); else if (active === "detect") void requestCandidates();
 });
-void loadTestSettings();
-void rescanCurrentPage();
+byId("rescan").addEventListener("click", () => void rescan());
+byId("download-url").addEventListener("click", () => void directDownload());
+byId("youtube-download").addEventListener("click", () => void youtubeDownload());
+byId("blocking-toggle").addEventListener("click", () => void toggleSiteBlocking());
+byId("blocking-options").addEventListener("click", () => void chrome.runtime.openOptionsPage());
+byId("direct-url").addEventListener("keydown", (event) => { if (event.key === "Enter") void directDownload(); });
+byId("youtube-url").addEventListener("keydown", (event) => { if (event.key === "Enter") void youtubeDownload(); });
+mainOnlyElement.addEventListener("change", () => renderCandidates(lastCandidates));
+chrome.runtime.onMessage.addListener((message) => { if (message?.type === "download-jobs-changed") void requestJobs(); });
+popupShell.addEventListener("scroll", queueScrollUpdate, { passive: true });
+scrollMoreButton.addEventListener("click", () => {
+  popupShell.scrollBy({
+    top: Math.max(180, Math.round(popupShell.clientHeight * 0.65)),
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+  });
+});
+new MutationObserver(queueScrollUpdate).observe(popupShell, { childList: true, subtree: true });
+
+void requestJobs();
+void requestCandidates();
+queueScrollUpdate();

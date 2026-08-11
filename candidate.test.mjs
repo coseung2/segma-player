@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { MEDIA_TYPES, makeCandidate, mediaTypeForResource, sanitizePageMessage } from "./candidate.js";
+import { isDownloadableMediaType, MEDIA_TYPES, makeCandidate, mediaTypeForResource, sanitizePageMessage } from "./candidate.js";
 import { downloadableMediaUrl, filenameForDownload } from "./download.js";
 
 test("classifies real media path extensions", () => {
@@ -110,6 +110,37 @@ test("keeps blob media-element sources as UNKNOWN instead of a broken button", (
   assert.equal(candidate?.mediaType, MEDIA_TYPES.UNKNOWN);
 });
 
+test("does not promote misleading preview GIF sources to downloadable video", () => {
+  const candidate = makeCandidate({
+    pageTitle: "Related preview",
+    pageUrl: "https://page.example/watch",
+    resourceUrl: "https://cdn.example/cast/preview.gif",
+    contentType: "video/mp4",
+    fromMediaElement: true,
+  });
+  assert.equal(candidate, null);
+});
+
+test("keeps the detecting iframe id on internal download candidates", () => {
+  const candidate = makeCandidate({
+    pageTitle: "Main player",
+    pageUrl: "https://player.example/embed",
+    resourceUrl: "https://cdn.example/playlist.m3u8",
+    contentType: "application/vnd.apple.mpegurl",
+    tabId: 7,
+    frameId: 12,
+  });
+  assert.equal(candidate?.tabId, 7);
+  assert.equal(candidate?.frameId, 12);
+});
+
 test("does not send playlists to the direct download path", () => {
   assert.equal(downloadableMediaUrl("https://media.example/master.m3u8"), null);
+});
+
+test("only progressive and HLS candidates are exposed as directly downloadable", () => {
+  assert.equal(isDownloadableMediaType(MEDIA_TYPES.PROGRESSIVE), true);
+  assert.equal(isDownloadableMediaType(MEDIA_TYPES.HLS_MEDIA), true);
+  assert.equal(isDownloadableMediaType(MEDIA_TYPES.UNKNOWN), false);
+  assert.equal(isDownloadableMediaType(MEDIA_TYPES.DASH), false);
 });

@@ -11,6 +11,7 @@ const routeEvents = [];
 let routeResponse = { ok: true, hosts: ["media.example"] };
 let pingResponse = { ok: true, capabilities: { mediaFetchLease: 1 } };
 let recordedHeaderResponse = { ok: true, headers: {} };
+let decodedKeyResponse = { ok: false };
 let runtimeObserver = () => {};
 globalThis.document = {
   querySelector(selector) {
@@ -27,6 +28,7 @@ globalThis.chrome = {
       runtimeObserver(message);
       if (message.type === "ping-media-stream") return pingResponse;
       if (message.type === "get-request-headers") return recordedHeaderResponse;
+      if (message.type === "decode-hls-key") return decodedKeyResponse;
       if (message.type === "ensure-media-routes") {
         routeEvents.push(message);
         return routeResponse;
@@ -45,14 +47,90 @@ globalThis.chrome = {
 };
 
 const {
+  createDownloadContext,
   ensureCurrentBackground,
   loadRecordedHeaders,
+  MAX_HLS_SEGMENTS,
   mediaChunks,
+  prepareHlsKeys,
   prepareProgressiveFetch,
+  requestPageDecodedKey,
   streamFetchToWritable,
   withMediaFetchLease,
   writeChunk,
 } = await import("./hls-download.js");
+
+test("does not impose a total byte cap and allows long finite HLS playlists", () => {
+  assert.equal(MAX_HLS_SEGMENTS, 10_000);
+});
+
+test("keeps recorded request headers isolated between parallel jobs", async () => {
+  const firstUrl = "https://first.example/video.mp4";
+  const secondUrl = "https://second.example/video.mp4";
+  const first = createDownloadContext();
+  const second = createDownloadContext();
+  recordedHeaderResponse = { ok: true, headers: { [firstUrl]: { Authorization: "Bearer first" } } };
+  await loadRecordedHeaders(first);
+  recordedHeaderResponse = { ok: true, headers: { [secondUrl]: { Authorization: "Bearer second" } } };
+  await loadRecordedHeaders(second);
+  const observed = new Map();
+  globalThis.fetch = async (url, options) => {
+    observed.set(String(url), options.headers.get("authorization"));
+    return { ok: true, status: 200, text: async () => "ok" };
+  };
+
+  await Promise.all([
+    withMediaFetchLease(firstUrl, "https://page.example/first", (response) => response.text(), {}, first),
+    withMediaFetchLease(secondUrl, "https://page.example/second", (response) => response.text(), {}, second),
+  ]);
+  assert.equal(observed.get(firstUrl), "Bearer first");
+  assert.equal(observed.get(secondUrl), "Bearer second");
+});
+
+test("prepares every protected HLS key before segment download can continue off-page", async () => {
+  const keyUrl = "https://media.example/v/preflight-key?test=prepare-all";
+  const statuses = [];
+  const context = createDownloadContext({ onStatus: (message) => statuses.push(message), frameId: 23 });
+  let decodeRequest = null;
+  runtimeObserver = (message) => { if (message.type === "decode-hls-key") decodeRequest = message; };
+  decodedKeyResponse = { ok: true, key: Array.from({ length: 16 }, (_, index) => index) };
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => new Uint8Array(24).buffer,
+  });
+
+  try {
+    const count = await prepareHlsKeys({
+      keys: [
+        { uri: keyUrl, method: "AES-128", startIndex: 0 },
+        { uri: keyUrl, method: "AES-128", startIndex: 5 },
+      ],
+    }, "https://page.example/watch", 17, context);
+    assert.equal(count, 1);
+    assert.equal(decodeRequest?.tabId, 17);
+    assert.equal(decodeRequest?.frameId, 23);
+    assert.ok(statuses.some((message) => message.includes("보호 키 1/1 준비 중")));
+    assert.ok(statuses.some((message) => message.includes("원본 페이지를 벗어나도")));
+  } finally {
+    runtimeObserver = () => {};
+  }
+});
+
+test("requests protected HLS keys from the active page loader", async () => {
+  let decodeRequest = null;
+  runtimeObserver = (message) => { if (message.type === "decode-hls-key") decodeRequest = message; };
+  decodedKeyResponse = { ok: true, key: Array.from({ length: 16 }, (_, index) => index) };
+  const key = await requestPageDecodedKey("https://media.example/v/session?p=0", 17, 23);
+  assert.deepEqual(Array.from(key), Array.from({ length: 16 }, (_, index) => index));
+  assert.equal(decodeRequest?.frameId, 23);
+  decodedKeyResponse = { ok: false, error: "runtime-import-failed" };
+  await assert.rejects(
+    () => requestPageDecodedKey("https://media.example/v/session?p=0", 17, 23),
+    /runtime-import-failed/,
+  );
+  runtimeObserver = () => {};
+});
 
 test("rejects a stale background that lacks the media-fetch lease contract", async () => {
   pingResponse = { ok: true };
@@ -87,7 +165,7 @@ test("holds the lease through response consumption and releases it afterwards", 
   assert.equal(text, "playlist");
   assert.deepEqual(events, ["fetch", "consume"]);
   assert.deepEqual(leaseEvents.map((event) => event.type), ["prepare", "release"]);
-  assert.equal(leaseEvents[1].leaseId, "lease-1");
+  assert.equal(leaseEvents[1].leaseId, `lease-${nextLeaseId}`);
 });
 
 test("streams readable and arrayBuffer responses locally under one lease", async () => {

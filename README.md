@@ -4,7 +4,7 @@
 
 Use this folder as the only development and Chrome/Edge load location:
 
-`C:\Users\malla\Desktop\aura-mdownloader`
+`C:\Users\coseung2\Desktop\Projects\aura-mdownloader`
 
 `C:\Users\malla\Desktop\PersonalVPN-Browser-Extension` is an old copy. Do
 not load or edit that folder; remove it from `chrome://extensions` or
@@ -37,7 +37,7 @@ for personal use:
 3. Confirm the extension ID is `hfpkpbadllkhedocoglbggkpnbaibmcp`.
 4. Keep `aura-vpn` beside this repository, run its Windows setup, then reload
    the extension.
-5. Confirm the loaded extension version is `0.2.27`. If an older version is
+5. Confirm the loaded extension version is `0.2.41`. If an older version is
    shown, remove it and load the canonical folder again.
 
 After an update, open tabs keep running the previous page detector until they
@@ -64,8 +64,8 @@ headers are not written to the route queue or route state.
 
 For the Windows browser workflow, right-click a video or audio element and
 choose “Aura VPN으로 미디어 다운로드”. Direct MP4 and WebM resources use the
-normal Chrome/Edge save dialog. HLS master/media playlists can be downloaded
-and are merged in a temporary extension page; fMP4 segments are saved as MP4
+selected folder. HLS master/media playlists can be downloaded
+and are merged in a hidden offscreen extension document; fMP4 segments are saved as MP4
 and MPEG-TS segments as TS. AES-128 and AES-256 encrypted HLS streams are
 decrypted locally during download (keys are fetched with the same cookies and
 Referer as the segments). Segments are streamed straight to disk as they
@@ -95,11 +95,9 @@ The popover shows candidates for the current tab only. “현재 페이지 다�
 clears that tab's previously detected media first, so stale entries from an
 earlier video or another page do not linger.
 
-Right-click the extension toolbar icon and choose “다운로드 폴더 설정…” (or
-use the same button in the popover) to pick a folder once. When a folder is
-set, downloads save silently to it without a save-location dialog; HLS and
-progressive files stream straight into that folder. Clearing the setting
-restores the per-download save dialog.
+HLS and progressive downloads stream through the installed native helper to
+`Downloads\Aura Media`. The popover has no folder picker, so Chrome's protected
+folder warning is not part of the workflow.
 
 Detection matches the response `Content-Type` as well as the URL path, so
 tokenized playlist addresses that do not end in `.m3u8` are still found — this
@@ -128,10 +126,8 @@ Direct media URLs are refreshed from the player page right before saving, so
 expired token links do not fail immediately. The download page then consumes
 the readable response itself and writes it directly to disk.
 
-The download page shows its own version at the bottom (`v0.2.27`). If it shows
-an older version or reports that the extension was not reloaded, close that
-tab, reload the extension from `chrome://extensions`, and start the download
-again from the popover.
+Downloads run without opening a new browser tab. Their queued, running,
+completed, and failed states are shown in the popover's “다운로드” tab.
 
 DoodStream direct downloads now ask the player iframe itself to re-resolve
 `/pass_md5` at the moment saving starts, so the stream URL is fresh and the
@@ -141,8 +137,8 @@ and Referer-check failures from the background fetch.
 Before each playlist, key, segment, or direct-media request, the extension
 registers a session-scoped rule matching that exact tokenized URL. It supplies
 the recorded Referer and request headers, removes the extension Origin, and
-deletes the rule after the response body is consumed. Rules are also cleaned
-when the download tab closes or navigates.
+deletes the rule after the response body is consumed. Stale rules are also
+cleaned automatically.
 
 All direct MP4/WebM downloads stream through the extension fetch so those
 headers apply on every host. The browser's native download manager is not used
@@ -153,10 +149,8 @@ DoodStream-family pages still re-resolve `/pass_md5` in the player frame before
 the exact-URL request rule is installed. If the readable extension request is
 rejected, the existing page-download fallback remains available.
 
-The save-location picker is opened inside the click gesture before any network
-request, so pasted HLS/MP4 URLs no longer fail with a user-gesture error; when
-the container is only known after loading the playlist, the picked file is
-renamed (`.ts`/`.mp4`) before writing starts.
+The hidden worker writes each download directly through the native
+`Downloads\Aura Media` writer.
 
 Players that hide the stream behind a blob: video source (hls.js-style) no
 longer mark that blob as the main media. The real HLS playlist stays visible
@@ -166,6 +160,42 @@ Every chunk is consumed and written inside the download page; binary data no
 longer crosses Chrome runtime messages. Writes still normalize bytes and use
 an explicit `{ type: "write", data }` parameter.
 
-The popover also has an opt-in development test mode. Enter hosts such as
-`staging.example.com` or `localhost` and save the settings; when test mode is
-enabled, HLS downloads are allowed only for those hosts and their subdomains.
+The popover's “YouTube” tab sends public single-video URLs to the restricted
+`com.aura.youtube_downloader` native host. Run `install-youtube-host.ps1` with
+the portable video-downloader ZIP to install its yt-dlp, Node, and
+FFmpeg tools under `%LOCALAPPDATA%\AuraDownloader\youtube`. The host is a
+Windows GUI-subsystem executable and starts yt-dlp with `CREATE_NO_WINDOW`, so
+no console window is created. YouTube output is written to the Windows
+Downloads folder. Login-only, private, paid, playlist, and DRM bypasses are not
+implemented.
+
+The YouTube tab offers automatic best quality or maximum 2160p, 1440p,
+1080p, 720p, and 480p caps. The native host prefixes the output filename with
+the actual downloaded video height, for example `[1080p] Title [id].mp4`.
+
+## 광고 차단 (Aura VPN 브라우저 확장)
+
+팝업의 “차단” 탭과 설정 페이지에서 개인용 광고 차단을 켜고 끕니다.
+
+- **요청 차단**: `declarativeNetRequest` 동적 규칙으로 광고·추적기 도메인의
+  스크립트/iframe/픽셀 요청을 차단합니다. 규칙은 `adblock/adblock-rules.js`의
+  `AD_HOSTS`(광고), `TRACKER_HOSTS`(추적기) 목록에서 생성됩니다.
+- **빈 광고 영역 제거**: `adblock/adblock-content.js`가 광고 컨테이너/배너
+  선택자를 `display:none`으로 숨기고, 나중에 추가되는 요소는 MutationObserver로
+  따라잡습니다.
+- **팝업·오버레이 차단**: 강함 필터를 켜면 고정(fixed/sticky) 위치의
+  팝업·모달·쿠키 배너류 요소를 숨깁니다. 일반 모달을 덮지 않도록 위치 기반으로만
+  판단합니다.
+- **사이트별 허용**: popup 차단 탭에서 현재 사이트를 허용 목록에 넣거나 뺄 수
+  있고, 설정 페이지에서 전체 허용 목록을 관리합니다. 허용한 사이트에는
+  요청 차단(DNR 규칙의 `excludedInitiatorDomains`)과 요소 숨김이 모두 적용되지
+  않습니다.
+- **차단 통계**: 오늘 날짜 기준 차단 요청·숨긴 광고 영역·차단한 팝업/오버레이
+  수를 popup에 표시합니다. 통계는 `chrome.storage.local`의 `auraAdBlock`에
+  저장되고 날짜가 바뀌면 초기화됩니다.
+- **필터 선택**: 설정 페이지에서 광고/추적기/팝업·오버레이를 개별로 켜고 끌 수
+  있습니다. 기본값은 광고+추적기 켜짐, 팝업·오버레이 꺼짐입니다.
+
+필터는 확장 프로그램에 내장된 개인용 목록이며 원격 업데이트나 라이선스 서버를
+사용하지 않습니다. 도메인이나 선택자를 추가하려면 `adblock/adblock-rules.js`와
+`adblock/adblock-rules.global.js`를 수정하면 됩니다.

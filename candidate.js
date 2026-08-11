@@ -17,6 +17,10 @@ export const MEDIA_TYPES = Object.freeze({
   UNKNOWN: "UNKNOWN",
 });
 
+export function isDownloadableMediaType(value) {
+  return value === MEDIA_TYPES.PROGRESSIVE || value === MEDIA_TYPES.HLS_MASTER || value === MEDIA_TYPES.HLS_MEDIA;
+}
+
 function publicIpLiteral(hostname) {
   if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
     const octets = hostname.split(".").map(Number);
@@ -74,6 +78,11 @@ export function canonicalHttpUrl(value) {
   } catch {
     return null;
   }
+}
+
+export function isImageResourceUrl(value) {
+  const url = canonicalHttpUrl(value);
+  return Boolean(url && /\.(?:avif|gif|jpe?g|png|webp)$/i.test(url.pathname));
 }
 
 export function mediaTypeForResource(resourceUrl, contentType = "") {
@@ -169,23 +178,26 @@ export function variantIdentity(variant) {
 export function makeCandidate({
   pageTitle = "", pageUrl, resourceUrl, contentType = "", likelyAdvertisement = false,
   detectedAt = new Date().toISOString(), variants = [], main = false, tabId = null,
-  fromMediaElement = false,
+  frameId = null, fromMediaElement = false,
 }) {
   if (typeof resourceUrl !== "string" || resourceUrl.length > LIMITS.urlBytes) return null;
   const blob = resourceUrl.startsWith("blob:");
   const canonical = blob ? resourceUrl : canonicalHttpUrl(resourceUrl)?.href;
   const pageCanonical = canonicalHttpUrl(pageUrl);
   const origin = pageCanonical ? `${pageCanonical.protocol}//${pageCanonical.host}` : null;
-  if (!canonical || !origin || typeof pageTitle !== "string" || [...pageTitle].length > LIMITS.titleCharacters
+  if (!canonical || (!blob && isImageResourceUrl(canonical)) || !origin
+    || typeof pageTitle !== "string" || [...pageTitle].length > LIMITS.titleCharacters
     || /[\u0000-\u001f\u007f]/.test(pageTitle) || typeof contentType !== "string"
     || contentType.length > LIMITS.contentTypeBytes || !Array.isArray(variants) || variants.length > LIMITS.variants
-    || (tabId !== null && (!Number.isInteger(tabId) || tabId <= 0))) return null;
+    || (tabId !== null && (!Number.isInteger(tabId) || tabId <= 0))
+    || (frameId !== null && (!Number.isInteger(frameId) || frameId < 0))) return null;
   let mediaType = mediaTypeForResource(canonical, contentType);
   // Video/audio elements and browser "media" network requests are media by
   // definition. Hosts such as DoodStream serve direct MP4 files from URLs with
   // no ".mp4" extension and an application/octet-stream Content-Type, which
   // extension/content-type matching alone would drop.
-  if (mediaType === MEDIA_TYPES.UNKNOWN && fromMediaElement && !blob && !isStreamtapePlayerPage(canonical)) {
+  if (mediaType === MEDIA_TYPES.UNKNOWN && fromMediaElement && !blob
+    && !isImageResourceUrl(canonical) && !isStreamtapePlayerPage(canonical)) {
     mediaType = MEDIA_TYPES.PROGRESSIVE;
   }
   if (mediaType === MEDIA_TYPES.UNKNOWN && !blob) return null;
@@ -203,6 +215,7 @@ export function makeCandidate({
   return {
     id: secureId(),
     tabId: tabId === null ? null : tabId,
+    frameId: frameId === null ? null : frameId,
     pageTitle,
     pageOrigin: origin,
     pageUrl: pageCanonical ? pageCanonical.href : "",
@@ -233,6 +246,7 @@ export function upsertCandidate(candidates, candidate, limit = LIMITS.candidates
     existing.resourceUrl = candidate.resourceUrl;
     existing.displayUrl = candidate.displayUrl;
     if (candidate.tabId != null) existing.tabId = candidate.tabId;
+    if (candidate.frameId != null) existing.frameId = candidate.frameId;
     if (candidate.pageTitle) existing.pageTitle = candidate.pageTitle;
     if (candidate.pageUrl) existing.pageUrl = candidate.pageUrl;
     if (candidate.main) existing.main = true;

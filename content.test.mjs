@@ -13,6 +13,18 @@ test("scans a visible playing media element without a runtime error", async () =
     paused: false,
     getBoundingClientRect: () => ({ width: 640, height: 360 }),
   });
+  const preview = new MockElement();
+  Object.assign(preview, {
+    currentSrc: "https://cdn.example/cast/preview.gif",
+    src: "",
+    tagName: "VIDEO",
+    type: "video/mp4",
+    paused: false,
+    getBoundingClientRect: () => ({ width: 900, height: 500 }),
+  });
+  const embedded = {
+    textContent: "const flashvars = { video_url: 'aHR0cHM6Ly9hc2lhbnBvcm4ubGkvZ2V0X2ZpbGUvMTEvYWJjLzI3NDg2OS5tcDQvP2JyPTE3NjQ=' };",
+  };
 
   globalThis.Element = MockElement;
   globalThis.window = globalThis;
@@ -23,8 +35,9 @@ test("scans a visible playing media element without a runtime error", async () =
     title: "Test video",
     documentElement: {},
     querySelectorAll(selector) {
-      if (selector === "video, audio, source") return [video];
+      if (selector === "video, audio, source") return [video, preview];
       if (selector === "iframe") return [];
+      if (selector === "script") return [embedded];
       return [];
     },
     addEventListener() {},
@@ -49,4 +62,9 @@ test("scans a visible playing media element without a runtime error", async () =
     && message.resourceUrl === "https://media.example/stream-token");
   assert.equal(media?.main, true);
   assert.equal(media?.fromMediaElement, true);
+  assert.equal(sent.some((message) => message.resourceUrl?.endsWith("preview.gif")), false);
+  const configured = sent.find((message) => message.resourceUrl
+    === "https://asianporn.li/get_file/11/abc/274869.mp4/?br=1764");
+  assert.equal(configured?.main, true);
+  assert.equal(configured?.fromMediaElement, true);
 });

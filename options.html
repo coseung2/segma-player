@@ -21,34 +21,11 @@
       .ghost:hover { background: #2c3d55; }
       .ghost[hidden] { display: none; }
       .status { min-height: 16px; margin: 8px 0 0; color: #8f9db0; font-size: 10px; }
-      .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
-      .switch-row strong { font-size: 12px; }
-      .switch-row p { margin: 2px 0 0; color: #9eacc0; font-size: 10px; line-height: 1.45; }
-      .filter-row { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; }
-      .filter-row input { margin: 2px 0 0; accent-color: #4d84e8; }
-      .filter-row label { font-size: 12px; font-weight: 700; }
-      .filter-row p { margin: 2px 0 0; color: #9eacc0; font-size: 10px; line-height: 1.45; }
-      .allow-list { margin: 0; padding: 0; list-style: none; }
-      .allow-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; padding: 8px 10px; border: 1px solid #2a3444; border-radius: 8px; background: #171e2a; font-size: 11px; }
-      .allow-list button { flex: 0 0 auto; min-width: 52px; min-height: 26px; }
     </style>
   </head>
   <body>
     <h1>확장 설정</h1>
     <p class="sub">다운로드 폴더를 지정하면, 다운로드할 때 저장 위치를 묻지 않고 해당 폴더에 바로 저장합니다.</p>
-    <section>
-      <p class="label">광고 차단</p>
-      <p class="desc">VPN과 함께 동작하는 개인용 내장 필터입니다. 사이트별 허용 목록에 추가한 사이트는 차단하지 않습니다.</p>
-      <div class="switch-row">
-        <div><strong>광고 차단 사용</strong><p>끄면 요청 차단과 광고 영역 숨김이 모두 중지됩니다.</p></div>
-        <button id="adblock-enabled" class="ghost" type="button">확인 중…</button>
-      </div>
-      <div id="filter-list"></div>
-      <p class="label">사이트별 허용 목록</p>
-      <p class="desc">여기 추가한 사이트에서는 광고 차단이 동작하지 않습니다.</p>
-      <ul id="allow-list" class="allow-list"></ul>
-      <p id="adblock-status" class="status" role="status" aria-live="polite"></p>
-    </section>
     <section>
       <p class="label">다운로드 폴더</p>
       <p class="desc">HLS 스트림과 MP4/WebM 파일이 이 폴더에 저장됩니다.</p>

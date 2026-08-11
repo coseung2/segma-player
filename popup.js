@@ -1,7 +1,6 @@
 import { candidateDownloadErrorMessage } from "./download-errors.js";
 import { isDownloadableMediaType } from "./candidate.js";
 import { downloadJobView } from "./download-job-view.js";
-import { isSiteAllowed } from "./adblock/adblock-core.js";
 
 const byId = (id) => document.getElementById(id);
 const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -69,7 +68,6 @@ function showTab(name, focus = false) {
   popupShell.scrollTop = 0;
   queueScrollUpdate();
   if (name === "downloads") void requestJobs();
-  if (name === "blocking") void refreshBlockingPanel();
 }
 
 for (const tab of tabs) {
@@ -241,74 +239,6 @@ async function rescan() {
   } finally { button.disabled = false; }
 }
 
-async function activeTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tab || null;
-}
-
-function siteOf(tab) {
-  try {
-    return new URL(tab?.url || "").hostname.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-async function refreshBlockingPanel() {
-  const site = siteOf(await activeTab());
-  const siteElement = byId("blocking-site");
-  const detailElement = byId("blocking-detail");
-  const toggleButton = byId("blocking-toggle");
-  if (!site) {
-    siteElement.textContent = "사이트 정보 없음";
-    detailElement.textContent = "http(s) 페이지에서만 차단 상태를 확인할 수 있습니다.";
-    toggleButton.hidden = true;
-    return;
-  }
-  try {
-    const response = await chrome.runtime.sendMessage({ type: "adblock:get-state" });
-    if (!response?.ok) throw new Error("adblock-state-unavailable");
-    const { settings } = response;
-    const allowed = isSiteAllowed(site, settings.siteAllow);
-    siteElement.textContent = site;
-    detailElement.textContent = allowed
-      ? "이 사이트는 허용 목록에 있어 차단하지 않습니다."
-      : settings.enabled
-        ? "광고·추적기 요청을 차단하고 있습니다."
-        : "광고 차단이 꺼져 있습니다.";
-    toggleButton.hidden = !settings.enabled;
-    toggleButton.textContent = allowed ? "이 사이트에서 켜기" : "이 사이트에서 끄기";
-    toggleButton.dataset.allowed = String(allowed);
-    byId("stat-requests").textContent = String(settings.stats.blockedRequests);
-    byId("stat-elements").textContent = String(settings.stats.hiddenElements);
-    byId("stat-popups").textContent = String(settings.stats.suppressedPopups);
-  } catch {
-    siteElement.textContent = site;
-    detailElement.textContent = "차단 상태를 불러오지 못했습니다.";
-  }
-}
-
-async function toggleSiteBlocking() {
-  const tab = await activeTab();
-  const site = siteOf(tab);
-  const toggleButton = byId("blocking-toggle");
-  if (!site || !tab?.id) return;
-  const allowed = toggleButton.dataset.allowed !== "true";
-  toggleButton.disabled = true;
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: "adblock:set-site-allowed",
-      site,
-      allowed,
-    });
-    if (!response?.ok) throw new Error("adblock-toggle-failed");
-    await chrome.tabs.sendMessage(tab.id, { type: "adblock:refresh" }).catch(() => {});
-  } finally {
-    toggleButton.disabled = false;
-    await refreshBlockingPanel();
-  }
-}
-
 byId("refresh").addEventListener("click", () => {
   const active = tabs.find((tab) => tab.getAttribute("aria-selected") === "true")?.dataset.tab;
   if (active === "downloads") void requestJobs(); else if (active === "detect") void requestCandidates();
@@ -316,8 +246,6 @@ byId("refresh").addEventListener("click", () => {
 byId("rescan").addEventListener("click", () => void rescan());
 byId("download-url").addEventListener("click", () => void directDownload());
 byId("youtube-download").addEventListener("click", () => void youtubeDownload());
-byId("blocking-toggle").addEventListener("click", () => void toggleSiteBlocking());
-byId("blocking-options").addEventListener("click", () => void chrome.runtime.openOptionsPage());
 byId("direct-url").addEventListener("keydown", (event) => { if (event.key === "Enter") void directDownload(); });
 byId("youtube-url").addEventListener("keydown", (event) => { if (event.key === "Enter") void youtubeDownload(); });
 mainOnlyElement.addEventListener("change", () => renderCandidates(lastCandidates));

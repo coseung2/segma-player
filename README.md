@@ -172,30 +172,3 @@ implemented.
 The YouTube tab offers automatic best quality or maximum 2160p, 1440p,
 1080p, 720p, and 480p caps. The native host prefixes the output filename with
 the actual downloaded video height, for example `[1080p] Title [id].mp4`.
-
-## 광고 차단 (Aura VPN 브라우저 확장)
-
-팝업의 “차단” 탭과 설정 페이지에서 개인용 광고 차단을 켜고 끕니다.
-
-- **요청 차단**: `declarativeNetRequest` 동적 규칙으로 광고·추적기 도메인의
-  스크립트/iframe/픽셀 요청을 차단합니다. 규칙은 `adblock/adblock-rules.js`의
-  `AD_HOSTS`(광고), `TRACKER_HOSTS`(추적기) 목록에서 생성됩니다.
-- **빈 광고 영역 제거**: `adblock/adblock-content.js`가 광고 컨테이너/배너
-  선택자를 `display:none`으로 숨기고, 나중에 추가되는 요소는 MutationObserver로
-  따라잡습니다.
-- **팝업·오버레이 차단**: 강함 필터를 켜면 고정(fixed/sticky) 위치의
-  팝업·모달·쿠키 배너류 요소를 숨깁니다. 일반 모달을 덮지 않도록 위치 기반으로만
-  판단합니다.
-- **사이트별 허용**: popup 차단 탭에서 현재 사이트를 허용 목록에 넣거나 뺄 수
-  있고, 설정 페이지에서 전체 허용 목록을 관리합니다. 허용한 사이트에는
-  요청 차단(DNR 규칙의 `excludedInitiatorDomains`)과 요소 숨김이 모두 적용되지
-  않습니다.
-- **차단 통계**: 오늘 날짜 기준 차단 요청·숨긴 광고 영역·차단한 팝업/오버레이
-  수를 popup에 표시합니다. 통계는 `chrome.storage.local`의 `auraAdBlock`에
-  저장되고 날짜가 바뀌면 초기화됩니다.
-- **필터 선택**: 설정 페이지에서 광고/추적기/팝업·오버레이를 개별로 켜고 끌 수
-  있습니다. 기본값은 광고+추적기 켜짐, 팝업·오버레이 꺼짐입니다.
-
-필터는 확장 프로그램에 내장된 개인용 목록이며 원격 업데이트나 라이선스 서버를
-사용하지 않습니다. 도메인이나 선택자를 추가하려면 `adblock/adblock-rules.js`와
-`adblock/adblock-rules.global.js`를 수정하면 됩니다.

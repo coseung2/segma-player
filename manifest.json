@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Personal VPN Media Detector",
-  "version": "0.2.43",
-  "description": "Personal-use media downloader and ad blocker with a local authenticated bridge.",
+  "version": "0.2.42",
+  "description": "Personal-use media candidate detector with a local authenticated bridge.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3azu+Iz7eU9BPPhXlfmaqsH8cmn3y4qNPv8st4b0sugCAIyPeWRw+h/wlXJvilLFoo0OIP0FG3gxZW+lAE2BkdMUmD9R9QLj3qmAD4ECp1S0YQPN6hCsnCNTqNCAgBRgM6VT7Bu0HB5+UhnPrukrVapm2Z7em00QABbkYFBDhSa2hbCItkxN0zOjUKzllaa7/6bq10hTenQe8IvpN0KAw2yWwyLquTyGxlpRc5t+KGwEEAJPij4cOCq4yAAQ44ViIkKJXquZuROOf1qtmZCYJsTyx8nihkxfZZK3vsCt3xztE1c5koYuJm/umdNyElxq4fhq9reGAclGVpXEfjjo8wIDAQAB",
   "permissions": ["activeTab", "contextMenus", "declarativeNetRequest", "nativeMessaging", "offscreen", "scripting", "storage", "webRequest"],
   "host_permissions": ["http://*/*", "https://*/*"],
@@ -30,12 +30,6 @@
     {
       "matches": ["http://*/*", "https://*/*"],
       "js": ["content.js"],
-      "run_at": "document_idle",
-      "all_frames": true
-    },
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["adblock/adblock-rules.global.js", "adblock/adblock-content.js"],
       "run_at": "document_idle",
       "all_frames": true
     }

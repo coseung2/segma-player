@@ -11,7 +11,7 @@ button { cursor: pointer; }
 h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
 .icon-button { width: 34px; height: 34px; border: 1px solid #303b4d; border-radius: 10px; background: #18202c; color: #cdd8e8; font-size: 20px; }
 .icon-button:hover, .icon-button:focus-visible { border-color: #73a5ff; color: #fff; }
-.tab-list { display: grid; width: 100%; min-width: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 15px 0 12px; padding: 4px; border-radius: 11px; background: #171e29; }
+.tab-list { display: grid; width: 100%; min-width: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 15px 0 12px; padding: 4px; border-radius: 11px; background: #171e29; }
 .tab { min-height: 34px; border: 0; border-radius: 8px; background: transparent; color: #8998ad; font-size: 11px; font-weight: 700; }
 .tab.active { background: #2a3e5c; color: #e8f1ff; box-shadow: 0 1px 4px #0005; }
 .tab:focus-visible { outline: 2px solid #73a5ff; outline-offset: 1px; }
@@ -70,11 +70,3 @@ input[type="url"]:focus, select:focus { border-color: #5e94f1; box-shadow: 0 0 0
 .scroll-more:hover, .scroll-more:focus-visible { border-color: #73a5ff; color: #fff; }
 .scroll-more:focus-visible { outline: 2px solid #73a5ff; outline-offset: 2px; }
 .scroll-more svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.blocking-card { padding: 12px; border: 1px solid #2a3546; border-radius: 11px; background: #171e29; }
-.blocking-site { display: block; overflow: hidden; color: #f3f7fd; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.blocking-card .field-status { margin-top: 7px; }
-.blocking-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 11px; }
-.blocking-stat { padding: 10px 6px; border: 1px solid #263349; border-radius: 11px; background: #131a25; text-align: center; }
-.blocking-stat strong { display: block; color: #dcecff; font-size: 17px; letter-spacing: -.01em; }
-.blocking-stat span { display: block; margin-top: 3px; color: #7f90a8; font-size: 9px; line-height: 1.35; }
-#blocking-options { width: 100%; margin-top: 11px; }

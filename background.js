@@ -34,7 +34,6 @@ import {
   progressiveDownloadErrorMessage,
   replayableRecordedHeaders,
 } from "./progressive-redirect.js";
-import { initAdBlock } from "./adblock/adblock-background.js";
 
 const candidates = new Map();
 let nativePort = null;
@@ -1110,4 +1109,3 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 connectWithAppContext();
-void initAdBlock();

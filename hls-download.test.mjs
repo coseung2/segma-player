@@ -54,6 +54,7 @@ const {
   mediaChunks,
   prepareHlsKeys,
   prepareProgressiveFetch,
+  progressiveFilenameFor,
   requestPageDecodedKey,
   streamFetchToWritable,
   withMediaFetchLease,
@@ -62,6 +63,18 @@ const {
 
 test("does not impose a total byte cap and allows long finite HLS playlists", () => {
   assert.equal(MAX_HLS_SEGMENTS, 10_000);
+});
+
+test("uses the detected page title for progressive download filenames", () => {
+  const title = "RLMP-005 의료비 체납의 대가로 악덕 의사와 키 ● 가이 환자에게 마 ● 고가 망가질 때까지 범 × 계속 맨 국물 흘려 어머니 딸.";
+  assert.equal(progressiveFilenameFor({
+    pageTitle: title,
+    resourceUrl: "https://cdn.example/files/token/video.mp4?expires=1",
+  }), `${title}.mp4`);
+  assert.equal(progressiveFilenameFor({
+    pageTitle: "직접 입력한 주소",
+    resourceUrl: "https://cdn.example/files/original.webm?expires=1",
+  }), "original.webm");
 });
 
 test("keeps recorded request headers isolated between parallel jobs", async () => {

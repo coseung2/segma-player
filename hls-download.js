@@ -57,6 +57,16 @@ function filenameFor(title, extension) {
   return `${safe || "aura-hls"}.${extension}`;
 }
 
+export function progressiveFilenameFor(candidate) {
+  const urlFilename = filenameForDownload(candidate?.resourceUrl || "");
+  const extension = /\.([a-z0-9]{2,5})$/i.exec(urlFilename)?.[1] || "mp4";
+  const title = String(candidate?.pageTitle || "").trim();
+  if (!title || title === "직접 입력한 주소") {
+    return /\.[a-z0-9]{2,5}$/i.test(urlFilename) ? urlFilename : `${urlFilename}.mp4`;
+  }
+  return filenameFor(title, extension);
+}
+
 function redactUrlForMessage(url) {
   try {
     const parsed = new URL(url);
@@ -740,8 +750,7 @@ export async function prepareDownloadCandidate(candidate, { folder = null, onSta
   await loadRecordedHeaders(context);
   const progressive = candidate.mediaType === "PROGRESSIVE";
   if (progressive) {
-    let filename = filenameForDownload(candidate.resourceUrl);
-    if (!/\.[a-z0-9]{2,5}$/i.test(filename)) filename = `${filename}.mp4`;
+    const filename = progressiveFilenameFor(candidate);
     setStatus("영상을 확인하는 중…", false, context);
     const session = await prepareProgressiveFetch(
       await progressiveSession(candidate.resourceUrl, candidate.pageUrl, candidate.tabId),
@@ -845,10 +854,7 @@ async function main() {
           }
         } else {
           const provisional = progressive
-            ? (() => {
-              const base = filenameForDownload(candidate.resourceUrl);
-              return /\.[a-z0-9]{2,5}$/i.test(base) ? base : `${base}.mp4`;
-            })()
+            ? progressiveFilenameFor(candidate)
             : filenameFor(candidate.pageTitle, "mp4");
           pickerHandle = await window.showSaveFilePicker({
             suggestedName: provisional,
@@ -862,8 +868,7 @@ async function main() {
         let media = null;
         let filename = "";
         if (progressive) {
-          filename = filenameForDownload(candidate.resourceUrl);
-          if (!/\.[a-z0-9]{2,5}$/i.test(filename)) filename = `${filename}.mp4`;
+          filename = progressiveFilenameFor(candidate);
           setStatus("영상을 저장하는 중…");
         } else {
           media = await loadMediaPlaylist(candidate.resourceUrl, 0, candidate.pageUrl);

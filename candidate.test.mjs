@@ -1,0 +1,115 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { MEDIA_TYPES, makeCandidate, mediaTypeForResource, sanitizePageMessage } from "./candidate.js";
+import { downloadableMediaUrl, filenameForDownload } from "./download.js";
+
+test("classifies real media path extensions", () => {
+  assert.equal(
+    mediaTypeForResource("https://media.example/video.h264.mp4?token=secret"),
+    MEDIA_TYPES.PROGRESSIVE,
+  );
+  assert.equal(
+    mediaTypeForResource("https://media.example/master.m3u8?token=secret"),
+    MEDIA_TYPES.HLS_MEDIA,
+  );
+});
+
+test("classifies tokenized playlists by response content type", () => {
+  assert.equal(
+    mediaTypeForResource("https://media.example/api/stream?id=123&token=secret", "application/vnd.apple.mpegurl"),
+    MEDIA_TYPES.HLS_MEDIA,
+  );
+  assert.equal(
+    mediaTypeForResource("https://media.example/api/stream?id=123&token=secret", "application/dash+xml"),
+    MEDIA_TYPES.DASH,
+  );
+});
+
+test("classifies audio and video response types as progressive media", () => {
+  assert.equal(
+    mediaTypeForResource("https://media.example/stream?id=1", "audio/mp4"),
+    MEDIA_TYPES.PROGRESSIVE,
+  );
+  assert.equal(
+    mediaTypeForResource("https://media.example/stream?id=1", "video/mp4"),
+    MEDIA_TYPES.PROGRESSIVE,
+  );
+});
+
+test("does not classify thumbnails containing .mp4 in the middle", () => {
+  assert.equal(
+    mediaTypeForResource("https://image.example/video.mp4.thumb.webp?expires=1"),
+    MEDIA_TYPES.UNKNOWN,
+  );
+});
+
+test("recognizes a Streamtape .mp4 player page before extension classification", () => {
+  const playerUrl = "https://streamtape.com/v/goD2mWXvD3CqlJ8/0703_%281%29.mp4";
+  assert.equal(mediaTypeForResource(playerUrl, "text/html"), MEDIA_TYPES.UNKNOWN);
+  assert.equal(
+    makeCandidate({
+      pageTitle: "Streamtape",
+      pageUrl: playerUrl,
+      resourceUrl: playerUrl,
+      contentType: "text/html",
+      fromMediaElement: true,
+    }),
+    null,
+  );
+});
+
+test("creates a direct Windows download URL for progressive media", () => {
+  const resourceUrl = "https://media.example/video.mp4?token=secret";
+  assert.equal(downloadableMediaUrl(resourceUrl), resourceUrl);
+  assert.equal(filenameForDownload(resourceUrl), "video.mp4");
+});
+
+test("accepts extensionless media-element sources as progressive media", () => {
+  const resourceUrl = "https://srv123.doodcdn.io/getfile/abc123?token=secret&expiry=1";
+  const candidate = makeCandidate({
+    pageTitle: "Video",
+    pageUrl: "https://player.example/e/xyz",
+    resourceUrl,
+    contentType: "application/octet-stream",
+    fromMediaElement: true,
+  });
+  assert.equal(candidate?.mediaType, MEDIA_TYPES.PROGRESSIVE);
+  assert.equal(
+    makeCandidate({
+      pageTitle: "Video",
+      pageUrl: "https://player.example/e/xyz",
+      resourceUrl,
+      contentType: "application/octet-stream",
+    }),
+    null,
+  );
+});
+
+test("sanitizes extensionless media-element messages as progressive media", () => {
+  const candidate = sanitizePageMessage({
+    type: "resource",
+    pageTitle: "Video",
+    pageUrl: "https://player.example/e/xyz",
+    resourceUrl: "https://srv123.doodcdn.io/getfile/abc123?token=secret&expiry=1",
+    contentType: "application/octet-stream",
+    fromMediaElement: true,
+  });
+  assert.equal(candidate?.mediaType, MEDIA_TYPES.PROGRESSIVE);
+  assert.equal(candidate?.resourceUrl, "https://srv123.doodcdn.io/getfile/abc123?token=secret&expiry=1");
+});
+
+test("keeps blob media-element sources as UNKNOWN instead of a broken button", () => {
+  const candidate = makeCandidate({
+    pageTitle: "Video",
+    pageUrl: "https://player.example/e/xyz",
+    resourceUrl: "blob:https://player.example/7a7a0f4b-1234",
+    contentType: "",
+    fromMediaElement: true,
+  });
+  assert.equal(candidate?.mediaType, MEDIA_TYPES.UNKNOWN);
+});
+
+test("does not send playlists to the direct download path", () => {
+  assert.equal(downloadableMediaUrl("https://media.example/master.m3u8"), null);
+});

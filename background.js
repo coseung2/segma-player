@@ -1,0 +1,866 @@
+import {
+  LIMITS,
+  MEDIA_TYPES,
+  canonicalHttpUrl,
+  makeCandidate,
+  mediaTypeForResource,
+  normalizeOriginPath,
+  redactCandidateForUi,
+  sanitizePageMessage,
+  toTextOnlyRows,
+  upsertCandidate,
+} from "./candidate.js";
+import { BRIDGE_CONTEXT, BRIDGE_EXTENSION_ID, BridgeClientSession } from "./bridge.js";
+import { DOWNLOAD_MENU_ID } from "./download.js";
+import { createMediaRouteClient } from "./route-client.js";
+import {
+  canonicalMediaFetchReferrer,
+  canonicalMediaFetchUrl,
+  createMediaFetchLeaseRegistry,
+  createMediaFetchRuleIdAllocator,
+  exactMediaFetchRule,
+  MEDIA_FETCH_RULE_ID_START,
+} from "./media-fetch-lease.js";
+import { looksLikePlayerPage, resolvePlayerPage } from "./player-page-resolver.js";
+import {
+  authenticatedRecoveryForProgressiveError,
+  createProgressiveRedirectResolver,
+  progressiveDownloadErrorMessage,
+  replayableRecordedHeaders,
+} from "./progressive-redirect.js";
+
+const candidates = new Map();
+let nativePort = null;
+let bridgeSession = null;
+const TEST_MODE_KEY = "auraTestMode";
+const TEST_DOMAINS_KEY = "auraTestDomains";
+const RECORDED_HEADER_LIMIT = 1000;
+const recordedHeaders = new Map();
+const mainFramesByTab = new Map();
+const doodDirectByTab = new Map();
+const nonPersistentCandidates = new WeakSet();
+const SESSION_CANDIDATES_KEY = "candidates";
+const tabTitleCache = new Map();
+const SETTINGS_MENU_ID = "personal-vpn-settings";
+let persistTimer = null;
+const DOOD_MEDIA_HOST_RE = /(?:doodcdn|doimg|d000d|dood\.|playmogo|cloudatacdn)\./i;
+const MEDIA_FETCH_LEASE_TTL_MS = 10 * 60 * 1000;
+const MEDIA_FETCH_STALE_SWEEP_LIMIT = 16;
+const mediaFetchRuleIds = createMediaFetchRuleIdAllocator();
+const mediaFetchLeases = createMediaFetchLeaseRegistry({
+  staleAfterMs: MEDIA_FETCH_LEASE_TTL_MS,
+});
+const mediaRouteClient = createMediaRouteClient();
+const progressiveRedirectResolver = createProgressiveRedirectResolver({
+  ensureRoutes: (urls) => mediaRouteClient.ensureRoutes(urls),
+  getRequestHeaders: (url) => {
+    const recorded = recordedHeaders.get(canonicalMediaFetchUrl(url));
+    return replayableRecordedHeaders(recorded);
+  },
+});
+const mediaFetchRulesReady = chrome.declarativeNetRequest.getSessionRules().then(async (rules) => {
+  const removeRuleIds = rules
+    .map((rule) => rule.id)
+    .filter((ruleId) => Number.isInteger(ruleId) && ruleId >= MEDIA_FETCH_RULE_ID_START);
+  if (removeRuleIds.length) {
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules: [] });
+  }
+}).catch(() => {});
+
+function isLikelyDoodMediaHost(url) {
+  try {
+    return DOOD_MEDIA_HOST_RE.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function recordedHeadersForUrl(url) {
+  const recorded = recordedHeaders.get(canonicalMediaFetchUrl(url));
+  if (!recorded) return [];
+  return Object.entries(replayableRecordedHeaders(recorded))
+    .filter(([, value]) => value.length <= 2048)
+    .map(([header, value]) => ({ header, operation: "set", value }));
+}
+
+function validMediaFetchSender(sender) {
+  return sender?.id === chrome.runtime.id
+    && Number.isInteger(sender.tab?.id)
+    && sender.tab.id > 0
+    && typeof sender.tab.url === "string"
+    && sender.tab.url.startsWith(chrome.runtime.getURL("download.html"));
+}
+
+function validMediaRouteSender(sender) {
+  const downloadUrl = chrome.runtime.getURL("download.html");
+  const senderUrl = sender?.tab?.url;
+  return sender?.id === chrome.runtime.id
+    && Number.isInteger(sender.tab?.id)
+    && sender.tab.id > 0
+    && (senderUrl === downloadUrl || senderUrl?.startsWith(`${downloadUrl}?`) || senderUrl?.startsWith(`${downloadUrl}#`));
+}
+
+async function removeMediaFetchLease(lease) {
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [lease.ruleId],
+      addRules: [],
+    });
+  } catch {
+    return false;
+  }
+  mediaFetchLeases.remove(lease.leaseId);
+  mediaFetchRuleIds.release(lease.ruleId);
+  return true;
+}
+
+async function cleanupStaleMediaFetchLeases() {
+  const stale = mediaFetchLeases.stale(Date.now(), MEDIA_FETCH_STALE_SWEEP_LIMIT);
+  for (const lease of stale) {
+    if (!await removeMediaFetchLease(lease)) {
+      console.warn("Aura media fetch lease cleanup failed");
+    }
+  }
+}
+
+async function prepareMediaFetchLease(sender, rawUrl, rawReferrer) {
+  if (!validMediaFetchSender(sender)) return { ok: false, error: "unauthorized" };
+  const url = canonicalMediaFetchUrl(rawUrl);
+  if (!url) return { ok: false, error: "invalid-url" };
+  let referrer = "";
+  if (rawReferrer !== undefined && rawReferrer !== "") {
+    if (typeof rawReferrer !== "string") return { ok: false, error: "invalid-referrer" };
+    referrer = canonicalMediaFetchReferrer(rawReferrer) || "";
+    if (!referrer) return { ok: false, error: "invalid-referrer" };
+  } else {
+    const recorded = recordedHeaders.get(url);
+    referrer = canonicalMediaFetchReferrer(recorded?.referer || recorded?.referrer) || "";
+  }
+
+  await mediaFetchRulesReady;
+  await cleanupStaleMediaFetchLeases();
+  let ruleId;
+  try {
+    ruleId = mediaFetchRuleIds.allocate();
+  } catch {
+    return { ok: false, error: "media-fetch-unavailable" };
+  }
+  let rule;
+  try {
+    rule = exactMediaFetchRule({
+      ruleId,
+      tabId: sender.tab.id,
+      url,
+      referrer,
+      requestHeaders: recordedHeadersForUrl(url),
+    });
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [],
+      addRules: [rule],
+    });
+  } catch {
+    mediaFetchRuleIds.release(ruleId);
+    return { ok: false, error: "media-fetch-rule-failed" };
+  }
+
+  let lease;
+  try {
+    lease = mediaFetchLeases.create({
+      tabId: sender.tab.id,
+      url,
+      referrer,
+      ruleId,
+    });
+  } catch {
+    await removeMediaFetchLease({ leaseId: "", ruleId });
+    return { ok: false, error: "media-fetch-unavailable" };
+  }
+  return { ok: true, leaseId: lease.leaseId };
+}
+
+async function releaseMediaFetchLeaseForSender(sender, leaseId) {
+  if (!validMediaFetchSender(sender)) return { ok: false, error: "unauthorized" };
+  if (typeof leaseId !== "string" || leaseId.length === 0) {
+    return { ok: false, error: "invalid-lease" };
+  }
+  const lease = mediaFetchLeases.get(leaseId);
+  if (!lease || lease.tabId !== sender.tab.id) return { ok: false, error: "lease-not-found" };
+  if (!await removeMediaFetchLease(lease)) return { ok: false, error: "media-fetch-release-failed" };
+  return { ok: true };
+}
+
+function touchMediaFetchLeaseForSender(sender, leaseId) {
+  if (!validMediaFetchSender(sender)) return { ok: false, error: "unauthorized" };
+  if (typeof leaseId !== "string" || leaseId.length === 0) {
+    return { ok: false, error: "invalid-lease" };
+  }
+  const lease = mediaFetchLeases.get(leaseId);
+  if (!lease || lease.tabId !== sender.tab.id) return { ok: false, error: "lease-not-found" };
+  mediaFetchLeases.touch(leaseId);
+  return { ok: true };
+}
+
+async function releaseMediaFetchLeasesForTab(tabId) {
+  for (const lease of mediaFetchLeases.forTab(tabId)) {
+    if (!await removeMediaFetchLease(lease)) {
+      console.warn("Aura media fetch tab cleanup failed");
+    }
+  }
+}
+
+setInterval(() => {
+  void cleanupStaleMediaFetchLeases();
+}, 60_000);
+
+function configureDownloadMenu() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: DOWNLOAD_MENU_ID,
+      title: "Aura VPN으로 미디어 다운로드",
+      contexts: ["video", "audio"],
+    });
+    chrome.contextMenus.create({
+      id: SETTINGS_MENU_ID,
+      title: "다운로드 폴더 설정…",
+      contexts: ["action"],
+    });
+  });
+}
+
+function isHlsCandidate(candidate) {
+  return candidate?.mediaType === "HLS_MASTER" || candidate?.mediaType === "HLS_MEDIA";
+}
+
+async function hlsDownloadAllowed(candidate) {
+  const settings = await chrome.storage.local.get({ [TEST_MODE_KEY]: false, [TEST_DOMAINS_KEY]: [] });
+  if (!settings[TEST_MODE_KEY]) return true;
+  let hostname = "";
+  try { hostname = new URL(candidate.pageOrigin).hostname.toLowerCase().replace(/\.$/, ""); } catch { return false; }
+  const domains = Array.isArray(settings[TEST_DOMAINS_KEY]) ? settings[TEST_DOMAINS_KEY] : [];
+  return domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+}
+
+async function openDownloadPage(candidate) {
+  if (!await hlsDownloadAllowed(candidate)) throw new Error("test-domain-not-allowed");
+  const url = new URL(chrome.runtime.getURL("download.html"));
+  url.searchParams.set("candidateId", candidate.id);
+  const tab = await chrome.tabs.create({ url: url.href });
+  return tab?.id ?? null;
+}
+
+async function beginCandidateDownload(candidate) {
+  await mediaRouteClient.ensureRoutes([candidate.pageUrl, candidate.resourceUrl]);
+  if (candidate.mediaType === "PROGRESSIVE") {
+    return { mode: "stream", downloadTabId: await openDownloadPage(candidate) };
+  }
+  if (isHlsCandidate(candidate)) {
+    return { mode: "hls", downloadTabId: await openDownloadPage(candidate) };
+  }
+  throw new Error("unsupported-media");
+}
+
+async function sniffMediaContentType(url) {
+  await mediaRouteClient.ensureRoutes([url]);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Range: "bytes=0-0" },
+      credentials: "include",
+      redirect: "follow",
+    });
+    if (!response.ok && response.status !== 206) return "";
+    const header = response.headers?.get?.("content-type") || "";
+    await response.body?.cancel?.().catch(() => {});
+    return header;
+  } catch {
+    return "";
+  }
+}
+
+function forwardCandidate(candidate) {
+  if (!nativePort || !bridgeSession?.authenticated || candidate.resourceUrl.startsWith("blob:")) return;
+  try {
+    nativePort.postMessage(bridgeSession.candidateEnvelope(candidate));
+  } catch {
+    // The session remains closed; no sensitive diagnostic is emitted.
+  }
+}
+
+function popupCandidate(candidate) {
+  const projection = redactCandidateForUi(candidate);
+  const previewUrl = canonicalHttpUrl(candidate.resourceUrl)?.href || null;
+  return { ...projection, previewUrl };
+}
+
+function playerCandidateHasQuery(candidate) {
+  if (!looksLikePlayerPage(candidate?.pageUrl)) return false;
+  try { return Boolean(new URL(candidate.resourceUrl).search); } catch { return false; }
+}
+
+function observeCandidate(candidate, { nonPersistent = false } = {}) {
+  if (!candidate) return null;
+  if (!nativePort) connectWithAppContext();
+  const stored = upsertCandidate(candidates, candidate, LIMITS.candidates);
+  if (nonPersistent || playerCandidateHasQuery(stored)) nonPersistentCandidates.add(stored);
+  forwardCandidate(stored);
+  persistCandidates();
+  return stored;
+}
+
+function persistCandidates() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    try {
+      const snapshot = [...candidates.values()]
+        .filter((candidate) => !nonPersistentCandidates.has(candidate));
+      void chrome.storage.session.set({ [SESSION_CANDIDATES_KEY]: snapshot }).catch(() => {});
+    } catch {
+      // Session storage can be unavailable briefly while the worker restarts.
+    }
+  }, 300);
+}
+
+if (chrome.storage?.session) {
+  chrome.storage.session.get({ [SESSION_CANDIDATES_KEY]: [] }).then(({ [SESSION_CANDIDATES_KEY]: saved }) => {
+    if (!Array.isArray(saved)) return;
+    for (const item of saved) {
+      const restored = upsertCandidate(candidates, item, LIMITS.candidates);
+      if (playerCandidateHasQuery(restored)) nonPersistentCandidates.add(restored);
+    }
+  }).catch(() => {});
+}
+
+function observeResource(input, tabId) {
+  const candidate = makeCandidate({ ...input, tabId: tabId || null });
+  if (!candidate) return null;
+  if (!candidate.main && isMainFrame(tabId, input.frameUrl)) candidate.main = true;
+  return observeCandidate(candidate);
+}
+
+function isMainFrame(tabId, frameUrl) {
+  if (!tabId || !frameUrl) return false;
+  const frames = mainFramesByTab.get(tabId);
+  if (!frames || frames.size === 0) return false;
+  const key = normalizeOriginPath(frameUrl);
+  return key ? frames.has(key) : false;
+}
+
+async function tabTitle(tabId) {
+  if (!Number.isInteger(tabId) || tabId <= 0) return "";
+  const cached = tabTitleCache.get(tabId);
+  if (cached && Date.now() - cached.at < 15000) return cached.title;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const title = tab?.title || "";
+    tabTitleCache.set(tabId, { title, at: Date.now() });
+    return title;
+  } catch {
+    return "";
+  }
+}
+
+function connectNativeBridge(configuration) {
+  if (nativePort || !configuration) return;
+  try {
+    bridgeSession = new BridgeClientSession(configuration);
+    nativePort = chrome.runtime.connectNative("com.personalvpn.bridge");
+    nativePort.onMessage.addListener((message) => {
+      if (bridgeSession?.acceptAck(message)) {
+        for (const candidate of candidates.values()) forwardCandidate(candidate);
+      }
+    });
+    nativePort.onDisconnect.addListener(() => {
+      // Reading lastError marks the native-port disconnect as handled. Chrome
+      // otherwise reports an unchecked runtime error when an extension reload
+      // closes the previous host connection.
+      void chrome.runtime.lastError;
+      nativePort = null;
+      bridgeSession = null;
+    });
+    nativePort.postMessage(bridgeSession.beginHello());
+  } catch {
+    nativePort = null;
+    bridgeSession = null;
+  }
+}
+
+function connectWithAppContext() {
+  connectNativeBridge({
+    expectedSecret: BRIDGE_CONTEXT,
+    sessionId: `extension-${crypto.randomUUID()}`,
+    expiresAtMs: Date.now() + 15 * 60 * 1000,
+  });
+}
+
+function usableRequestHeader(name, value) {
+  const lower = String(name || "").toLowerCase();
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048) return false;
+  if (["cookie", "host", "content-length", "connection", "accept-encoding", "cache-control", "pragma", "te", "upgrade", "priority", "range"].includes(lower)) return false;
+  if (lower.startsWith("sec-fetch-") || lower.startsWith("sec-ch-ua")) return false;
+  return true;
+}
+
+function recordRequestHeaders(details) {
+  const normalizedUrl = canonicalMediaFetchUrl(details.url);
+  if (!normalizedUrl) return;
+  const headers = {};
+  for (const header of details.requestHeaders || []) {
+    if (usableRequestHeader(header.name, header.value)) headers[header.name.toLowerCase()] = String(header.value).slice(0, 2048);
+  }
+  if (!Object.keys(headers).length) return;
+  recordedHeaders.set(normalizedUrl, headers);
+  while (recordedHeaders.size > RECORDED_HEADER_LIMIT) {
+    recordedHeaders.delete(recordedHeaders.keys().next().value);
+  }
+}
+
+function sendTabMessageWithTimeout(tabId, message, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; resolve(null); }
+    }, timeoutMs);
+    chrome.tabs.sendMessage(tabId, message).then((response) => {
+      if (!settled) { settled = true; clearTimeout(timer); resolve(response || null); }
+    }).catch(() => {
+      if (!settled) { settled = true; clearTimeout(timer); resolve(null); }
+    });
+  });
+}
+
+chrome.webRequest.onSendHeaders.addListener(
+  (details) => {
+    recordRequestHeaders(details);
+  },
+  { urls: ["http://*/*", "https://*/*"] },
+  ["requestHeaders"],
+);
+
+chrome.action.onClicked.addListener(async (tab) => {
+  if (!tab.id || !tab.url) return;
+  const url = canonicalHttpUrl(tab.url);
+  if (!url) return;
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+});
+
+async function reinjectContentScripts() {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({}); } catch { return; }
+  const targets = tabs.filter((tab) => tab?.id).map((tab) => ({ tabId: tab.id }));
+  if (!targets.length) return;
+  await Promise.allSettled(targets.map((target) => chrome.scripting.executeScript({
+    target,
+    files: ["content.js"],
+  })));
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  configureDownloadMenu();
+  void reinjectContentScripts();
+});
+chrome.runtime.onStartup.addListener(connectWithAppContext);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  mainFramesByTab.delete(tabId);
+  tabTitleCache.delete(tabId);
+  doodDirectByTab.delete(tabId);
+  void releaseMediaFetchLeasesForTab(tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== "loading" || !changeInfo.url) return;
+  mainFramesByTab.delete(tabId);
+  tabTitleCache.delete(tabId);
+  doodDirectByTab.delete(tabId);
+  void releaseMediaFetchLeasesForTab(tabId);
+  for (const [key, item] of candidates) {
+    if (item.tabId === tabId) candidates.delete(key);
+  }
+  persistCandidates();
+});
+configureDownloadMenu();
+
+chrome.contextMenus.onClicked.addListener((info) => {
+  if (info.menuItemId === SETTINGS_MENU_ID) {
+    void chrome.runtime.openOptionsPage();
+    return;
+  }
+  if (info.menuItemId !== DOWNLOAD_MENU_ID || !info.srcUrl) return;
+  const candidate = [...candidates.values()].find((item) => item.resourceUrl === info.srcUrl);
+  if (isHlsCandidate(candidate)) {
+    void openDownloadPage(candidate).catch(() => {});
+    return;
+  }
+  if (candidate?.mediaType === "PROGRESSIVE") {
+    void beginCandidateDownload(candidate).catch(() => {});
+    return;
+  }
+  const url = canonicalHttpUrl(info.srcUrl);
+  if (!url) return;
+  const fallback = observeResource({
+    pageTitle: "우클릭한 영상",
+    pageUrl: url.href,
+    resourceUrl: url.href,
+    contentType: "video/mp4",
+  });
+  if (fallback) void beginCandidateDownload(fallback).catch(() => {});
+});
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    void tabTitle(details.tabId).then((title) => {
+      observeResource({
+        pageTitle: title,
+        pageUrl: details.documentUrl || details.initiator || details.url,
+        frameUrl: details.documentUrl || details.initiator || details.url,
+        resourceUrl: details.url,
+        contentType: details.type || "",
+        fromMediaElement: details.type === "media" || isLikelyDoodMediaHost(details.url),
+      }, details.tabId);
+    });
+  },
+  { urls: ["http://*/*", "https://*/*"] },
+);
+
+// Many video sites hide playlists behind tokenized proxy URLs that do not end
+// in ".m3u8" (common on pages that also lock DevTools). Match the response
+// Content-Type instead so the detector works without ever opening F12.
+chrome.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    const contentType = (details.responseHeaders || []).find((header) => header.name.toLowerCase() === "content-type")?.value || "";
+    if (!contentType) return;
+    void tabTitle(details.tabId).then((title) => {
+      observeResource({
+        pageTitle: title,
+        pageUrl: details.documentUrl || details.initiator || details.url,
+        frameUrl: details.documentUrl || details.initiator || details.url,
+        resourceUrl: details.url,
+        contentType,
+        fromMediaElement: details.type === "media" || isLikelyDoodMediaHost(details.url),
+      }, details.tabId);
+    });
+  },
+  { urls: ["http://*/*", "https://*/*"] },
+  ["responseHeaders"],
+);
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "list-candidates" && !sender.tab) {
+    if (!nativePort) connectWithAppContext();
+    (async () => {
+      let activeTabId = null;
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        activeTabId = tab?.id ?? null;
+      } catch { /* popup may open before tabs API is ready */ }
+      const all = [...candidates.values()].map(popupCandidate);
+      const filtered = activeTabId == null ? all : all.filter((candidate) => candidate.tabId === activeTabId);
+      sendResponse({
+        type: "candidates",
+        renderMode: "text-only",
+        candidates: filtered,
+        rows: toTextOnlyRows(filtered),
+      });
+    })();
+    return true;
+  }
+
+  if (message?.type === "download-candidate" && !sender.tab) {
+    const candidate = [...candidates.values()].find((item) => item.id === message.candidateId);
+    if (!candidate) {
+      sendResponse({
+        type: "download-result",
+        candidateId: message.candidateId,
+        ok: false,
+        error: "candidate-not-found",
+      });
+      return false;
+    }
+
+    Promise.resolve(beginCandidateDownload(candidate)).then(
+      (result) => sendResponse({ type: "download-result", candidateId: candidate.id, ok: true, ...result }),
+      () => sendResponse({ type: "download-result", candidateId: candidate.id, ok: false, error: "unsupported-media" }),
+    );
+    return true;
+  }
+
+  if (message?.type === "prepare-media-fetch") {
+    prepareMediaFetchLease(sender, message.url, message.referrer).then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === "release-media-fetch") {
+    releaseMediaFetchLeaseForSender(sender, message.leaseId).then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === "touch-media-fetch") {
+    sendResponse(touchMediaFetchLeaseForSender(sender, message.leaseId));
+    return false;
+  }
+
+  if (message?.type === "ensure-media-routes") {
+    if (!validMediaRouteSender(sender)) {
+      sendResponse({ ok: false, error: "unauthorized" });
+      return false;
+    }
+    mediaRouteClient.ensureRoutes(message.urls).then(
+      (result) => sendResponse(result),
+      (error) => sendResponse({ ok: false, error: error?.code || "route-preparation-failed" }),
+    );
+    return true;
+  }
+
+  if (message?.type === "get-candidate-for-download" && sender.id === chrome.runtime.id) {
+    const candidate = [...candidates.values()].find((item) => item.id === message.candidateId);
+    if (!candidate) {
+      sendResponse({ ok: false, error: "candidate-not-found" });
+      return false;
+    }
+    sendResponse({
+      ok: true,
+      candidateId: candidate.id,
+      tabId: candidate.tabId,
+      pageTitle: candidate.pageTitle,
+      pageUrl: candidate.pageUrl,
+      mediaType: candidate.mediaType,
+      resourceUrl: candidate.resourceUrl,
+    });
+    return false;
+  }
+
+  if (message?.type === "get-request-headers" && sender.id === chrome.runtime.id
+    && sender.tab?.url?.startsWith(chrome.runtime.getURL("download.html"))) {
+    const headers = {};
+    for (const [originPath, value] of recordedHeaders) headers[originPath] = value;
+    sendResponse({ ok: true, headers });
+    return false;
+  }
+
+  if (message?.type === "ping-media-stream" && sender.id === chrome.runtime.id
+    && sender.tab?.url?.startsWith(chrome.runtime.getURL("download.html"))) {
+    sendResponse({
+      ok: true,
+      version: chrome.runtime.getManifest().version,
+      capabilities: { mediaFetchLease: 1 },
+    });
+    return false;
+  }
+
+  if (message?.type === "download-url" && !sender.tab) {
+    const resourceUrl = canonicalHttpUrl(message.url);
+    if (!resourceUrl) {
+      sendResponse({ type: "download-result", candidateId: null, ok: false, error: "invalid-url" });
+      return false;
+    }
+    (async () => {
+      await mediaRouteClient.ensureRoutes([resourceUrl.href]);
+      let targetUrl = resourceUrl.href;
+      let pageReferrer = resourceUrl.href;
+      let progressive = false;
+      let hls = false;
+      if (looksLikePlayerPage(targetUrl)) {
+        // The pasted URL is likely a player page (playmogo /d/ or /e/, dood.to,
+        // etc.). Resolve the embedded direct stream automatically.
+        const resolved = await resolvePlayerPage(targetUrl, {
+          ensureRoute: (urls) => mediaRouteClient.ensureRoutes(urls),
+        });
+        if (resolved?.url) {
+          targetUrl = resolved.url;
+          progressive = true;
+          pageReferrer = resolved.referrer || pageReferrer;
+        } else {
+          sendResponse({
+            type: "download-result",
+            candidateId: null,
+            ok: false,
+            error: "player-page-unresolved",
+          });
+          return;
+        }
+      } else {
+        const initialType = mediaTypeForResource(resourceUrl.href);
+        progressive = initialType === MEDIA_TYPES.PROGRESSIVE;
+        hls = initialType === MEDIA_TYPES.HLS_MASTER || initialType === MEDIA_TYPES.HLS_MEDIA;
+        if (!progressive && !hls) {
+          const sniffed = await sniffMediaContentType(targetUrl);
+          if (/mpegurl|vnd\.apple\.mpegurl/i.test(sniffed)) {
+            hls = true;
+          } else if (/^video\//i.test(sniffed) || /octet-stream/i.test(sniffed) || /^audio\//i.test(sniffed)) {
+            progressive = true;
+          } else if (!sniffed) {
+            progressive = /\.(?:mp4|webm)(?:$|[?#])/i.test(targetUrl)
+              || /getfile|download|stream/i.test(targetUrl);
+          }
+        }
+      }
+      const canonicalTarget = canonicalHttpUrl(targetUrl);
+      if (!canonicalTarget) {
+        sendResponse({ type: "download-result", candidateId: null, ok: false, error: "invalid-url" });
+        return;
+      }
+      await mediaRouteClient.ensureRoutes([resourceUrl.href, pageReferrer, canonicalTarget.href]);
+      const candidate = observeResource({
+        pageTitle: "직접 입력한 주소",
+        pageUrl: pageReferrer,
+        resourceUrl: canonicalTarget.href,
+        contentType: progressive ? "video/mp4" : "application/vnd.apple.mpegurl",
+      });
+      if (!candidate) {
+        sendResponse({ type: "download-result", candidateId: null, ok: false, error: "invalid-url" });
+        return;
+      }
+      Promise.resolve(beginCandidateDownload(candidate)).then(
+        (result) => sendResponse({ type: "download-result", candidateId: candidate.id, ok: true, ...result }),
+        () => sendResponse({ type: "download-result", candidateId: candidate.id, ok: false, error: "unsupported-media" }),
+      );
+    })().catch((error) => {
+      sendResponse({
+        type: "download-result",
+        candidateId: null,
+        ok: false,
+        error: error?.code || "route-preparation-failed",
+      });
+    });
+    return true;
+  }
+
+  if (message?.type === "clear-tab" && !sender.tab && Number.isInteger(message.tabId)) {
+    for (const [key, item] of candidates) {
+      if (item.tabId === message.tabId) candidates.delete(key);
+    }
+    persistCandidates();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === "main-frame" && sender.tab?.id && Array.isArray(message.urls)) {
+    if (!mainFramesByTab.has(sender.tab.id)) mainFramesByTab.set(sender.tab.id, new Set());
+    const frames = mainFramesByTab.get(sender.tab.id);
+    for (const url of message.urls) {
+      const key = normalizeOriginPath(url);
+      if (key) frames.add(key);
+    }
+    return false;
+  }
+
+  if (message?.type === "dood-direct" && sender.tab?.id && typeof message.url === "string") {
+    doodDirectByTab.set(sender.tab.id, {
+      url: message.url,
+      frameUrl: typeof message.frameUrl === "string" ? message.frameUrl : "",
+      at: Date.now(),
+    });
+    return false;
+  }
+
+  if (!sender.tab?.url || sender.id !== chrome.runtime.id) return false;
+  const sanitized = sanitizePageMessage({
+    ...message,
+    pageTitle: message.pageTitle || sender.tab.title || "",
+    pageUrl: sender.tab.url,
+  });
+  if (sanitized) sanitized.tabId = sender.tab.id;
+  if (sanitized && isMainFrame(sender.tab.id, sender.url)) sanitized.main = true;
+  observeCandidate(sanitized);
+  return false;
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === "media-stream" && port.sender?.url?.startsWith(chrome.runtime.getURL("download.html"))) {
+    async function resolveFreshUrl(message) {
+      let url = message.url;
+      let referrer = typeof message.pageUrl === "string" ? message.pageUrl : "";
+      await mediaRouteClient.ensureRoutes([url, referrer, message.pageUrl].filter(Boolean));
+      let resolvedForTransfer = false;
+      if (Number.isInteger(message.videoTabId) && message.videoTabId > 0) {
+        // The player iframe's content script re-resolves /pass_md5 in its own
+        // context, giving a fresh token URL and the exact Referer the CDN
+        // expects (the /e/ player frame, not the outer page).
+        const fresh = await sendTabMessageWithTimeout(message.videoTabId, { type: "get-dood-direct" });
+        if (fresh?.ok && typeof fresh.url === "string") {
+          url = fresh.url;
+          if (typeof fresh.frameUrl === "string" && fresh.frameUrl) referrer = fresh.frameUrl;
+          resolvedForTransfer = true;
+        } else {
+          const cached = doodDirectByTab.get(message.videoTabId);
+          if (cached && Date.now() - cached.at < 10 * 60 * 1000) {
+            url = cached.url;
+            if (cached.frameUrl) referrer = cached.frameUrl;
+            resolvedForTransfer = true;
+          }
+        }
+      }
+      if (!resolvedForTransfer && typeof message.pageUrl === "string" && looksLikePlayerPage(message.pageUrl)) {
+        const resolved = await resolvePlayerPage(message.pageUrl, {
+          ensureRoute: (urls) => mediaRouteClient.ensureRoutes(urls),
+        });
+        if (resolved?.url) {
+          url = resolved.url;
+          referrer = resolved.referrer || referrer;
+        }
+      }
+      try {
+        const prepared = await progressiveRedirectResolver.resolve({ url, referrer });
+        return { url: prepared.url, referrer: prepared.referrer };
+      } catch (error) {
+        const recovery = authenticatedRecoveryForProgressiveError(error, { url, referrer });
+        if (recovery) return recovery;
+        throw error;
+      }
+    }
+
+    port.onMessage.addListener(async (message) => {
+      if (message?.type !== "start" || typeof message.url !== "string") return;
+      try {
+        const { url, referrer, authenticatedProbeRequired } = await resolveFreshUrl(message);
+        port.postMessage({
+          type: "fetch-required",
+          url,
+          referrer,
+          ...(authenticatedProbeRequired ? { authenticatedProbeRequired: true } : {}),
+        });
+      } catch (error) {
+        port.postMessage({
+          type: "stream-error",
+          message: progressiveDownloadErrorMessage(error),
+        });
+      }
+    });
+    return;
+  }
+
+  if (port.name !== "personal-vpn-ui" || port.sender?.tab) return;
+  port.onMessage.addListener(async (message) => {
+    if (message?.type === "connect-bridge") {
+      if (message.expectedSecret !== BRIDGE_CONTEXT || message.extensionId !== BRIDGE_EXTENSION_ID) return;
+      connectNativeBridge({
+        expectedSecret: BRIDGE_CONTEXT,
+        sessionId: message.sessionId,
+        expiresAtMs: message.expiresAtMs,
+      });
+    }
+    if (message?.type === "list-candidates") {
+      const redacted = [...candidates.values()].map(redactCandidateForUi);
+      port.postMessage({
+        type: "candidates",
+        renderMode: "text-only",
+        candidates: redacted,
+        rows: toTextOnlyRows(redacted),
+      });
+    }
+    if (message?.type === "download-candidate") {
+      const candidate = [...candidates.values()].find((item) => item.id === message.candidateId);
+      if (!candidate) {
+        port.postMessage({ type: "download-result", candidateId: message.candidateId, ok: false, error: "candidate-not-found" });
+        return;
+      }
+      try {
+        const result = await beginCandidateDownload(candidate);
+        port.postMessage({ type: "download-result", candidateId: candidate.id, ok: true, ...result });
+      } catch {
+        port.postMessage({ type: "download-result", candidateId: candidate.id, ok: false, error: "unsupported-media" });
+      }
+    }
+  });
+});
+
+connectWithAppContext();

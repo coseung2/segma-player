@@ -1,0 +1,13 @@
+[
+  {
+    "id": 1001,
+    "priority": 1,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "||wherewindsmeetgame.com/ldysteam2/",
+      "resourceTypes": ["main_frame", "sub_frame"]
+    }
+  }
+]

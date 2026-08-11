@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Personal VPN Media Detector",
+  "version": "0.2.27",
+  "description": "Personal-use media candidate detector with a local authenticated bridge.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3azu+Iz7eU9BPPhXlfmaqsH8cmn3y4qNPv8st4b0sugCAIyPeWRw+h/wlXJvilLFoo0OIP0FG3gxZW+lAE2BkdMUmD9R9QLj3qmAD4ECp1S0YQPN6hCsnCNTqNCAgBRgM6VT7Bu0HB5+UhnPrukrVapm2Z7em00QABbkYFBDhSa2hbCItkxN0zOjUKzllaa7/6bq10hTenQe8IvpN0KAw2yWwyLquTyGxlpRc5t+KGwEEAJPij4cOCq4yAAQ44ViIkKJXquZuROOf1qtmZCYJsTyx8nihkxfZZK3vsCt3xztE1c5koYuJm/umdNyElxq4fhq9reGAclGVpXEfjjo8wIDAQAB",
+  "permissions": ["activeTab", "contextMenus", "declarativeNetRequest", "nativeMessaging", "scripting", "storage", "webRequest"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "wherewindsmeet_redirect_block",
+        "enabled": true,
+        "path": "redirect-block-rules.json"
+      }
+    ]
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "Personal VPN media candidates",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  }
+}

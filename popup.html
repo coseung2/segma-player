@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aura VPN 미디어</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="popup-header">
+        <div>
+          <p class="eyebrow">AURA VPN</p>
+          <h1>미디어 다운로드</h1>
+        </div>
+        <button id="refresh" class="icon-button" type="button" aria-label="후보 새로고침">↻</button>
+      </header>
+
+      <p id="status" class="status" role="status" aria-live="polite">현재 페이지 확인 중…</p>
+      <section id="summary" class="summary" aria-label="탐지 요약"></section>
+      <label class="main-toggle"><input id="main-only" type="checkbox" checked /> 메인 영상만 보기</label>
+      <section id="candidates" class="candidate-list" aria-live="polite"></section>
+
+      <section class="direct-download" aria-labelledby="direct-download-title">
+        <div class="settings-heading">
+          <strong id="direct-download-title">직접 주소로 다운로드</strong>
+        </div>
+        <label class="settings-label" for="direct-url">m3u8 / mp4 주소 (F12가 막힌 사이트에서도 동작)</label>
+        <input id="direct-url" type="text" placeholder="https://…/playlist.m3u8 또는 https://…/video.mp4" spellcheck="false" />
+        <button id="download-url" class="secondary-button" type="button">이 주소로 HLS/MP4 다운로드</button>
+        <p id="direct-status" class="settings-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="test-settings" aria-labelledby="test-settings-title">
+        <div class="settings-heading">
+          <strong id="test-settings-title">개발 테스트 모드</strong>
+          <label class="switch-label"><input id="test-mode" type="checkbox" /> 사용</label>
+        </div>
+        <label class="settings-label" for="test-domains">테스트 도메인</label>
+        <textarea id="test-domains" rows="2" placeholder="staging.example.com&#10;localhost"></textarea>
+        <button id="save-test-settings" class="secondary-button" type="button">테스트 설정 저장</button>
+        <p id="test-settings-status" class="settings-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <footer class="popup-footer">
+        <button id="rescan" class="primary-button" type="button">현재 페이지 다시 감지</button>
+        <button id="open-settings" class="secondary-button" type="button">다운로드 폴더 설정</button>
+      </footer>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -23,7 +23,7 @@ npx wrangler pages deploy site --project-name aura-media
 
 ## GitHub Pages
 
-저장소의 `.github/workflows/pages.yml`이 `main`의 `site/**` 변경을 감지해 정적 사이트를 배포합니다. 저장소 Settings → Pages → Source를 `GitHub Actions`로 한 번 설정해야 합니다.
+`site/` 내용만 담은 `gh-pages` 브랜치가 준비되어 있습니다. 현재 저장소는 비공개이며 계정 플랜이 비공개 저장소 Pages를 지원하지 않으므로, 저장소를 공개로 전환하거나 지원 플랜으로 변경한 뒤 Pages 소스를 `gh-pages / (root)`로 지정해야 합니다.
 
 ## 공개 전 확인
 

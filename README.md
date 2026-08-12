@@ -17,8 +17,10 @@ npx serve site
 
 CLI 배포 예시:
 
+최신 Cloudflare Pages 정적 자산 런타임에서는 저장소 루트에서 다음 명령을 사용합니다.
+
 ```powershell
-npx wrangler pages deploy site --project-name aura-media
+npm run deploy
 ```
 
 ## GitHub Pages

@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "aura-media",
+  "name": "aura",
   "compatibility_date": "2026-08-12",
   "observability": {
     "enabled": true

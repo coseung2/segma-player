@@ -18,6 +18,17 @@ navigation?.addEventListener("click", (event) => {
   navigation.classList.remove("open");
 });
 
+document.querySelectorAll('a[href^="#"]').forEach((anchor) => {
+  anchor.addEventListener("click", (event) => {
+    const hash = anchor.getAttribute("href");
+    if (!hash || hash === "#") return;
+    const target = document.querySelector(hash);
+    if (!target) return;
+    event.preventDefault();
+    target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+  });
+});
+
 window.addEventListener("scroll", updateHeader, { passive: true });
 updateHeader();
 

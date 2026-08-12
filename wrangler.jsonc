@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "aura-media",
+  "compatibility_date": "2026-08-12",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "site"
+  },
+  "compatibility_flags": [
+    "nodejs_compat"
+  ]
+}

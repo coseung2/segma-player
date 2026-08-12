@@ -3,3 +3,10 @@ node_modules/
 *.crx
 *.pem
 native-host/target/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example

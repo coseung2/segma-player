@@ -19,26 +19,15 @@ const ytServerUrlInput = document.querySelector("#yt-server-url");
 const ytServerStatusElement = document.querySelector("#yt-server-status");
 const ytServerSaveButton = document.querySelector("#yt-server-save");
 const ytServerCheckButton = document.querySelector("#yt-server-check");
-const parallelToggle = document.querySelector("#parallel-save-toggle");
 const parallelFolderButton = document.querySelector("#parallel-folder");
 const parallelStatusElement = document.querySelector("#parallel-status");
 
 async function refreshParallelStatus() {
-  const enabled = await chrome.storage.local
-    .get({ auraParallelSave: false })
-    .then((stored) => stored?.auraParallelSave === true)
-    .catch(() => false);
-  parallelToggle.checked = enabled;
   const handle = await getStoredSaveDirectory();
   parallelStatusElement.textContent = handle
-    ? `저장 폴더 연결됨: ${handle.name}${enabled ? " · 병렬 수신 사용 중" : " · 병렬 수신 꺼짐"}`
+    ? `저장 폴더 연결됨: ${handle.name} · 병렬 수신 사용 중`
     : "저장 폴더가 아직 없습니다. '저장 폴더 선택'을 눌러 새 빈 폴더를 고르세요.";
 }
-
-parallelToggle.addEventListener("change", async () => {
-  await chrome.storage.local.set({ auraParallelSave: parallelToggle.checked });
-  await refreshParallelStatus();
-});
 
 parallelFolderButton.addEventListener("click", async () => {
   try {

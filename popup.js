@@ -22,20 +22,26 @@ let lastQualityCheckUrl = "";
 // failed probe never shows resolutions the video may not actually have.
 const STATIC_QUALITIES = ["best", "1080", "720", "480"];
 
-function qualityLabel(value) {
-  if (value === "best") return "최고 화질 · 자동 · Pro";
+function qualityLabel(value, exact = false) {
+  if (value === "best") {
+    return currentPlan.id === "free" ? "최고 화질 · 자동 · Pro" : "최고 화질 · 자동";
+  }
   const height = Number(value);
-  return Number.isFinite(height) && height > 1080 ? `최대 ${height}p · Pro` : `최대 ${height}p`;
+  if (!Number.isFinite(height)) return String(value);
+  const proSuffix = currentPlan.id === "free" && height > 1080 ? " · Pro" : "";
+  // Detected options are the video's real heights, so they are choices
+  // ("1080p"); only the fallback list works as a cap ("최대 1080p").
+  return exact ? `${height}p${proSuffix}` : `최대 ${height}p${proSuffix}`;
 }
 
-function rebuildQualityOptions(values) {
+function rebuildQualityOptions(values, exact = false) {
   const select = byId("youtube-quality");
   const current = select.value;
   select.replaceChildren();
   for (const value of values) {
     const option = document.createElement("option");
     option.value = String(value);
-    option.textContent = qualityLabel(value);
+    option.textContent = qualityLabel(value, exact);
     select.append(option);
   }
   if ([...select.options].some((option) => option.value === current)) select.value = current;
@@ -54,7 +60,7 @@ function applyQualityGating() {
 async function refreshAvailableQualities(url) {
   const result = await listYouTubeQualities(url);
   if (result.ok && Array.isArray(result.qualities) && result.qualities.length) {
-    rebuildQualityOptions(["best", ...result.qualities]);
+    rebuildQualityOptions(["best", ...result.qualities], true);
   } else {
     rebuildQualityOptions(STATIC_QUALITIES);
   }

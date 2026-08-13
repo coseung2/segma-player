@@ -5,7 +5,6 @@ globalThis.document = { querySelector: () => null };
 
 const {
   browserDownloadFilename,
-  isCompanionUnavailableError,
   prepareProgressiveFetch,
   requestSourceFrameDownload,
   tryBrowserDownloadFallback,
@@ -58,13 +57,6 @@ test("source-frame download requests are relayed through the background worker",
     frameId: 3,
   });
   delete globalThis.chrome;
-});
-
-test("companion unavailable error detection", () => {
-  assert.equal(isCompanionUnavailableError(new Error("Aura Media Companion을 실행하지 못했습니다.")), true);
-  assert.equal(isCompanionUnavailableError(new Error("기본 Downloads 저장 helper 연결이 끊겼습니다.")), true);
-  assert.equal(isCompanionUnavailableError(new Error("Specified native messaging host not found.")), true);
-  assert.equal(isCompanionUnavailableError(new Error("disk full")), false);
 });
 
 test("browser download filenames are sanitized", () => {

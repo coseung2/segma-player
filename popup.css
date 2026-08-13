@@ -28,7 +28,7 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
 .tab.active { background: #2a3e5c; color: #e8f1ff; box-shadow: 0 1px 4px #0005; }
 .tab:focus-visible { outline: 2px solid #73a5ff; outline-offset: 1px; }
 .tab-panel[hidden] { display: none; }
-.tab-panel { width: 100%; min-width: 0; max-width: 100%; min-height: 183px; overflow-x: hidden; }
+.tab-panel { display: flex; width: 100%; min-width: 0; max-width: 100%; min-height: 285px; flex-direction: column; overflow-x: hidden; }
 .status { min-height: 17px; margin: 0 0 9px; color: #93a2b7; font-size: 11px; line-height: 1.45; }
 .field-status { min-height: 17px; margin: 0; color: #93a2b7; font-size: 11px; line-height: 1.45; }
 .detect-controls { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
@@ -49,7 +49,8 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
 .badge { padding: 3px 7px; border-radius: 999px; background: #243754; color: #b3d0ff; font-size: 9px; font-weight: 800; }
 .download-button { min-height: 29px; padding: 0 10px; border: 0; border-radius: 8px; background: #4e85e7; color: #fff; font-size: 10px; font-weight: 750; }
 .download-button:disabled, button:disabled { opacity: .55; cursor: wait; }
-.empty-state { padding: 16px 12px; border: 1px dashed #354257; border-radius: 11px; color: #95a4b8; font-size: 12px; line-height: 1.5; text-align: center; }
+.empty-state { display: grid; min-height: 118px; padding: 16px 12px; place-items: center; border: 1px dashed #354257; border-radius: 11px; color: #95a4b8; font-size: 12px; line-height: 1.5; text-align: center; }
+.save-status { margin-top: auto; padding-top: 10px; color: #74849a; font-size: 10px; line-height: 1.45; }
 .direct-download { margin-top: 13px; padding-top: 12px; border-top: 1px solid #293445; font-size: 12px; }
 input[type="url"] { display: block; width: 100%; min-height: 37px; margin: 7px 0; padding: 0 10px; border: 1px solid #303c4f; border-radius: 9px; outline: none; background: #111822; color: #eef4fc; font-size: 11px; }
 select { display: block; width: 100%; min-height: 40px; margin: 7px 0; padding: 0 10px; border: 1px solid #303c4f; border-radius: 9px; outline: none; background: #111822; color: #eef4fc; font-size: 11px; }

@@ -13,14 +13,14 @@ test("native file chunks stay below Chrome native-message limits and round-trip"
   assert.ok(chunks.every((chunk) => bytesToBase64(chunk).length < 1024 * 1024));
 });
 
-test("offscreen writer relays native messaging through the background service worker", async () => {
+test("the extension save path no longer depends on the native companion", async () => {
   const [writer, background] = await Promise.all([
     readFile(new URL("./native-file-writer.js", import.meta.url), "utf8"),
     readFile(new URL("./background.js", import.meta.url), "utf8"),
   ]);
-  assert.match(writer, /chrome\.runtime\.connect\(\{\s*name:\s*"native-file-writer"/);
   assert.doesNotMatch(writer, /connectNative/);
-  assert.match(background, /port\.name === "native-file-writer"/);
-  assert.match(background, /connectNative\(MEDIA_COMPANION_NATIVE_HOST\)/);
-  assert.match(background, /com\.aura\.media_companion/);
+  assert.doesNotMatch(background, /connectNative/);
+  assert.doesNotMatch(background, /com\.aura\.media_companion/);
+  assert.doesNotMatch(background, /native-file-writer/);
+  assert.match(background, /getStoredSaveDirectory/);
 });

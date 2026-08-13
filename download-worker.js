@@ -1,7 +1,5 @@
 import { downloadPreparedCandidate, prepareDownloadCandidate, setRuntimePlan } from "./hls-download.js";
 import { parallelDownload } from "./parallel-download.js";
-import { createNativeFileWriter } from "./native-file-writer.js";
-import { writeChunk } from "./hls-download.js";
 import { createDownloadScheduler } from "./download-scheduler.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { resolvePlan } from "./license.js";
@@ -121,27 +119,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         await report(message.jobId, { status: "running", statusText: "병렬 수신 준비 중…" });
         const filename = typeof message.filename === "string" && message.filename ? message.filename : "YouTube 영상.mp4";
-        let sink = null;
-        try {
-          const writable = await createNativeFileWriter(filename);
-          sink = {
-            write: (data) => writeChunk(writable, data),
-            close: () => writable.close(),
-            abort: () => writable.abort(),
-          };
-        } catch {
-          sink = null;
-        }
-        if (!sink && message.dirHandle) {
-          const fileHandle = await message.dirHandle.getFileHandle(filename, { create: true });
-          const writable = await fileHandle.createWritable({ keepExistingData: true });
-          sink = {
-            write: (data) => writable.write(data),
-            close: () => writable.close(),
-            abort: () => writable.abort(),
-          };
-        }
-        if (!sink) throw new Error("no-save-sink");
+        if (!message.dirHandle) throw new Error("no-save-sink");
+        const fileHandle = await message.dirHandle.getFileHandle(filename, { create: true });
+        const writable = await fileHandle.createWritable({ keepExistingData: true });
+        const sink = {
+          write: (data) => writable.write(data),
+          close: () => writable.close(),
+          abort: () => writable.abort(),
+        };
         const result = await parallelDownload({
           url: message.url,
           filename,

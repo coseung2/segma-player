@@ -26,7 +26,7 @@ async function refreshParallelStatus() {
   const handle = await getStoredSaveDirectory();
   parallelStatusElement.textContent = handle
     ? `저장 폴더 연결됨: ${handle.name} · 병렬 수신 사용 중`
-    : "저장 폴더가 아직 없습니다. '저장 폴더 선택'을 눌러 새 빈 폴더를 고르세요.";
+    : "저장 폴더가 아직 없습니다. 아래 버튼으로 Downloads 안에 새 폴더를 만들어 선택하세요.";
 }
 
 parallelFolderButton.addEventListener("click", async () => {

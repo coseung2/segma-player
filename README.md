@@ -1,6 +1,8 @@
 # Aura Media Downloader
 
-Chrome Manifest V3 extension and Windows native companion for detecting compatible media resources and saving media the user is authorized to download.
+Chrome/Whale Manifest V3 extension for detecting compatible media resources
+and saving media the user is authorized to download. Saving runs entirely
+inside the extension — no native helper or companion app is required.
 
 ## Editions
 
@@ -17,7 +19,9 @@ The development checkout uses the Pro profile in `edition.js`. The Chrome Web St
 - `content.js` and `background.js` detect compatible progressive and HLS resources.
 - `download-worker.js` keeps accepted downloads running in an offscreen document.
 - `hls-download.js` streams data and enforces the active edition limits.
-- `com.aura.media_companion` writes local files and runs supported public YouTube downloads.
+- `save-directory.js` keeps a one-time File System Access folder handle so the
+  extension writes files itself with 6-way parallel reception
+  (`parallel-download.js`) — no native helper is involved.
 - The notebook YouTube server accepts only HMAC capability tokens issued by the
   license worker (`/api/youtube-token`); free tokens are quota- and
   rate-limited, Pro tokens require an approved key, and the server enforces a
@@ -34,15 +38,10 @@ rtk cargo test --manifest-path native-host/Cargo.toml
 rtk cargo fmt --check --manifest-path native-host/Cargo.toml
 ```
 
-Load the repository root as an unpacked extension for development. Because the manifest intentionally contains no fixed `key`, use the extension ID shown by `chrome://extensions` when installing the local companion:
-
-```powershell
-rtk pwsh -NoProfile -ExecutionPolicy Bypass -File .\install-media-companion.ps1 `
-  -ExtensionId "<32-character-extension-id>" `
-  -ToolsArchive "<authorized-tools-archive.zip>"
-```
-
-The tools archive must contain `tools/ffmpeg/ffmpeg.exe`, `tools/yt-dlp.exe`, and `tools/node.exe`. Do not redistribute third-party binaries until their provenance, build configuration, and license notices have been reviewed.
+Load the repository root as an unpacked extension for development. No
+companion installation is needed; the first download asks for a save folder
+once (create a new empty folder under Downloads) and every later download
+saves silently with parallel reception.
 
 ## Chrome Web Store package
 
@@ -61,9 +60,12 @@ rtk pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-store-package.
 
 The deterministic ZIP is written under `artifacts/chrome-web-store`. Follow `STORE_SUBMISSION_CHECKLIST.md` before upload.
 
-## Companion installer
+## Legacy companion (optional)
 
-The commercial Windows installer template uses Inno Setup 6 and requires a reviewed redistributable tools directory containing `THIRD_PARTY_NOTICES.txt`:
+The extension no longer uses the native companion (`com.aura.media_companion`)
+for saving. The `native-host/`, `install-media-companion.ps1`, and
+`scripts/build-companion-installer.ps1` files remain only as legacy references
+for older deployments and are not required by the current runtime.
 
 ```powershell
 rtk pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-companion-installer.ps1 `

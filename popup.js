@@ -4,6 +4,7 @@ import { downloadJobView, retryableDownloadJob } from "./download-job-view.js";
 import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
 import { PRO_BENEFITS, productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
+import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
 
 const byId = (id) => document.getElementById(id);
 const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -12,6 +13,7 @@ const statusElement = byId("status");
 const candidatesElement = byId("candidates");
 const summaryElement = byId("summary");
 const mainOnlyElement = byId("main-only");
+const saveStatusElements = [byId("detect-save-status"), byId("link-save-status")].filter(Boolean);
 const jobContainers = [byId("detect-jobs"), byId("link-jobs")].filter(Boolean);
 let lastCandidates = [];
 let currentPlan = productPlan(PRODUCT_EDITION);
@@ -86,6 +88,26 @@ function renderPlan() {
     byId("license-entry").hidden = false;
   }
   applyQualityGating();
+}
+
+async function refreshSaveStatus() {
+  const handle = await getStoredSaveDirectory();
+  const text = handle
+    ? `병렬 저장 준비됨 · ${handle.name}`
+    : "저장 폴더 미설정 — 다운로드할 때 선택 창이 열립니다.";
+  for (const el of saveStatusElements) el.textContent = text;
+}
+
+async function ensureSaveFolder() {
+  let handle = await getStoredSaveDirectory();
+  if (handle) return handle;
+  try {
+    handle = await ensureSaveDirectory({ pick: true });
+  } catch {
+    handle = null;
+  }
+  void refreshSaveStatus();
+  return handle;
 }
 
 async function refreshPlan() {
@@ -208,6 +230,10 @@ function renderCandidates(candidates) {
       try {
         button.textContent = "요청 중…";
         button.removeAttribute("aria-label");
+        const folder = await ensureSaveFolder();
+        if (!folder) {
+          throw new Error("저장 폴더가 필요합니다. 다시 누르면 폴더 선택 창이 열립니다. (Downloads 안에 새 폴더를 만들어 선택하세요)");
+        }
         const response = await chrome.runtime.sendMessage({
           type: "download-candidate",
           candidateId: candidate.id,
@@ -344,13 +370,16 @@ async function directDownload() {
   const input = byId("direct-url");
   const output = byId("direct-status");
   const button = byId("download-url");
-  const companionHelp = byId("companion-help");
-  companionHelp.hidden = true;
   if (!input.value.trim()) { output.textContent = "주소를 입력해 주세요."; return; }
   button.disabled = true;
   output.textContent = "주소를 확인하는 중…";
   try {
     const value = input.value.trim();
+    const folder = await ensureSaveFolder();
+    if (!folder) {
+      output.textContent = "저장 폴더가 필요합니다. 다시 누르면 폴더 선택 창이 열립니다. (Downloads 안에 새 폴더를 만들어 선택하세요)";
+      return;
+    }
     if (isYouTubeUrl(value)) {
       const response = await chrome.runtime.sendMessage({
         type: "youtube-download",
@@ -364,7 +393,6 @@ async function directDownload() {
         if (detail) {
           throw new Error(detail);
         }
-        companionHelp.hidden = false;
         throw new Error("유튜브 저장에 실패했습니다. 서버 연결과 옵션의 서버 주소를 확인해 주세요.");
       }
     } else {
@@ -400,13 +428,10 @@ byId("rescan").addEventListener("click", () => void rescan());
 byId("download-url").addEventListener("click", () => void directDownload());
 byId("direct-url").addEventListener("keydown", (event) => { if (event.key === "Enter") void directDownload(); });
 byId("direct-url").addEventListener("input", updateLinkPanel);
-byId("companion-help").addEventListener("click", (event) => {
-  event.preventDefault();
-  void chrome.tabs.create({ url: "https://aura.mdownloader.workers.dev/download.html" });
-});
 mainOnlyElement.addEventListener("change", () => renderCandidates(lastCandidates));
 chrome.runtime.onMessage.addListener((message) => { if (message?.type === "download-jobs-changed") void requestJobs(); });
 renderPlan();
 updateLinkPanel();
+void refreshSaveStatus();
 void requestJobs();
 void requestCandidates();

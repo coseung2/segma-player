@@ -68,9 +68,7 @@ const nonPersistentCandidates = new WeakSet();
 const SESSION_CANDIDATES_KEY = "candidates";
 const tabTitleCache = new Map();
 const DOWNLOAD_JOBS_KEY = "downloadJobs";
-const MEDIA_COMPANION_NATIVE_HOST = "com.aura.media_companion";
 const downloadJobs = new Map();
-const youtubePorts = new Map();
 const youtubeBrowserDownloads = new Map();
 
 chrome.downloads.onChanged.addListener((delta) => {
@@ -276,48 +274,9 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
       }
       throw new Error(`이번 달 Aura YouTube 무료 다운로드 한도를 사용했습니다${limit}. Pro 라이선스를 등록하면 제한이 풀립니다.`);
     }
-    // Unreachable or transient server errors fall through to the Companion path.
+    // The server is the only YouTube execution path; no native helper is used.
   }
-
-  let port;
-  try {
-    port = chrome.runtime.connectNative(MEDIA_COMPANION_NATIVE_HOST);
-  } catch {
-    throw new Error("Aura Media Companion을 실행하지 못했습니다. 노트북 서버 또는 컴패니언 연결을 확인해 주세요.");
-  }
-  youtubePorts.set(jobId, port);
-  let finished = false;
-  port.onMessage.addListener((message) => {
-    if (message?.jobId !== jobId) return;
-    if (typeof message.title === "string" && message.title) {
-      const current = downloadJobs.get(jobId);
-      if (current) downloadJobs.set(jobId, Object.freeze({ ...current, title: message.title.slice(0, 500) }));
-    }
-    const status = ["running", "completed", "failed"].includes(message.status) ? message.status : "running";
-    if (status === "completed" || status === "failed") {
-      finished = true;
-      queueMicrotask(() => {
-        try { port.disconnect(); } catch { /* already disconnected */ }
-      });
-    }
-    void patchDownloadJob(jobId, {
-      status,
-      statusText: typeof message.statusText === "string" ? message.statusText : "YouTube 다운로드 중…",
-      error: typeof message.error === "string" ? message.error : "",
-      folderName: "Downloads",
-    });
-  });
-  port.onDisconnect.addListener(() => {
-    youtubePorts.delete(jobId);
-    const detail = chrome.runtime.lastError?.message || "media-companion-disconnected";
-    if (!finished) void patchDownloadJob(jobId, {
-      status: "failed",
-      statusText: "Aura Media Companion을 실행하지 못했습니다.",
-      error: detail,
-    });
-  });
-  port.postMessage({ type: "youtube-download", jobId, url, quality });
-  return { mode: "youtube", jobId };
+  throw new Error("YouTube 서버에 연결할 수 없습니다. 옵션 → YouTube 서버 주소를 확인해 주세요.");
 }
 
 async function isServerOnThisMachine(serverUrl) {
@@ -1259,40 +1218,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === "native-file-writer"
-    && port.sender?.id === chrome.runtime.id
-    && port.sender?.url === chrome.runtime.getURL("download-worker.html")) {
-    let relayClosed = false;
-    let writerPort;
-    try {
-      writerPort = chrome.runtime.connectNative(MEDIA_COMPANION_NATIVE_HOST);
-    } catch {
-      port.disconnect();
-      return;
-    }
-    port.onMessage.addListener((message) => {
-      if (relayClosed) return;
-      try { writerPort.postMessage(message); } catch { port.disconnect(); }
-    });
-    writerPort.onMessage.addListener((message) => {
-      if (relayClosed) return;
-      try { port.postMessage(message); } catch { writerPort.disconnect(); }
-    });
-    port.onDisconnect.addListener(() => {
-      void chrome.runtime.lastError;
-      if (relayClosed) return;
-      relayClosed = true;
-      try { writerPort.disconnect(); } catch { /* already disconnected */ }
-    });
-    writerPort.onDisconnect.addListener(() => {
-      void chrome.runtime.lastError;
-      if (relayClosed) return;
-      relayClosed = true;
-      try { port.disconnect(); } catch { /* already disconnected */ }
-    });
-    return;
-  }
-
   if (port.name === "media-stream" && validMediaFetchSender(port.sender)) {
     async function resolveFreshUrl(message, signal) {
       let url = message.url;

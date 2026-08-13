@@ -10,7 +10,6 @@ import {
 import { filenameForDownload } from "./download.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { level5KeyErrorMessage, normalizeLevel5KeyError } from "./level5-key-error.js";
-import { createNativeFileWriter } from "./native-file-writer.js";
 import { parallelDownload } from "./parallel-download.js";
 import { progressiveDownloadErrorMessage, replayableRecordedHeaders } from "./progressive-redirect.js";
 import { productPlan } from "./product-plan.js";
@@ -108,11 +107,6 @@ export function progressiveFilenameFor(candidate) {
     return /\.[a-z0-9]{2,5}$/i.test(urlFilename) ? urlFilename : `${urlFilename}.mp4`;
   }
   return filenameFor(title, extension);
-}
-
-export function isCompanionUnavailableError(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  return /컴패니언|Companion|저장 helper|native messaging host/i.test(message);
 }
 
 export function browserDownloadFilename(value) {
@@ -813,30 +807,15 @@ async function saveProgressive(
       });
     };
     try {
-      let sink = null;
-      try {
-        const writable = await createNativeFileWriter(filename);
-        sink = {
-          write: (data) => writeChunk(writable, data),
-          close: () => writable.close(),
-          abort: () => writable.abort(),
-        };
-      } catch {
-        sink = null;
-      }
-      if (!sink) {
-        const dirHandle = await getStoredSaveDirectory();
-        if (dirHandle) {
-          const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-          const writable = await fileHandle.createWritable({ keepExistingData: true });
-          sink = {
-            write: (data) => writable.write(data),
-            close: () => writable.close(),
-            abort: () => writable.abort(),
-          };
-        }
-      }
-      if (!sink) throw new Error("no-save-sink");
+      const dirHandle = await getStoredSaveDirectory();
+      if (!dirHandle) throw new Error("no-save-sink");
+      const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+      const writable = await fileHandle.createWritable({ keepExistingData: true });
+      const sink = {
+        write: (data) => writable.write(data),
+        close: () => writable.close(),
+        abort: () => writable.abort(),
+      };
       const result = await withParallelMediaFetchLease(session.url, referrer, context, () => parallelDownload({
         url: session.url,
         filename,
@@ -850,11 +829,17 @@ async function saveProgressive(
     }
   }
 
-  let writable;
-  try {
-    writable = await createNativeFileWriter(filename);
-  } catch (error) {
-    if (!isCompanionUnavailableError(error)) throw error;
+  let writable = null;
+  const dirHandle = await getStoredSaveDirectory();
+  if (dirHandle) {
+    try {
+      const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+      writable = await fileHandle.createWritable({ keepExistingData: true });
+    } catch {
+      writable = null;
+    }
+  }
+  if (!writable) {
     const downloaded = await tryBrowserDownloadFallback(
       session.url,
       filename,
@@ -863,7 +848,7 @@ async function saveProgressive(
       context,
     );
     if (downloaded) return downloaded;
-    throw error;
+    throw new Error("저장 폴더에 쓸 수 없습니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
   }
   try {
     const bytes = await streamFetchToWritable(
@@ -891,14 +876,16 @@ async function saveProgressive(
 }
 
 async function saveHlsToNative(media, filename, referrer, videoTabId = null, context = defaultDownloadContext) {
+  const dirHandle = await getStoredSaveDirectory();
+  if (!dirHandle) {
+    throw new Error("분할 형식 영상은 저장 폴더 연결이 필요합니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
+  }
   let writable;
   try {
-    writable = await createNativeFileWriter(filename);
-  } catch (error) {
-    if (isCompanionUnavailableError(error)) {
-      throw new Error("분할 형식 영상은 Aura Media Companion 설치 후 저장할 수 있습니다.");
-    }
-    throw error;
+    const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+    writable = await fileHandle.createWritable({ keepExistingData: true });
+  } catch {
+    throw new Error("저장 폴더에 쓸 수 없습니다. 옵션 → 저장 폴더 선택에서 새 빈 폴더를 다시 지정해 주세요.");
   }
   let count = 0;
   let writtenBytes = 0;

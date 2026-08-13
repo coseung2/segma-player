@@ -35,7 +35,6 @@ const expectedFiles = [
   "icons/icon128.png",
   "manifest.json",
   "media-fetch-lease.js",
-  "native-file-writer.js",
   "options.html",
   "options.js",
   "parallel-download.js",
@@ -121,7 +120,6 @@ test("store packager builds and audits the exact free-edition ZIP", async () => 
       "contextMenus",
       "declarativeNetRequest",
       "downloads",
-      "nativeMessaging",
       "offscreen",
       "scripting",
       "storage",
@@ -171,7 +169,8 @@ test("store packager builds and audits the exact free-edition ZIP", async () => 
     ]));
     const forbidden = /personalvpn|personal-vpn|com\.personal|hfpkpbadllkhedocoglbggkpnbaibmcp|wherewindsmeet|redirect-block-rules|route-client|MEDIA_ROUTE_NATIVE_HOST/i;
     for (const [file, text] of textFiles) assert.doesNotMatch(text, forbidden, file);
-    assert.match(textFiles.find(([file]) => file === "background.js")[1], /com\.aura\.media_companion/);
+    assert.doesNotMatch(textFiles.find(([file]) => file === "background.js")[1], /com\.aura\.media_companion/);
+    assert.doesNotMatch(textFiles.find(([file]) => file === "background.js")[1], /connectNative/);
     assert.match(textFiles.find(([file]) => file === "download-worker.js")[1], /productPlan\(PRODUCT_EDITION\)/);
     assert.doesNotMatch(textFiles.find(([file]) => file === "download-worker.js")[1], /chrome\.tabs|chrome\.windows/);
     assert.match(textFiles.find(([file]) => file === "background.js")[1], /chrome\.tabs\.onActivated/);

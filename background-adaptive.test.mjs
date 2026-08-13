@@ -536,7 +536,7 @@ test("youtube downloads route through the remote server when configured", async 
     && job.status === "running" && job.title === "YouTube 영상"));
 });
 
-test("youtube downloads fall back to companion when the server is unreachable", async () => {
+test("youtube downloads fail with a server error when the server is unreachable", async () => {
   fetchCalls.length = 0;
   localStorage.delete("auraLicense");
   localStorage.set("auraYouTubeServer", "https://server.test");
@@ -548,5 +548,5 @@ test("youtube downloads fall back to companion when the server is unreachable", 
   );
   assert.equal(result.keepAlive, true);
   assert.equal(result.response.ok, false);
-  assert.match(result.response.error || "", /Companion|컴패니언|native messaging|실행하지 못/);
+  assert.match(result.response.error || "", /YouTube 서버에 연결할 수 없습니다|서버 주소를 확인/);
 });

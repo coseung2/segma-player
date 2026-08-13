@@ -60,7 +60,6 @@ $runtimeFiles = @(
   'icons/icon48.png',
   'icons/icon128.png',
   'media-fetch-lease.js',
-  'native-file-writer.js',
   'options.html',
   'options.js',
   'parallel-download.js',
@@ -149,7 +148,7 @@ function Replace-StoreOnlyPrivateBridge([string]$RelativePath) {
 
 function Write-AuditedManifest {
   $requiredPermissions = @(
-    'activeTab', 'contextMenus', 'declarativeNetRequest', 'nativeMessaging',
+    'activeTab', 'contextMenus', 'declarativeNetRequest',
     'downloads', 'offscreen', 'scripting', 'storage', 'webRequest'
   )
   if ($auditedManifest.manifest_version -ne 3) { throw 'Store manifest must be Manifest V3.' }
@@ -268,8 +267,9 @@ function Invoke-StoreAudit([string[]]$ExpectedFiles) {
   if ($bridge -notmatch 'cachedKey\(hls, url\.href\)' -or $bridge -notmatch 'loadKey\(hls, url\.href\)') {
     throw 'Store audit did not find the bundled page bridge cache and loader key paths.'
   }
-  if (-not (Read-Utf8 (Join-Path $StageDirectory 'background.js')).Contains('com.aura.media_companion')) {
-    throw 'Store audit did not find the Aura native companion host contract.'
+  $auditedBackground = Read-Utf8 (Join-Path $StageDirectory 'background.js')
+  if ($auditedBackground -match 'connectNative|com\.aura\.media_companion|native-file-writer') {
+    throw 'Store audit found a native companion dependency in the background runtime.'
   }
 }
 

@@ -152,14 +152,29 @@ export async function submitYouTubeJob(url, quality = "best", server = null) {
     url,
     quality: String(quality || "best"),
   };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15_000);
-  timer?.unref?.();
-  const { response, authError } = await youTubeFetch(`${base}/api/youtube`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }, controller.signal).finally(() => clearTimeout(timer));
+  async function post(forceToken = false) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    timer?.unref?.();
+    try {
+      if (forceToken) await fetchYouTubeToken(true);
+      return await youTubeFetch(`${base}/api/youtube`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }, controller.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  let { response, authError } = await post();
+  if (!authError && response?.status === 429) {
+    // A freshly registered license key is not reflected in the cached
+    // capability token; refresh once and retry so Pro applies immediately.
+    const refreshed = await post(true);
+    response = refreshed.response;
+    authError = refreshed.authError;
+  }
   if (authError || !response) return { ok: false, error: "server-unauthorized" };
   try {
     const data = await response.json().catch(() => ({}));
@@ -245,7 +260,10 @@ function youtubeVideoId(value) {
   try {
     const url = new URL(String(value || ""));
     if (url.hostname === "youtu.be") return url.pathname.slice(1).split("/")[0] || null;
-    return url.searchParams.get("v");
+    const direct = url.searchParams.get("v");
+    if (direct) return direct;
+    const pathMatch = /^\/(?:shorts|live|embed)\/([A-Za-z0-9_-]{6,})/.exec(url.pathname);
+    return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
   }

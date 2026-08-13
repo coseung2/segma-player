@@ -94,7 +94,7 @@ test("link tab exposes YouTube quality caps and sends the selection", async () =
     readFile(new URL("./popup.js", import.meta.url), "utf8"),
   ]);
   assert.match(html, /id="youtube-quality"/);
-  for (const quality of ["best", "2160", "1440", "1080", "720", "480"]) {
+  for (const quality of ["best", "1080", "720", "480"]) {
     assert.match(html, new RegExp(`value="${quality}"`));
   }
   assert.match(script, /type:\s*"youtube-download"/);

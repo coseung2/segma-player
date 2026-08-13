@@ -89,16 +89,19 @@ async function refreshLicenseStatus() {
   licenseStatusElement.textContent = "확인 중…";
   try {
     const response = await chrome.runtime.sendMessage({ type: "license-status" });
-    if (response?.ok && response.edition === "pro") {
-      // The Pro build is already unlocked; the key entry is only for
-      // upgrading the free (store) edition.
+    const hasKey = typeof response?.key === "string" && response.key.length > 0;
+    if (response?.ok && response.edition === "pro" && hasKey) {
+      // The Pro build is unlocked client-side and has a stored key, so the
+      // YouTube server can issue Pro capability tokens.
       licenseSection.hidden = true;
       return;
     }
     licenseSection.hidden = false;
     licenseKeyInput.disabled = false;
     licenseActivateButton.disabled = false;
-    licenseStatusElement.textContent = "일반 버전 사용 중 — 키가 있으면 입력 후 등록하세요.";
+    licenseStatusElement.textContent = response?.ok && response.edition === "pro"
+      ? "Pro 빌드 사용 중 — YouTube 서버 인증용 라이선스 키를 등록하세요."
+      : "일반 버전 사용 중 — 키가 있으면 입력 후 등록하세요.";
   } catch {
     licenseStatusElement.textContent = "상태를 확인할 수 없습니다.";
   }

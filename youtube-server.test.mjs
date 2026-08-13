@@ -168,6 +168,47 @@ test("submitYouTubeJob surfaces the monthly quota error", async () => {
   assert.equal(result.limit, 10);
 });
 
+test("submitYouTubeJob refreshes the token once on quota 429", async () => {
+  const env = serverEnvironment();
+  let tokenCalls = 0;
+  let serverCalls = 0;
+  env.setFetch((url, options) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") {
+      tokenCalls += 1;
+      return jsonResponse({ ...TOKEN_BODY, token: `tok-${tokenCalls}` });
+    }
+    serverCalls += 1;
+    if (serverCalls === 1) {
+      return jsonResponse({ error: "monthly-limit-reached", used: 10, limit: 10 }, 429);
+    }
+    assert.equal(options.headers.get("authorization"), "Bearer tok-2");
+    return jsonResponse({ ok: true, jobId: "job-3", status: "queued", quotaUsed: 0, quotaLimit: null, pro: true }, 202);
+  });
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+
+  const result = await mod.submitYouTubeJob("https://youtube.com/watch?v=abc", "best", "http://server.test:8788");
+  assert.equal(result.ok, true);
+  assert.equal(result.jobId, "job-3");
+  assert.equal(result.pro, true);
+  assert.equal(tokenCalls, 2);
+  assert.equal(serverCalls, 2);
+});
+
+test("listYouTubeQualities accepts shorts URLs", async () => {
+  const env = serverEnvironment();
+  env.setFetch((url, options) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") return jsonResponse(TOKEN_BODY);
+    assert.equal(url, "http://server.test:8788/api/youtube-formats");
+    const body = JSON.parse(options.body);
+    assert.equal(body.url, "https://youtube.com/shorts/AbCdEf12345");
+    return jsonResponse({ ok: true, qualities: [1080, 720, 480] });
+  });
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+
+  const result = await mod.listYouTubeQualities("https://youtube.com/shorts/AbCdEf12345", "http://server.test:8788");
+  assert.deepEqual(result, { ok: true, qualities: [1080, 720, 480] });
+});
+
 test("waitForYouTubeJob polls with the bearer token until ready", async () => {
   const env = serverEnvironment();
   let calls = 0;

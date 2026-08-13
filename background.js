@@ -265,11 +265,15 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
     }
     if (submitted.error === "monthly-limit-reached") {
       const limit = Number.isInteger(submitted.limit) ? ` (${submitted.limit}개)` : "";
+      const edition = await resolveEdition();
       await patchDownloadJob(jobId, {
         status: "failed",
         statusText: "월간 한도 도달",
         error: "monthly-limit-reached",
       });
+      if (edition === "pro") {
+        throw new Error("Pro 빌드가 YouTube 서버에 Pro 키로 인증되지 않았습니다. 설정 → Pro 라이선스에서 키를 등록하거나 다시 확인해 주세요.");
+      }
       throw new Error(`이번 달 Aura YouTube 무료 다운로드 한도를 사용했습니다${limit}. Pro 라이선스를 등록하면 제한이 풀립니다.`);
     }
     // Unreachable or transient server errors fall through to the Companion path.

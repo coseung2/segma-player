@@ -25,7 +25,11 @@ const MIN_FREE_BYTES = Number(process.env.AURA_YT_MIN_FREE_GB || 2) * 1024 * 102
 const LOG_FILE = process.env.AURA_YT_LOG || path.join(PROFILE, "AppData", "Local", "Aura YouTube", "server.log");
 const LOCAL_SAVE_DIR = process.env.AURA_YT_LOCAL_SAVE_DIR || "";
 const JOB_TTL_MS = 60 * 60 * 1000;
-const ALLOWED_QUALITIES = new Set(["best", "2160", "1440", "1080", "720", "480"]);
+// Accept "best" or any positive height (the popup offers heights detected by
+// the live format probe, which are not limited to the old preset list).
+function validQuality(value) {
+  return value === "best" || /^[1-9]\d{1,4}$/.test(String(value));
+}
 
 // Shared token verification is loaded lazily from the same directory.
 // Windows paths must be converted to file:// URLs for dynamic import.
@@ -168,7 +172,10 @@ function youtubeVideoId(value) {
   try {
     const url = new URL(String(value || ""));
     if (url.hostname === "youtu.be") return url.pathname.slice(1).split("/")[0] || null;
-    return url.searchParams.get("v");
+    const direct = url.searchParams.get("v");
+    if (direct) return direct;
+    const pathMatch = /^\/(?:shorts|live|embed)\/([A-Za-z0-9_-]{6,})/.exec(url.pathname);
+    return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
   }
@@ -487,7 +494,7 @@ const server = http.createServer(async (req, res) => {
         logRequest(req, 400, `device=${deviceId}`);
         return;
       }
-      if (!ALLOWED_QUALITIES.has(String(quality))) {
+      if (!validQuality(String(quality))) {
         json(res, 400, { error: "invalid-quality" });
         logRequest(req, 400, `device=${deviceId} quality=${quality}`);
         return;

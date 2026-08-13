@@ -18,7 +18,9 @@ let currentPlan = productPlan(PRODUCT_EDITION);
 let qualityCheckTimer = null;
 let lastQualityCheckUrl = "";
 
-const STATIC_QUALITIES = ["best", "2160", "1440", "1080", "720", "480"];
+// Fallback only; real options come from the server probe. Kept at 1080 so a
+// failed probe never shows resolutions the video may not actually have.
+const STATIC_QUALITIES = ["best", "1080", "720", "480"];
 
 function qualityLabel(value) {
   if (value === "best") return "최고 화질 · 자동 · Pro";

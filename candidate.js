@@ -96,6 +96,21 @@ export function isImageResourceUrl(value) {
   return Boolean(url && /\.(?:avif|gif|jpe?g|png|webp)$/i.test(url.pathname));
 }
 
+export function isLikelyHlsSegmentUrl(value) {
+  const url = canonicalHttpUrl(value);
+  return Boolean(url && /\.(?:ts|m4s|cmfv|cmfa)$/i.test(url.pathname));
+}
+
+export function isLikelyPreviewResourceUrl(value) {
+  const url = canonicalHttpUrl(value);
+  if (!url) return false;
+  const host = url.hostname.toLowerCase();
+  const pathname = url.pathname.toLowerCase();
+  return /(^|\.)(previews?|thumbs?|thumbnails)\.[a-z0-9-]+(?:\.[a-z0-9-]+)*$/.test(host)
+    || /(^|\/)(previews?|thumbs?|thumbnails|teasers?)(\/|$)/.test(pathname)
+    || /[-_.\/](previews?|teasers?)[-_.]/.test(pathname);
+}
+
 export function mediaTypeForResource(resourceUrl, contentType = "") {
   const lowerType = contentType.toLowerCase();
   let pathname = "";
@@ -182,7 +197,7 @@ export function variantIdentity(variant) {
     ? `${variant.resolution.width || ""}x${variant.resolution.height || ""}` : "";
   return fnv1a([
     resource, resolution, variant.bandwidth || "", variant.frameRate || "", variant.codecs || "",
-    variant.audioLanguage || "", variant.subtitleLanguage || "",
+    variant.audioLanguage || "",
   ].join("|"));
 }
 
@@ -196,7 +211,8 @@ export function makeCandidate({
   const canonical = blob ? resourceUrl : canonicalHttpUrl(resourceUrl)?.href;
   const pageCanonical = canonicalHttpUrl(pageUrl);
   const origin = pageCanonical ? `${pageCanonical.protocol}//${pageCanonical.host}` : null;
-  if (!canonical || (!blob && isImageResourceUrl(canonical)) || !origin
+  if (!canonical || (!blob && (isImageResourceUrl(canonical) || isLikelyHlsSegmentUrl(canonical)
+    || isLikelyPreviewResourceUrl(canonical))) || !origin
     || typeof pageTitle !== "string" || [...pageTitle].length > LIMITS.titleCharacters
     || /[\u0000-\u001f\u007f]/.test(pageTitle) || typeof contentType !== "string"
     || contentType.length > LIMITS.contentTypeBytes || !Array.isArray(variants) || variants.length > LIMITS.variants
@@ -287,7 +303,6 @@ function redactedVariant(variant) {
     bandwidth: variant.bandwidth || null,
     codecs: typeof variant.codecs === "string" ? variant.codecs.slice(0, 256) : null,
     audioLanguage: typeof variant.audioLanguage === "string" ? variant.audioLanguage.slice(0, 32) : null,
-    subtitleLanguage: typeof variant.subtitleLanguage === "string" ? variant.subtitleLanguage.slice(0, 32) : null,
   };
 }
 

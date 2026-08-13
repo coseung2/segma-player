@@ -1,6 +1,6 @@
 import { canonicalHttpUrl, MEDIA_TYPES, mediaTypeForResource } from "./candidate.js";
 
-export const DOWNLOAD_MENU_ID = "personal-vpn-download-media";
+export const DOWNLOAD_MENU_ID = "aura-media-download";
 
 export function downloadableMediaUrl(resourceUrl) {
   const canonical = canonicalHttpUrl(resourceUrl);

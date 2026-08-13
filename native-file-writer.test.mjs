@@ -21,5 +21,6 @@ test("offscreen writer relays native messaging through the background service wo
   assert.match(writer, /chrome\.runtime\.connect\(\{\s*name:\s*"native-file-writer"/);
   assert.doesNotMatch(writer, /connectNative/);
   assert.match(background, /port\.name === "native-file-writer"/);
-  assert.match(background, /connectNative\(YOUTUBE_NATIVE_HOST\)/);
+  assert.match(background, /connectNative\(MEDIA_COMPANION_NATIVE_HOST\)/);
+  assert.match(background, /com\.aura\.media_companion/);
 });

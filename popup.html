@@ -9,14 +9,23 @@
   <body>
     <main class="popup-shell">
       <header class="popup-header">
-        <div><p class="eyebrow">AURA</p><h1>미디어 다운로드</h1></div>
+        <div><p class="eyebrow">AURA</p><div class="title-row"><h1>미디어 다운로드</h1><span id="plan-badge" class="plan-badge"></span></div></div>
         <button id="refresh" class="icon-button" type="button" aria-label="현재 탭 새로고침">↻</button>
       </header>
 
+      <section id="plan-card" class="plan-card" aria-label="현재 이용 플랜">
+        <p id="plan-summary" class="plan-summary"></p>
+        <div id="pro-offer" class="pro-offer" hidden>
+          <p id="pro-benefits" class="pro-benefits"></p>
+          <a id="upgrade-link" class="upgrade-link" target="_blank" rel="noreferrer" hidden>Pro 보기</a>
+          <a id="license-entry" class="upgrade-link" href="#">Pro 키 입력</a>
+        </div>
+      </section>
+
       <div class="tab-list" role="tablist" aria-label="다운로드 기능">
         <button id="tab-detect" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="panel-detect" data-tab="detect">미디어 감지</button>
+        <button id="tab-link" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-link" data-tab="link">링크 입력</button>
         <button id="tab-downloads" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-downloads" data-tab="downloads">다운로드</button>
-        <button id="tab-youtube" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-youtube" data-tab="youtube">YouTube</button>
       </div>
 
       <section id="panel-detect" class="tab-panel" role="tabpanel" aria-labelledby="tab-detect">
@@ -26,43 +35,34 @@
           <label class="main-toggle"><input id="main-only" type="checkbox" checked /> 메인만</label>
         </div>
         <section id="candidates" class="candidate-list" aria-live="polite"></section>
-        <section class="direct-download" aria-labelledby="direct-title">
-          <strong id="direct-title">주소 직접 입력</strong>
-          <input id="direct-url" type="url" placeholder="m3u8 / mp4 / 플레이어 주소" spellcheck="false" />
-          <button id="download-url" class="secondary-button" type="button">이 주소 다운로드</button>
-          <p id="direct-status" class="field-status" role="status" aria-live="polite"></p>
-        </section>
         <button id="rescan" class="primary-button" type="button">현재 페이지 다시 감지</button>
+        <p class="privacy-note">감지한 페이지·미디어 주소는 다운로드 처리와 작업 복구를 위해 이 기기 안에서만 사용됩니다.</p>
+      </section>
+
+      <section id="panel-link" class="tab-panel" role="tabpanel" aria-labelledby="tab-link" hidden>
+        <p class="storage-note">미디어 주소 · 플레이어 페이지 · 유튜브 주소를 붙여넣어 저장합니다.</p>
+        <label class="field-label" for="direct-url">미디어 주소</label>
+        <input id="direct-url" type="url" placeholder="미디어 / 플레이어 / 유튜브 링크" spellcheck="false" />
+        <div id="youtube-quality-row" class="quality-row" hidden>
+          <label class="field-label" for="youtube-quality">화질</label>
+          <select id="youtube-quality">
+            <option value="best" data-pro-quality>최고 화질 · 자동 · Pro</option>
+            <option value="2160" data-pro-quality>최대 2160p · 4K · Pro</option>
+            <option value="1440" data-pro-quality>최대 1440p · Pro</option>
+            <option value="1080">최대 1080p</option>
+            <option value="720">최대 720p</option>
+            <option value="480">최대 480p</option>
+          </select>
+        </div>
+        <button id="download-url" class="primary-button" type="button">다운로드</button>
+        <p id="direct-status" class="field-status" role="status" aria-live="polite"></p>
+        <p class="legal-note">로그인·비공개·유료·DRM 콘텐츠 우회는 지원하지 않습니다.</p>
+        <a id="companion-help" class="companion-help" href="#" target="_blank" rel="noreferrer" hidden>PC 앱(Aura Media Companion) 설치 안내 열기</a>
       </section>
 
       <section id="panel-downloads" class="tab-panel" role="tabpanel" aria-labelledby="tab-downloads" hidden>
         <p class="storage-note">저장 위치 · Downloads\Aura Media</p>
         <section id="download-jobs" class="job-list" aria-live="polite"></section>
-      </section>
-
-      <section id="panel-youtube" class="tab-panel" role="tabpanel" aria-labelledby="tab-youtube" hidden>
-        <div class="youtube-card">
-          <span class="youtube-mark" aria-hidden="true">
-            <svg viewBox="0 0 16 16" focusable="false">
-              <path d="M4 2.75v10.5L13 8 4 2.75Z" />
-            </svg>
-          </span>
-          <div><strong>YouTube 영상 저장</strong><p>공개 단일 영상을 MP4로 Downloads 폴더에 저장합니다.</p></div>
-        </div>
-        <label class="field-label" for="youtube-url">YouTube 주소</label>
-        <input id="youtube-url" type="url" placeholder="https://www.youtube.com/watch?v=…" spellcheck="false" />
-        <label class="field-label" for="youtube-quality">화질</label>
-        <select id="youtube-quality">
-          <option value="best">최고 화질 · 자동</option>
-          <option value="2160">최대 2160p · 4K</option>
-          <option value="1440">최대 1440p</option>
-          <option value="1080">최대 1080p</option>
-          <option value="720">최대 720p</option>
-          <option value="480">최대 480p</option>
-        </select>
-        <button id="youtube-download" class="primary-button" type="button">YouTube 다운로드</button>
-        <p id="youtube-status" class="field-status" role="status" aria-live="polite"></p>
-        <p class="legal-note">로그인·비공개·유료·DRM 콘텐츠 우회는 지원하지 않습니다.</p>
       </section>
 
       <button id="scroll-more" class="scroll-more" type="button" aria-label="아래 내용 더 보기" hidden>

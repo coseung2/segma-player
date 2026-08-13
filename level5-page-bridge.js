@@ -59,14 +59,35 @@
       }
     }
 
-    for (const fragment of [
+    const fragments = [
       hls?.streamController?.fragCurrent,
       hls?.streamController?.fragPrevious,
       hls?.streamController?.fragPlaying,
-    ]) {
+      hls?.audioStreamController?.fragCurrent,
+      hls?.audioStreamController?.fragPrevious,
+    ];
+    for (const level of hls?.levels || []) {
+      if (Array.isArray(level?.details?.fragments)) fragments.push(...level.details.fragments);
+    }
+    if (Array.isArray(hls?.loadLevelObj?.details?.fragments)) {
+      fragments.push(...hls.loadLevelObj.details.fragments);
+    }
+    for (const fragment of fragments) {
       if (!sameUrl(fragment?.decryptdata?.uri, url)) continue;
       const bytes = validKeyBytes(fragment?.decryptdata?.key);
       if (bytes) return bytes;
+    }
+    return null;
+  }
+
+  async function waitForCachedKey(sessions, url, timeoutMs = 1_500) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const hls of sessions) {
+        const key = cachedKey(hls, url);
+        if (key) return key;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
     return null;
   }
@@ -222,12 +243,23 @@
       // Older Level5 builds may not expose the runtime assets used by current players.
     }
 
+    const delayedCached = await waitForCachedKey(sessions, url.href);
+    if (delayedCached) {
+      window.postMessage({ type: RESPONSE, requestId, ok: true, key: encode(delayedCached) }, "*");
+      return;
+    }
+
     for (const hls of sessions) {
       try {
         const key = await loadKey(hls, url.href);
         window.postMessage({ type: RESPONSE, requestId, ok: true, key: encode(key) }, "*");
         return;
       } catch (error) {
+        const cached = cachedKey(hls, url.href);
+        if (cached) {
+          window.postMessage({ type: RESPONSE, requestId, ok: true, key: encode(cached) }, "*");
+          return;
+        }
         if (failure === "not-level5-session-key" || failure === "level5-key-unavailable") {
           failure = errorCode(error, "level5-loader-failed");
         }

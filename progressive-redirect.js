@@ -11,11 +11,7 @@ export class ProgressiveRedirectError extends Error {
   }
 }
 
-const RECORDED_HEADER_DENYLIST = new Set([
-  "cookie", "host", "content-length", "content-type", "connection", "accept-encoding",
-  "accept", "cache-control", "pragma", "te", "upgrade", "priority", "origin",
-  "referer", "referrer", "user-agent", "range",
-]);
+const REPLAYABLE_RECORDED_HEADERS = new Set(["accept-language"]);
 
 export function replayableRecordedHeaders(value) {
   if (!value || typeof value !== "object") return {};
@@ -23,8 +19,7 @@ export function replayableRecordedHeaders(value) {
   for (const [name, headerValue] of Object.entries(value)) {
     if (typeof name !== "string" || typeof headerValue !== "string" || !headerValue) continue;
     const lower = name.toLowerCase();
-    if (RECORDED_HEADER_DENYLIST.has(lower)
-      || lower.startsWith("sec-fetch-") || lower.startsWith("sec-ch-ua")) continue;
+    if (!REPLAYABLE_RECORDED_HEADERS.has(lower)) continue;
     headers[name] = headerValue;
   }
   return headers;

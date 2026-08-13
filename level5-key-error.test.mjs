@@ -10,5 +10,5 @@ test("preserves safe Level5 diagnostic codes and rejects arbitrary page text", (
 
 test("renders a concise copyable protected-HLS failure", () => {
   assert.equal(level5KeyErrorMessage("wasm-init-failed"),
-    "보호된 HLS 키 해독 실패: Level5 WASM 코어 초기화에 실패했습니다. (wasm-init-failed)");
+    "보호된 영상 키 확인 실패: 영상 플레이어 보호 모듈 초기화에 실패했습니다. (wasm-init-failed)");
 });

@@ -13,8 +13,8 @@ test("preserves route failures instead of collapsing them to unsupported media",
   assert.equal(candidateDownloadErrorCode(new Error("other failure")), "unsupported-media");
 });
 
-test("shows actionable Korean route setup guidance", () => {
-  assert.equal(candidateDownloadErrorLabel("route-unavailable"), "VPN 설정 필요");
-  assert.match(candidateDownloadErrorMessage("route-unavailable"), /등록되지 않았습니다/);
+test("shows actionable Korean network guidance for legacy route failures", () => {
+  assert.equal(candidateDownloadErrorLabel("route-unavailable"), "네트워크 확인");
+  assert.match(candidateDownloadErrorMessage("route-unavailable"), /네트워크 연결/);
   assert.match(candidateDownloadErrorMessage("route-timeout"), /시간이 초과/);
 });

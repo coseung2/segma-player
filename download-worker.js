@@ -1,29 +1,94 @@
-import { downloadPreparedCandidate, prepareDownloadCandidate } from "./hls-download.js";
+import { downloadPreparedCandidate, prepareDownloadCandidate, setRuntimePlan } from "./hls-download.js";
 import { createDownloadScheduler } from "./download-scheduler.js";
+import { PRODUCT_EDITION } from "./edition.js";
+import { resolvePlan } from "./license.js";
+import { productPlan } from "./product-plan.js";
 
-const MAX_CONCURRENT_MEDIA_JOBS = 3;
-const scheduler = createDownloadScheduler({ concurrency: MAX_CONCURRENT_MEDIA_JOBS });
+const FALLBACK_PLAN = productPlan(PRODUCT_EDITION);
+const scheduler = createDownloadScheduler({ concurrency: FALLBACK_PLAN.maxConcurrentMediaJobs });
 const acceptedJobIds = new Set();
+const runningJobs = new Map();
+const pauseWaiters = new Map();
+const PREPARATION_TIMEOUT_MS = 45_000;
 
 async function report(jobId, patch) {
   await chrome.runtime.sendMessage({ type: "download-job-update", jobId, patch }).catch(() => {});
 }
 
+async function prepareWithTimeout(candidate, options) {
+  let timer;
+  try {
+    return await Promise.race([
+      prepareDownloadCandidate(candidate, options),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          "영상 준비 응답이 없습니다. 다른 플레이어를 재생한 뒤 다시 시도해 주세요.",
+        )), PREPARATION_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitWhilePaused(jobId) {
+  const state = runningJobs.get(jobId);
+  if (state?.sourceClosed) {
+    throw new Error("원래 탭이 닫혀 다운로드가 중단되었습니다. Pro에서는 백그라운드 다운로드가 지원됩니다.");
+  }
+  if (!state?.paused) return Promise.resolve();
+  await state.lease?.suspend();
+  await new Promise((resolve) => {
+    let waiters = pauseWaiters.get(jobId);
+    if (!waiters) {
+      waiters = new Set();
+      pauseWaiters.set(jobId, waiters);
+    }
+    waiters.add(resolve);
+  });
+  if (state.sourceClosed) {
+    throw new Error("원래 탭이 닫혀 다운로드가 중단되었습니다. Pro에서는 백그라운드 다운로드가 지원됩니다.");
+  }
+  await state.lease?.resume();
+}
+
+function setPaused(jobId, paused) {
+  const state = runningJobs.get(jobId);
+  if (!state || state.paused === paused) return false;
+  state.paused = paused;
+  if (!paused) {
+    const waiters = pauseWaiters.get(jobId);
+    if (waiters) {
+      pauseWaiters.delete(jobId);
+      for (const resolve of waiters) resolve();
+    }
+  }
+  return true;
+}
+
 async function run(jobId, candidate) {
-  const folder = null;
+  runningJobs.set(jobId, { paused: false, sourceClosed: false, lease: null });
+  const plan = await resolvePlan();
+  setRuntimePlan(plan);
+  scheduler.setConcurrency(plan.maxConcurrentMediaJobs);
   const folderName = "Downloads\\Aura Media";
   await report(jobId, { status: "running", statusText: "다운로드를 준비하는 중…", folderName });
   try {
-    const prepared = await prepareDownloadCandidate(candidate, {
-      folder,
+    const prepared = await prepareWithTimeout(candidate, {
       onStatus: (statusText) => void report(jobId, { status: "running", statusText }),
+      pauseGate: () => waitWhilePaused(jobId),
     });
     await report(jobId, {
       status: "running",
-      statusText: "준비 완료 · 다운로드 대기 중 (페이지를 벗어나도 계속됩니다).",
+      statusText: plan.backgroundDownloads
+        ? "준비 완료 · 다운로드 대기 중 (페이지를 벗어나도 계속됩니다)."
+        : "준비 완료 · 다운로드 대기 중 (원본 페이지를 열어두세요).",
       folderName,
     });
-    const result = await scheduler.schedule(async () => {
+    const result = await scheduler.schedule(async (lease) => {
+      const state = runningJobs.get(jobId);
+      if (state) state.lease = lease;
+      await waitWhilePaused(jobId);
       await report(jobId, { status: "running", statusText: "다운로드를 시작하는 중…", folderName });
       return downloadPreparedCandidate(prepared);
     });
@@ -36,11 +101,42 @@ async function run(jobId, candidate) {
       error: message,
       folderName,
     });
+  } finally {
+    runningJobs.delete(jobId);
+    pauseWaiters.delete(jobId);
+    acceptedJobIds.delete(jobId);
   }
-  acceptedJobIds.delete(jobId);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "download-pause-state"
+    && sender.id === chrome.runtime.id
+    && typeof message.jobId === "string") {
+    if (message.sourceClosed === true) {
+      const state = runningJobs.get(message.jobId);
+      if (state) {
+        state.sourceClosed = true;
+        state.paused = false;
+      }
+      const waiters = pauseWaiters.get(message.jobId);
+      if (waiters) {
+        pauseWaiters.delete(message.jobId);
+        for (const resolve of waiters) resolve();
+      }
+      void report(message.jobId, {
+        status: "failed",
+        statusText: "원래 탭이 닫혀 다운로드가 중단되었습니다. Pro에서는 백그라운드 다운로드가 지원됩니다.",
+        error: "source-tab-closed",
+      });
+      return false;
+    }
+    if (setPaused(message.jobId, message.paused === true)) {
+      void report(message.jobId, message.paused
+        ? { status: "paused", statusText: "일시정지 — 원래 페이지로 돌아가주세요." }
+        : { status: "running", statusText: "다운로드를 계속합니다…" });
+    }
+    return false;
+  }
   if (message?.type !== "run-download-job" || sender.id !== chrome.runtime.id) return false;
   if (typeof message.jobId !== "string" || !message.candidate) {
     sendResponse({ ok: false, error: "invalid-download-job" });
@@ -52,6 +148,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   acceptedJobIds.add(message.jobId);
   void run(message.jobId, message.candidate);
-  sendResponse({ ok: true, concurrency: MAX_CONCURRENT_MEDIA_JOBS });
+  sendResponse({ ok: true, concurrency: scheduler.concurrency });
+  return false;
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "license-changed") return false;
+  void resolvePlan().then((plan) => {
+    setRuntimePlan(plan);
+    scheduler.setConcurrency(plan.maxConcurrentMediaJobs);
+  });
   return false;
 });

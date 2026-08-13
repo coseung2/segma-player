@@ -2,17 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-test("popover exposes detection, downloads, and YouTube without development test mode", async () => {
+test("popover exposes detection, link input, and downloads without development test mode", async () => {
   const [html, script] = await Promise.all([
     readFile(new URL("./popup.html", import.meta.url), "utf8"),
     readFile(new URL("./popup.js", import.meta.url), "utf8"),
   ]);
-  for (const tab of ["detect", "downloads", "youtube"]) {
+  for (const tab of ["detect", "link", "downloads"]) {
     assert.match(html, new RegExp(`data-tab="${tab}"`));
     assert.match(html, new RegExp(`id="panel-${tab}"`));
   }
   assert.doesNotMatch(html, /개발 테스트 모드|test-domains|test-mode/);
   assert.doesNotMatch(html, /choose-folder|폴더 선택/);
+  assert.doesNotMatch(html, /tab-youtube|panel-youtube|youtube-mark|youtube-url|youtube-download/);
   assert.doesNotMatch(script, /auraTestMode|auraTestDomains/);
   assert.doesNotMatch(script, /showDirectoryPicker|folder-store/);
   assert.match(script, /candidate-preview/);
@@ -46,6 +47,26 @@ test("downloads tab renders truthful accessible job progress", async () => {
   assert.match(css, /prefers-reduced-motion/);
 });
 
+test("failed retryable downloads expose an accessible retry action", async () => {
+  const [script, css] = await Promise.all([
+    readFile(new URL("./popup.js", import.meta.url), "utf8"),
+    readFile(new URL("./popup.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(script, /retryableDownloadJob\(job\)/);
+  assert.match(script, /type:\s*"retry-download-job",\s*jobId:\s*job\.id/);
+  assert.match(script, /retry\.disabled = true/);
+  assert.match(script, /aria-live", "polite"/);
+  assert.match(css, /\.job-retry-button\s*\{[^}]*min-height:\s*44px/s);
+  assert.match(css, /\.job-retry-button:focus-visible/);
+});
+
+test("candidate downloads queue without subtitle translation work", async () => {
+  const script = await readFile(new URL("./popup.js", import.meta.url), "utf8");
+  assert.doesNotMatch(script, /prepareSubtitleTranslationModels|subtitle-translation|자막 준비/);
+  assert.match(script, /type:\s*"download-candidate"/);
+  assert.doesNotMatch(script, /translatedTitle|translateTitleToKorean/);
+});
+
 test("popover hides its single scrollbar and exposes a more-content control", async () => {
   const css = await readFile(new URL("./popup.css", import.meta.url), "utf8");
   const html = await readFile(new URL("./popup.html", import.meta.url), "utf8");
@@ -60,7 +81,7 @@ test("popover hides its single scrollbar and exposes a more-content control", as
   assert.match(html, /m7 6 5 5 5-5/);
 });
 
-test("YouTube tab exposes supported quality caps and sends the selection", async () => {
+test("link tab exposes YouTube quality caps and sends the selection", async () => {
   const [html, script] = await Promise.all([
     readFile(new URL("./popup.html", import.meta.url), "utf8"),
     readFile(new URL("./popup.js", import.meta.url), "utf8"),
@@ -69,5 +90,20 @@ test("YouTube tab exposes supported quality caps and sends the selection", async
   for (const quality of ["best", "2160", "1440", "1080", "720", "480"]) {
     assert.match(html, new RegExp(`value="${quality}"`));
   }
+  assert.match(script, /type:\s*"youtube-download"/);
   assert.match(script, /quality:\s*byId\("youtube-quality"\)\.value/);
+  assert.match(script, /updateLinkPanel/);
+});
+
+test("free plan UI gates paid work while keeping Pro benefits visible", async () => {
+  const [html, script] = await Promise.all([
+    readFile(new URL("./popup.html", import.meta.url), "utf8"),
+    readFile(new URL("./popup.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(html, /id="plan-summary"/);
+  assert.match(html, /id="pro-benefits"/);
+  assert.match(html, /id="license-entry"/);
+  assert.doesNotMatch(script, /koreanSubtitleTrack|한국어 자막/);
+  assert.match(script, /option\.disabled = !youtubeQualityAllowed/);
+  assert.match(script, /\^https:\\\/\\\//);
 });

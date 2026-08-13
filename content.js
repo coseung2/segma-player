@@ -1,6 +1,6 @@
 (() => {
-  if (globalThis.__personalVpnMediaDetectorInstalledV3) return;
-  globalThis.__personalVpnMediaDetectorInstalledV3 = true;
+  if (globalThis.__auraMediaDetectorInstalledV3) return;
+  globalThis.__auraMediaDetectorInstalledV3 = true;
   const MAX_URL_BYTES = 4096;
   const MAX_TITLE_CHARACTERS = 512;
   const MAX_SEEN = 1000;
@@ -261,19 +261,19 @@
     return true;
   }
 
-  async function reportDoodPlayer() {
-    const resolved = await resolveDoodDirect();
-    if (!resolved) return;
-    report(resolved.url, "video/mp4", false, true);
-    send({ type: "dood-direct", url: resolved.url, frameUrl: resolved.frameUrl });
-  }
-
   function handleDoodRequest(message, sendResponse) {
     if (message?.type !== "get-dood-direct") return false;
     void resolveDoodDirect(true).then((resolved) => {
       sendResponse(resolved ? { ok: true, url: resolved.url, frameUrl: resolved.frameUrl } : { ok: false });
     });
     return true;
+  }
+
+  async function reportDoodPlayer() {
+    const resolved = await resolveDoodDirect();
+    if (!resolved) return;
+    report(resolved.url, "video/mp4", false, true);
+    send({ type: "dood-direct", url: resolved.url, frameUrl: resolved.frameUrl });
   }
 
   function handleDirectDownload(message, sendResponse) {

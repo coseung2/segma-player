@@ -69,8 +69,9 @@ export async function createNativeFileWriter(filename) {
       }
     },
     async close() {
-      await request({ type: "media-close" });
+      const response = await request({ type: "media-close" });
       try { port.disconnect(); } catch { /* already disconnected */ }
+      return response;
     },
     async abort() {
       try { await request({ type: "media-abort" }); } catch { /* best effort */ }

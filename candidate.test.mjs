@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   canonicalHttpUrl,
   isDownloadableMediaType,
+  isLikelyHlsSegmentUrl,
+  isLikelyPreviewResourceUrl,
   MEDIA_TYPES,
   makeCandidate,
   mediaTypeForResource,
@@ -20,18 +22,6 @@ test("classifies real media path extensions", () => {
     mediaTypeForResource("https://media.example/master.m3u8?token=secret"),
     MEDIA_TYPES.HLS_MEDIA,
   );
-});
-
-test("canonical media URLs reject IPv6 forms that embed private IPv4", () => {
-  for (const value of [
-    "https://[64:ff9b::a00:1]/video.mp4",
-    "https://[64:ff9b::7f00:1]/video.mp4",
-    "https://[2002:a00:1::]/video.mp4",
-    "https://[::a00:1]/video.mp4",
-    "https://[fec0::1]/video.mp4",
-  ]) assert.equal(canonicalHttpUrl(value), null, value);
-  assert.equal(canonicalHttpUrl("https://[64:ff9b::808:808]/video.mp4")?.hostname,
-    "[64:ff9b::808:808]");
 });
 
 test("classifies tokenized playlists by response content type", () => {
@@ -129,6 +119,18 @@ test("keeps blob media-element sources as UNKNOWN instead of a broken button", (
   assert.equal(candidate?.mediaType, MEDIA_TYPES.UNKNOWN);
 });
 
+test("canonical media URLs reject IPv6 forms that embed private IPv4", () => {
+  for (const value of [
+    "https://[64:ff9b::a00:1]/video.mp4",
+    "https://[64:ff9b::7f00:1]/video.mp4",
+    "https://[2002:a00:1::]/video.mp4",
+    "https://[::a00:1]/video.mp4",
+    "https://[fec0::1]/video.mp4",
+  ]) assert.equal(canonicalHttpUrl(value), null, value);
+  assert.equal(canonicalHttpUrl("https://[64:ff9b::808:808]/video.mp4")?.hostname,
+    "[64:ff9b::808:808]");
+});
+
 test("does not promote misleading preview GIF sources to downloadable video", () => {
   const candidate = makeCandidate({
     pageTitle: "Related preview",
@@ -138,6 +140,45 @@ test("does not promote misleading preview GIF sources to downloadable video", ()
     fromMediaElement: true,
   });
   assert.equal(candidate, null);
+});
+
+test("does not expose individual HLS transport segments as complete videos", () => {
+  const segmentUrl = "https://cdn.example/hls/segment-0075.ts?token=secret";
+  assert.equal(isLikelyHlsSegmentUrl(segmentUrl), true);
+  assert.equal(makeCandidate({
+    pageTitle: "Full video",
+    pageUrl: "https://page.example/watch",
+    resourceUrl: segmentUrl,
+    contentType: "video/mp2t",
+    fromMediaElement: true,
+  }), null);
+  assert.equal(makeCandidate({
+    pageTitle: "Full video",
+    pageUrl: "https://page.example/watch",
+    resourceUrl: "https://cdn.example/hls/segment-0075.m4s",
+    contentType: "video/iso.segment",
+    fromMediaElement: true,
+  }), null);
+  assert.equal(makeCandidate({
+    pageTitle: "Direct audio",
+    pageUrl: "https://page.example/listen",
+    resourceUrl: "https://cdn.example/audio/full-track.aac",
+    contentType: "audio/aac",
+    fromMediaElement: true,
+  })?.mediaType, MEDIA_TYPES.PROGRESSIVE);
+});
+
+test("recognizes preview resource hosts and paths", () => {
+  assert.equal(isLikelyPreviewResourceUrl("https://previews.externulls.com/abc/xyz.mp4"), true);
+  assert.equal(isLikelyPreviewResourceUrl("https://video.beeg.com/video.mp4"), false);
+  assert.equal(isLikelyPreviewResourceUrl("https://cdn.example/clips/video-preview.mp4"), true);
+  assert.equal(makeCandidate({
+    pageTitle: "Preview",
+    pageUrl: "https://page.example/watch",
+    resourceUrl: "https://previews.externulls.com/abc/preview.mp4",
+    contentType: "video/mp4",
+    fromMediaElement: true,
+  }), null);
 });
 
 test("keeps the detecting iframe id on internal download candidates", () => {

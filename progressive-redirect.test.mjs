@@ -37,7 +37,11 @@ test("probes through the current route before routing the final media host", asy
   const prepared = await resolver.resolve({
     url: initialUrl,
     referrer,
-    requestHeaders: { Authorization: "Bearer sample", rAnGe: "bytes=1048576-" },
+    requestHeaders: {
+      Authorization: "Bearer sample",
+      "Accept-Language": "ko-KR,ko;q=0.9",
+      rAnGe: "bytes=1048576-",
+    },
   });
   events.push(["full", prepared.url, prepared.referrer]);
 
@@ -47,7 +51,8 @@ test("probes through the current route before routing the final media host", asy
     ["route", finalUrl],
     ["full", finalUrl],
   ]);
-  assert.equal(events[0][2].headers.Authorization, "Bearer sample");
+  assert.equal(events[0][2].headers.Authorization, undefined);
+  assert.equal(events[0][2].headers["Accept-Language"], "ko-KR,ko;q=0.9");
   assert.equal(events[0][2].headers.Range, "bytes=0-0");
   assert.equal(new Headers(events[0][2].headers).get("range"), "bytes=0-0");
   assert.equal(events[0][2].referrer, referrer);
@@ -140,17 +145,22 @@ test("stops after both current-route and routed probes fail", async () => {
   assert.equal(probes, 2);
 });
 
-test("filters recorded Range case-insensitively before replay or DNR rule conversion", () => {
+test("filters range and authentication headers before replay or DNR conversion", () => {
   const replayable = replayableRecordedHeaders({
     rAnGe: "bytes=1048576-",
     Authorization: "Bearer sample",
+    "Proxy-Authorization": "Basic sample",
+    "X-API-Key": "sample-key",
+    "X-Media-Token": "non-authenticated-context",
+    "Accept-Language": "ko-KR,ko;q=0.9",
   });
   const dnrRequestHeaders = Object.entries(replayable)
     .map(([header, value]) => ({ header, operation: "set", value }));
 
   assert.equal(new Headers(replayable).has("range"), false);
+  assert.equal(new Headers(replayable).has("authorization"), false);
   assert.deepEqual(dnrRequestHeaders, [
-    { header: "Authorization", operation: "set", value: "Bearer sample" },
+    { header: "Accept-Language", operation: "set", value: "ko-KR,ko;q=0.9" },
   ]);
 });
 

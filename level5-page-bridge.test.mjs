@@ -29,6 +29,9 @@ test("Level5 bridge reuses Hls.js decrypted key cache before requesting the key 
   assert.match(source, /streamController\?\.keyLoader/);
   assert.match(source, /keyUriToKeyInfo/);
   assert.match(source, /info\?\.decryptdata\?\.key/);
+  assert.match(source, /level\?\.details\?\.fragments/);
+  assert.match(source, /waitForCachedKey\(sessions, url\.href\)/);
+  assert.match(source, /const cached = cachedKey\(hls, url\.href\)/);
 });
 
 test("Level5 runtime assets stay on the player origin and inherit its version", () => {

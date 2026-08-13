@@ -5,7 +5,7 @@ import path from "node:path";
 
 const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (value) => value.slice(1)));
 const TEXT_EXTENSIONS = new Set([".css", ".html", ".js", ".json", ".md", ".mjs", ".ps1", ".rs", ".toml"]);
-const SKIP_DIRECTORIES = new Set([".codegraph", ".git", "_metadata", "target"]);
+const SKIP_DIRECTORIES = new Set([".codegraph", ".git", "_metadata", "artifacts", "dist", "node_modules", "target"]);
 
 async function sourceFiles(directory) {
   const files = [];

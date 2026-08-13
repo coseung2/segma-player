@@ -4,6 +4,7 @@ import {
   canonicalHttpUrl,
   isDownloadableMediaType,
   isImageResourceUrl,
+  isLikelyHlsSegmentUrl,
   makeCandidate,
   mediaTypeForResource,
   normalizeOriginPath,
@@ -12,12 +13,24 @@ import {
   toTextOnlyRows,
   upsertCandidate,
 } from "./candidate.js";
-import { BRIDGE_CONTEXT, BRIDGE_EXTENSION_ID, BridgeClientSession } from "./bridge.js";
 import { DOWNLOAD_MENU_ID } from "./download.js";
 import { candidateDownloadErrorCode } from "./download-errors.js";
-import { createDownloadJob, publicDownloadJobs, updateDownloadJob } from "./download-jobs.js";
+import {
+  createDownloadJob,
+  persistedDownloadJobs,
+  publicDownloadJobs,
+  retryPayloadForJob,
+  updateDownloadJob,
+} from "./download-jobs.js";
 import { normalizeLevel5KeyError } from "./level5-key-error.js";
-import { createMediaRouteClient } from "./route-client.js";
+import { PRODUCT_EDITION } from "./edition.js";
+import {
+  activateLicense,
+  getStoredLicense,
+  refreshLicense,
+  resolveEdition,
+  resolvePlan,
+} from "./license.js";
 import {
   canonicalMediaFetchReferrer,
   canonicalMediaFetchUrl,
@@ -28,6 +41,13 @@ import {
   OFFSCREEN_DOCUMENT_TAB_ID,
 } from "./media-fetch-lease.js";
 import { createPlayerGraphResolver, looksLikePlayerPage } from "./player-page-resolver.js";
+import { youtubeQualityAllowed } from "./product-plan.js";
+import {
+  getYouTubeServerUrl,
+  submitYouTubeJob,
+  waitForYouTubeJob,
+  youtubeJobFileUrl,
+} from "./youtube-server.js";
 import {
   authenticatedRecoveryForProgressiveError,
   createProgressiveRedirectResolver,
@@ -36,8 +56,6 @@ import {
 } from "./progressive-redirect.js";
 
 const candidates = new Map();
-let nativePort = null;
-let bridgeSession = null;
 const RECORDED_HEADER_LIMIT = 1000;
 const PROGRESSIVE_REDIRECT_TARGET_LIMIT = 1000;
 const PROGRESSIVE_REDIRECT_TARGET_TTL_MS = 60_000;
@@ -49,7 +67,7 @@ const nonPersistentCandidates = new WeakSet();
 const SESSION_CANDIDATES_KEY = "candidates";
 const tabTitleCache = new Map();
 const DOWNLOAD_JOBS_KEY = "downloadJobs";
-const YOUTUBE_NATIVE_HOST = "com.aura.youtube_downloader";
+const MEDIA_COMPANION_NATIVE_HOST = "com.aura.media_companion";
 const downloadJobs = new Map();
 const youtubePorts = new Map();
 let offscreenCreatePromise = null;
@@ -61,9 +79,15 @@ const mediaFetchRuleIds = createMediaFetchRuleIdAllocator();
 const mediaFetchLeases = createMediaFetchLeaseRegistry({
   staleAfterMs: MEDIA_FETCH_LEASE_TTL_MS,
 });
-const mediaRouteClient = createMediaRouteClient();
+async function ensureDirectMediaAccess(values) {
+  const hosts = [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => canonicalHttpUrl(value)?.hostname)
+    .filter(Boolean))];
+  return { ok: true, hosts };
+}
+
 const progressiveRedirectResolver = createProgressiveRedirectResolver({
-  ensureRoutes: (urls) => mediaRouteClient.ensureRoutes(urls),
+  ensureRoutes: ensureDirectMediaAccess,
   getRedirectTarget: (url) => progressiveRedirectTargetFor(url),
   getRequestHeaders: (url) => {
     const recorded = recordedHeaders.get(canonicalMediaFetchUrl(url));
@@ -71,11 +95,13 @@ const progressiveRedirectResolver = createProgressiveRedirectResolver({
   },
 });
 
-// Reuse one bounded resolver so identical player pages share in-flight work
-// and short-lived results. Do not clear it on one tab's navigation: clear()
-// aborts every in-flight traversal, including work owned by other tabs.
+// Shared, bounded player-graph resolver for every player-page resolution
+// path. Caches are keyed by canonical URL with short TTLs; the factory's only
+// clear() aborts every in-flight traversal, so tab navigation never calls it
+// globally (one tab would cancel another tab's active resolution). Positive
+// and negative TTLs self-expire stale entries instead.
 const playerGraphResolver = createPlayerGraphResolver({
-  ensureRoute: (urls) => mediaRouteClient.ensureRoutes(urls),
+  ensureRoute: ensureDirectMediaAccess,
   getRedirectTarget: (url) => progressiveRedirectTargetFor(url),
 });
 
@@ -86,7 +112,7 @@ const downloadJobsReady = chrome.storage.session.get({ [DOWNLOAD_JOBS_KEY]: [] }
 }).catch(() => {});
 
 async function persistDownloadJobs() {
-  await chrome.storage.session.set({ [DOWNLOAD_JOBS_KEY]: publicDownloadJobs(downloadJobs.values()) });
+  await chrome.storage.session.set({ [DOWNLOAD_JOBS_KEY]: persistedDownloadJobs(downloadJobs.values()) });
 }
 
 async function patchDownloadJob(jobId, patch) {
@@ -115,6 +141,38 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
   if (!url) throw new Error("invalid-youtube-url");
   const quality = String(rawQuality || "best");
   if (!YOUTUBE_QUALITIES.has(quality)) throw new Error("invalid-youtube-quality");
+  const plan = await resolvePlan();
+  if (!youtubeQualityAllowed(plan, quality)) {
+    throw new Error("pro-feature-required");
+  }
+
+  const serverUrl = await getYouTubeServerUrl();
+  if (serverUrl) {
+    const submitted = await submitYouTubeJob(url, quality, serverUrl);
+    if (submitted.ok) {
+      const waited = await waitForYouTubeJob(submitted.jobId, serverUrl);
+      if (waited.ok) {
+        const fileUrl = youtubeJobFileUrl(submitted.jobId, serverUrl);
+        const candidate = observeResource({
+          pageTitle: waited.title || "YouTube 영상",
+          pageUrl: url,
+          resourceUrl: fileUrl,
+          contentType: "video/mp4",
+        });
+        if (!candidate) throw new Error("unsupported-media");
+        const result = await beginCandidateDownload(candidate);
+        return { mode: "youtube-server", jobId: result.jobId };
+      }
+      const detail = typeof waited.error === "string" && waited.error ? waited.error : "job-failed";
+      throw new Error(`Aura YouTube 서버 처리 실패 (${detail.slice(0, 300)})`);
+    }
+    if (submitted.error === "monthly-limit-reached") {
+      const limit = Number.isInteger(submitted.limit) ? ` (${submitted.limit}개)` : "";
+      throw new Error(`이번 달 Aura YouTube 무료 다운로드 한도를 사용했습니다${limit}. Pro 라이선스를 등록하면 제한이 풀립니다.`);
+    }
+    // Unreachable or transient server errors fall through to the Companion path.
+  }
+
   await downloadJobsReady;
   const jobId = crypto.randomUUID();
   downloadJobs.set(jobId, createDownloadJob({
@@ -123,10 +181,16 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
     mediaType: "YOUTUBE",
     source: "youtube",
     folderName: "Downloads",
+    retryPayload: { kind: "youtube", url, quality },
   }));
   await persistDownloadJobs();
 
-  const port = chrome.runtime.connectNative(YOUTUBE_NATIVE_HOST);
+  let port;
+  try {
+    port = chrome.runtime.connectNative(MEDIA_COMPANION_NATIVE_HOST);
+  } catch {
+    throw new Error("Aura Media Companion을 실행하지 못했습니다. 노트북 서버 또는 컴패니언 연결을 확인해 주세요.");
+  }
   youtubePorts.set(jobId, port);
   let finished = false;
   port.onMessage.addListener((message) => {
@@ -151,10 +215,10 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
   });
   port.onDisconnect.addListener(() => {
     youtubePorts.delete(jobId);
-    const detail = chrome.runtime.lastError?.message || "youtube-helper-disconnected";
+    const detail = chrome.runtime.lastError?.message || "media-companion-disconnected";
     if (!finished) void patchDownloadJob(jobId, {
       status: "failed",
-      statusText: "YouTube 다운로드 helper를 실행하지 못했습니다.",
+      statusText: "Aura Media Companion을 실행하지 못했습니다.",
       error: detail,
     });
   });
@@ -211,11 +275,6 @@ function recordedHeadersForUrl(url) {
 
 function mediaFetchSenderTabId(sender) {
   if (sender?.id !== chrome.runtime.id) return null;
-  const downloadUrl = chrome.runtime.getURL("download.html");
-  if (Number.isInteger(sender.tab?.id) && sender.tab.id > 0
-    && typeof sender.tab.url === "string" && sender.tab.url.startsWith(downloadUrl)) {
-    return sender.tab.id;
-  }
   if (sender.url === chrome.runtime.getURL("download-worker.html")) return OFFSCREEN_DOCUMENT_TAB_ID;
   return null;
 }
@@ -345,7 +404,7 @@ function configureDownloadMenu() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: DOWNLOAD_MENU_ID,
-      title: "Aura VPN으로 미디어 다운로드",
+      title: "Aura Media로 다운로드",
       contexts: ["video", "audio"],
     });
   });
@@ -378,25 +437,84 @@ async function dispatchMediaDownload(jobId, candidate) {
       statusText: "다운로드 작업을 시작하지 못했습니다.",
       error: error?.message || "worker-unavailable",
     });
+    jobSourceTabs.delete(jobId);
   }
 }
 
+// Tab-focus pausing is owned by the background service worker because the
+// offscreen document cannot access chrome.tabs / chrome.windows. The worker
+// only receives pause-state messages over chrome.runtime.
+const jobSourceTabs = new Map();
+
+function sendPauseState(jobId, paused, sourceClosed = false) {
+  void chrome.runtime.sendMessage({ type: "download-pause-state", jobId, paused, sourceClosed })
+    .catch(() => {});
+}
+
+async function applyTabPauseState(activeTabId) {
+  const plan = await resolvePlan();
+  if (plan.backgroundDownloads) {
+    for (const jobId of jobSourceTabs.keys()) sendPauseState(jobId, false);
+    return;
+  }
+  for (const [jobId, sourceTabId] of jobSourceTabs) {
+    sendPauseState(jobId, Number.isInteger(sourceTabId) && sourceTabId !== activeTabId);
+  }
+}
+
+chrome.tabs.onActivated.addListener(({ tabId }) => void applyTabPauseState(tabId));
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    for (const jobId of jobSourceTabs.keys()) sendPauseState(jobId, true);
+    return;
+  }
+  void chrome.tabs.query({ active: true, windowId })
+    .then((tabs) => applyTabPauseState(tabs[0]?.id))
+    .catch(() => {});
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  for (const [jobId, sourceTabId] of jobSourceTabs) {
+    if (sourceTabId === tabId) {
+      jobSourceTabs.delete(jobId);
+      sendPauseState(jobId, true, true);
+    }
+  }
+});
+
+function reapplyPauseState() {
+  void chrome.tabs.query({ active: true, currentWindow: true })
+    .then((tabs) => applyTabPauseState(tabs[0]?.id))
+    .catch(() => {});
+}
+
+chrome.storage.local?.onChanged?.addListener?.((changes, areaName) => {
+  if (areaName !== "local" || !changes?.auraLicense) return;
+  void chrome.runtime.sendMessage({ type: "license-changed" }).catch(() => {});
+  reapplyPauseState();
+});
+
 async function queueMediaDownload(candidate) {
   await downloadJobsReady;
+  const plan = await resolvePlan();
   const jobId = crypto.randomUUID();
   const mode = candidate.mediaType === "PROGRESSIVE" ? "stream" : "hls";
   const job = createDownloadJob({
     id: jobId,
     title: candidate.pageTitle || "미디어 다운로드",
     mediaType: candidate.mediaType,
+    retryPayload: { kind: "media", candidate: structuredClone(candidate) },
   });
   downloadJobs.set(jobId, job);
+  if (!plan.backgroundDownloads && Number.isInteger(candidate?.tabId) && candidate.tabId > 0) {
+    jobSourceTabs.set(jobId, candidate.tabId);
+  }
   await persistDownloadJobs();
   void dispatchMediaDownload(jobId, candidate);
   return { mode, jobId };
 }
 
 async function beginCandidateDownload(candidate) {
+  if (isLikelyHlsSegmentUrl(candidate?.resourceUrl)) throw new Error("unsupported-media");
   if (candidate.mediaType === "PROGRESSIVE") {
     return queueMediaDownload(candidate);
   }
@@ -406,8 +524,19 @@ async function beginCandidateDownload(candidate) {
   throw new Error("unsupported-media");
 }
 
+async function retryDownloadJob(jobId) {
+  await downloadJobsReady;
+  const job = downloadJobs.get(jobId);
+  if (!job) throw new Error("download-job-not-found");
+  const payload = retryPayloadForJob(job);
+  if (!payload) throw new Error("download-job-not-retryable");
+  if (payload.kind === "media" && payload.candidate) return beginCandidateDownload(payload.candidate);
+  if (payload.kind === "youtube") return startYouTubeDownload(payload.url, payload.quality);
+  throw new Error("download-job-not-retryable");
+}
+
 async function sniffMediaContentType(url) {
-  await mediaRouteClient.ensureRoutes([url]);
+  await ensureDirectMediaAccess([url]);
   try {
     const response = await fetch(url, {
       method: "GET",
@@ -424,15 +553,6 @@ async function sniffMediaContentType(url) {
   }
 }
 
-function forwardCandidate(candidate) {
-  if (!nativePort || !bridgeSession?.authenticated || candidate.resourceUrl.startsWith("blob:")) return;
-  try {
-    nativePort.postMessage(bridgeSession.candidateEnvelope(candidate));
-  } catch {
-    // The session remains closed; no sensitive diagnostic is emitted.
-  }
-}
-
 function popupCandidate(candidate) {
   const projection = redactCandidateForUi(candidate);
   const previewUrl = canonicalHttpUrl(candidate.resourceUrl)?.href || null;
@@ -446,10 +566,8 @@ function playerCandidateHasQuery(candidate) {
 
 function observeCandidate(candidate, { nonPersistent = false } = {}) {
   if (!candidate) return null;
-  if (!nativePort) connectWithAppContext();
   const stored = upsertCandidate(candidates, candidate, LIMITS.candidates);
   if (nonPersistent || playerCandidateHasQuery(stored)) nonPersistentCandidates.add(stored);
-  forwardCandidate(stored);
   persistCandidates();
   return stored;
 }
@@ -507,45 +625,10 @@ async function tabTitle(tabId) {
   }
 }
 
-function connectNativeBridge(configuration) {
-  if (nativePort || !configuration) return;
-  try {
-    bridgeSession = new BridgeClientSession(configuration);
-    nativePort = chrome.runtime.connectNative("com.personalvpn.bridge");
-    nativePort.onMessage.addListener((message) => {
-      if (bridgeSession?.acceptAck(message)) {
-        for (const candidate of candidates.values()) forwardCandidate(candidate);
-      }
-    });
-    nativePort.onDisconnect.addListener(() => {
-      // Reading lastError marks the native-port disconnect as handled. Chrome
-      // otherwise reports an unchecked runtime error when an extension reload
-      // closes the previous host connection.
-      void chrome.runtime.lastError;
-      nativePort = null;
-      bridgeSession = null;
-    });
-    nativePort.postMessage(bridgeSession.beginHello());
-  } catch {
-    nativePort = null;
-    bridgeSession = null;
-  }
-}
-
-function connectWithAppContext() {
-  connectNativeBridge({
-    expectedSecret: BRIDGE_CONTEXT,
-    sessionId: `extension-${crypto.randomUUID()}`,
-    expiresAtMs: Date.now() + 15 * 60 * 1000,
-  });
-}
-
 function usableRequestHeader(name, value) {
   const lower = String(name || "").toLowerCase();
   if (typeof value !== "string" || value.length === 0 || value.length > 2048) return false;
-  if (["cookie", "host", "content-length", "connection", "accept-encoding", "cache-control", "pragma", "te", "upgrade", "priority", "range"].includes(lower)) return false;
-  if (lower.startsWith("sec-fetch-") || lower.startsWith("sec-ch-ua")) return false;
-  return true;
+  return ["referer", "referrer", "accept-language"].includes(lower);
 }
 
 function recordRequestHeaders(details) {
@@ -614,7 +697,6 @@ chrome.runtime.onInstalled.addListener(() => {
   configureDownloadMenu();
   void reinjectContentScripts();
 });
-chrome.runtime.onStartup.addListener(connectWithAppContext);
 chrome.tabs.onRemoved.addListener((tabId) => {
   mainFramesByTab.delete(tabId);
   tabTitleCache.delete(tabId);
@@ -698,6 +780,18 @@ chrome.webRequest.onHeadersReceived.addListener(
 );
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "retry-download-job" && !sender.tab) {
+    retryDownloadJob(message.jobId).then(
+      (result) => sendResponse({ type: "download-result", ok: true, ...result }),
+      (error) => sendResponse({
+        type: "download-result",
+        ok: false,
+        error: error?.message || "download-job-retry-failed",
+      }),
+    );
+    return true;
+  }
+
   if (message?.type === "list-download-jobs" && !sender.tab) {
     downloadJobsReady.then(() => sendResponse({
       type: "download-jobs",
@@ -709,6 +803,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "download-job-update"
     && sender.id === chrome.runtime.id
     && sender.url === chrome.runtime.getURL("download-worker.html")) {
+    if (["completed", "failed"].includes(message.patch?.status)) jobSourceTabs.delete(message.jobId);
     patchDownloadJob(message.jobId, message.patch).then(
       (job) => sendResponse({ ok: Boolean(job) }),
       () => sendResponse({ ok: false }),
@@ -719,13 +814,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "youtube-download" && !sender.tab) {
     startYouTubeDownload(message.url, message.quality).then(
       (result) => sendResponse({ type: "download-result", ok: true, ...result }),
-      (error) => sendResponse({ type: "download-result", ok: false, error: error?.message || "youtube-helper-unavailable" }),
+      (error) => sendResponse({ type: "download-result", ok: false, error: error?.message || "media-companion-unavailable" }),
     );
     return true;
   }
 
   if (message?.type === "list-candidates" && !sender.tab) {
-    if (!nativePort) connectWithAppContext();
     (async () => {
       let activeTabId = null;
       try {
@@ -733,7 +827,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         activeTabId = tab?.id ?? null;
       } catch { /* popup may open before tabs API is ready */ }
       const all = [...candidates.values()]
-        .filter((candidate) => isDownloadableMediaType(candidate.mediaType))
+        .filter((candidate) => isDownloadableMediaType(candidate.mediaType)
+          && !isLikelyHlsSegmentUrl(candidate.resourceUrl))
         .map(popupCandidate);
       const filtered = activeTabId == null ? all : all.filter((candidate) => candidate.tabId === activeTabId);
       sendResponse({
@@ -801,35 +896,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "download-in-source-frame" && validMediaFetchSender(sender)) {
+    const tabId = Number(message.tabId);
+    const frameId = message.frameId == null ? null : Number(message.frameId);
+    const url = canonicalMediaFetchUrl(message.url);
+    const filename = typeof message.filename === "string"
+      ? message.filename.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 240)
+      : "";
+    if (!Number.isInteger(tabId) || tabId <= 0 || (frameId != null && (!Number.isInteger(frameId) || frameId < 0))
+      || !url || !isLikelyDoodMediaHost(url) || !filename) {
+      sendResponse({ ok: false, error: "invalid-source-download" });
+      return false;
+    }
+    const options = frameId == null ? null : { frameId };
+    sendTabMessageWithTimeout(tabId, { type: "download-direct", url, filename }, 8_000, options).then(
+      (response) => sendResponse(response?.ok ? { ok: true } : { ok: false, error: "source-frame-unavailable" }),
+      () => sendResponse({ ok: false, error: "source-frame-unavailable" }),
+    );
+    return true;
+  }
+
   if (message?.type === "ensure-media-routes") {
     if (!validMediaRouteSender(sender)) {
       sendResponse({ ok: false, error: "unauthorized" });
       return false;
     }
-    mediaRouteClient.ensureRoutes(message.urls).then(
+    ensureDirectMediaAccess(message.urls).then(
       (result) => sendResponse(result),
       (error) => sendResponse({ ok: false, error: error?.code || "route-preparation-failed" }),
     );
     return true;
-  }
-
-  if (message?.type === "get-candidate-for-download" && sender.id === chrome.runtime.id) {
-    const candidate = [...candidates.values()].find((item) => item.id === message.candidateId);
-    if (!candidate) {
-      sendResponse({ ok: false, error: "candidate-not-found" });
-      return false;
-    }
-    sendResponse({
-      ok: true,
-      candidateId: candidate.id,
-      tabId: candidate.tabId,
-      frameId: candidate.frameId,
-      pageTitle: candidate.pageTitle,
-      pageUrl: candidate.pageUrl,
-      mediaType: candidate.mediaType,
-      resourceUrl: candidate.resourceUrl,
-    });
-    return false;
   }
 
   if (message?.type === "get-request-headers" && validMediaFetchSender(sender)) {
@@ -848,6 +944,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message?.type === "license-status" && sender.id === chrome.runtime.id) {
+    void (async () => {
+      const stored = await getStoredLicense();
+      const edition = await resolveEdition();
+      sendResponse({
+        ok: true,
+        edition,
+        status: stored?.status || "none",
+        key: typeof stored?.key === "string" ? stored.key : "",
+      });
+    })();
+    return true;
+  }
+
+  if (message?.type === "license-activate" && sender.id === chrome.runtime.id) {
+    const key = typeof message.key === "string" ? message.key : "";
+    void (async () => {
+      const result = await activateLicense(key);
+      if (result.ok) {
+        void chrome.runtime.sendMessage({ type: "license-changed" }).catch(() => {});
+        reapplyPauseState();
+      }
+      sendResponse(result);
+    })();
+    return true;
+  }
+
+  if (message?.type === "license-refresh" && sender.id === chrome.runtime.id) {
+    void (async () => {
+      await refreshLicense();
+      const edition = await resolveEdition();
+      sendResponse({ ok: true, edition });
+    })();
+    return true;
+  }
+
   if (message?.type === "download-url" && !sender.tab) {
     const resourceUrl = canonicalHttpUrl(message.url);
     if (!resourceUrl) {
@@ -855,7 +987,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     (async () => {
-      await mediaRouteClient.ensureRoutes([resourceUrl.href]);
+      await ensureDirectMediaAccess([resourceUrl.href]);
       let targetUrl = resourceUrl.href;
       let pageReferrer = resourceUrl.href;
       let progressive = false;
@@ -899,7 +1031,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ type: "download-result", candidateId: null, ok: false, error: "invalid-url" });
         return;
       }
-      await mediaRouteClient.ensureRoutes([resourceUrl.href, pageReferrer, canonicalTarget.href]);
+      await ensureDirectMediaAccess([resourceUrl.href, pageReferrer, canonicalTarget.href]);
       const candidate = observeResource({
         pageTitle: "직접 입력한 주소",
         pageUrl: pageReferrer,
@@ -990,7 +1122,7 @@ chrome.runtime.onConnect.addListener((port) => {
     let relayClosed = false;
     let writerPort;
     try {
-      writerPort = chrome.runtime.connectNative(YOUTUBE_NATIVE_HOST);
+      writerPort = chrome.runtime.connectNative(MEDIA_COMPANION_NATIVE_HOST);
     } catch {
       port.disconnect();
       return;
@@ -1022,7 +1154,7 @@ chrome.runtime.onConnect.addListener((port) => {
     async function resolveFreshUrl(message, signal) {
       let url = message.url;
       let referrer = typeof message.pageUrl === "string" ? message.pageUrl : "";
-      await mediaRouteClient.ensureRoutes([url, referrer, message.pageUrl].filter(Boolean));
+      await ensureDirectMediaAccess([url, referrer, message.pageUrl].filter(Boolean));
       let resolvedForTransfer = false;
       if (Number.isInteger(message.videoTabId) && message.videoTabId > 0) {
         // The player iframe's content script re-resolves /pass_md5 in its own
@@ -1065,14 +1197,14 @@ chrome.runtime.onConnect.addListener((port) => {
     let disconnected = false;
     port.onDisconnect.addListener(() => {
       disconnected = true;
-      activeController?.abort();
+      if (activeController) activeController.abort();
     });
     port.onMessage.addListener(async (message) => {
       if (message?.type !== "start" || typeof message.url !== "string") return;
-      activeController?.abort();
       const controller = new AbortController();
+      if (activeController) activeController.abort();
       activeController = controller;
-      const { signal } = controller;
+      const signal = controller.signal;
       try {
         const { url, referrer, authenticatedProbeRequired } = await resolveFreshUrl(message, signal);
         if (signal.aborted || disconnected) return;
@@ -1093,44 +1225,4 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
 
-  if (port.name !== "personal-vpn-ui" || port.sender?.tab) return;
-  port.onMessage.addListener(async (message) => {
-    if (message?.type === "connect-bridge") {
-      if (message.expectedSecret !== BRIDGE_CONTEXT || message.extensionId !== BRIDGE_EXTENSION_ID) return;
-      connectNativeBridge({
-        expectedSecret: BRIDGE_CONTEXT,
-        sessionId: message.sessionId,
-        expiresAtMs: message.expiresAtMs,
-      });
-    }
-    if (message?.type === "list-candidates") {
-      const redacted = [...candidates.values()].map(redactCandidateForUi);
-      port.postMessage({
-        type: "candidates",
-        renderMode: "text-only",
-        candidates: redacted,
-        rows: toTextOnlyRows(redacted),
-      });
-    }
-    if (message?.type === "download-candidate") {
-      const candidate = [...candidates.values()].find((item) => item.id === message.candidateId);
-      if (!candidate) {
-        port.postMessage({ type: "download-result", candidateId: message.candidateId, ok: false, error: "candidate-not-found" });
-        return;
-      }
-      try {
-        const result = await beginCandidateDownload(candidate);
-        port.postMessage({ type: "download-result", candidateId: candidate.id, ok: true, ...result });
-      } catch (error) {
-        port.postMessage({
-          type: "download-result",
-          candidateId: candidate.id,
-          ok: false,
-          error: candidateDownloadErrorCode(error),
-        });
-      }
-    }
-  });
 });
-
-connectWithAppContext();

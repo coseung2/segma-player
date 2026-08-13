@@ -170,6 +170,16 @@ export default {
       return new Response(object.body, { status: 200, headers });
     }
 
-    return env.ASSETS.fetch(request);
+    try {
+      const response = await env.ASSETS.fetch(request);
+      if (response.status !== 500) return response;
+    } catch {
+      // Fall through to the explicit 404 page.
+    }
+    const notFound = await env.ASSETS.fetch(new Request(new URL("/404.html", request.url), request));
+    return new Response(notFound.body, {
+      status: 404,
+      headers: { "content-type": notFound.headers.get("content-type") || "text/html; charset=utf-8" },
+    });
   },
 };

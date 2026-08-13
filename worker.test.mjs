@@ -28,7 +28,14 @@ function environment(kv = memoryKv(), overrides = {}) {
     ADMIN_TOKEN,
     LICENSES: kv,
     COMPANION_BUCKET: {},
-    ASSETS: { fetch: async () => new Response("assets", { status: 200 }) },
+    ASSETS: {
+      fetch: async (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/404.html") return new Response("custom-404", { status: 200 });
+        if (path === "/index.html") return new Response("index", { status: 200 });
+        return new Response("missing", { status: 500 });
+      },
+    },
     ...overrides,
   };
 }
@@ -119,4 +126,14 @@ test("rate limits token issuance per IP", async () => {
   assert.equal(blocked.status, 429);
   const otherIp = await worker.fetch(postToken("device-9999", undefined, "198.51.100.8"), env);
   assert.equal(otherIp.status, 200);
+});
+
+test("serves the custom 404 page for missing assets", async () => {
+  const worker = await loadWorker();
+  const response = await worker.fetch(
+    new Request("https://aura.mdownloader.workers.dev/downloads/nope.zip"),
+    environment(),
+  );
+  assert.equal(response.status, 404);
+  assert.equal(await response.text(), "custom-404");
 });

@@ -3,6 +3,7 @@
 // global daily cap, queue cap, disk guard, temp-file cleanup after delivery.
 const http = require("http");
 const { spawn } = require("child_process");
+const { pathToFileURL } = require("url");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -25,10 +26,14 @@ const JOB_TTL_MS = 60 * 60 * 1000;
 const ALLOWED_QUALITIES = new Set(["best", "2160", "1440", "1080", "720", "480"]);
 
 // Shared token verification is loaded lazily from the same directory.
+// Windows paths must be converted to file:// URLs for dynamic import.
 let tokenModule = null;
-const tokenModuleReady = import(path.join(__dirname, "youtube-token.js"))
+const tokenModuleReady = import(pathToFileURL(path.join(__dirname, "youtube-token.js")).href)
   .then((module) => { tokenModule = module; })
-  .catch(() => { tokenModule = null; });
+  .catch((error) => {
+    tokenModule = null;
+    console.error("youtube-token module failed to load:", error && error.message);
+  });
 
 fs.mkdirSync(WORK_DIR, { recursive: true });
 

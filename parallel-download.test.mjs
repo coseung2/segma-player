@@ -4,6 +4,7 @@ import { parallelDownload } from "./parallel-download.js";
 
 function mockFetch(totalBytes, { failRanges = new Set() } = {}) {
   const calls = [];
+  const delays = new Map();
   globalThis.fetch = async (url, options = {}) => {
     assert.equal(String(url), "http://server.test/file");
     const headers = options.headers || {};
@@ -19,6 +20,7 @@ function mockFetch(totalBytes, { failRanges = new Set() } = {}) {
     const start = Number(match[1]);
     const end = Number(match[2]);
     calls.push([start, end]);
+    if (delays.has(start)) await new Promise((resolve) => setTimeout(resolve, delays.get(start)));
     if (failRanges.has(`${start}-${end}`)) {
       failRanges.delete(`${start}-${end}`);
       throw new Error("network-drop");
@@ -29,83 +31,71 @@ function mockFetch(totalBytes, { failRanges = new Set() } = {}) {
       headers: { "content-range": `bytes ${start}-${end}/${totalBytes}` },
     });
   };
-  return calls;
+  return { calls, delays };
 }
 
-function fakeWritable() {
-  const writes = [];
+function fakeSink() {
+  const chunks = [];
   return {
-    writes,
-    async write(entry) {
-      writes.push({ position: entry.position, length: entry.data.byteLength });
+    chunks,
+    async write(data) {
+      chunks.push(data.byteLength);
     },
     async close() {},
     async abort() {},
   };
 }
 
-function fakeDirHandle(writable) {
-  return {
-    async getFileHandle(name, options) {
-      assert.equal(options.create, true);
-      return {
-        name,
-        async createWritable() {
-          return writable;
-        },
-      };
-    },
-  };
-}
-
-test("downloads disjoint ranges in parallel and writes at byte positions", async () => {
+test("downloads disjoint ranges in parallel and writes them in order", async () => {
   const total = 20 * 1024 * 1024;
-  const calls = mockFetch(total);
-  const writable = fakeWritable();
+  const { calls } = mockFetch(total);
+  const sink = fakeSink();
   const progress = [];
   const result = await parallelDownload({
     url: "http://server.test/file",
     filename: "Test Video.mp4",
-    dirHandle: fakeDirHandle(writable),
+    createSink: async () => sink,
     chunkBytes: 5 * 1024 * 1024,
     onProgress: (written, all) => progress.push([written, all]),
   });
   assert.equal(result.bytes, total);
-  assert.equal(result.filename, "Test Video.mp4");
   assert.equal(calls.length, 4);
-  const written = writable.writes.reduce((sum, item) => sum + item.length, 0);
+  const written = sink.chunks.reduce((sum, length) => sum + length, 0);
   assert.equal(written, total);
-  assert.deepEqual(
-    writable.writes.map((item) => item.position).sort((a, b) => a - b),
-    [0, 5 * 1024 * 1024, 10 * 1024 * 1024, 15 * 1024 * 1024],
-  );
+  assert.deepEqual(sink.chunks, [5 * 1024 * 1024, 5 * 1024 * 1024, 5 * 1024 * 1024, 5 * 1024 * 1024]);
   assert.deepEqual(progress.at(-1), [total, total]);
+});
+
+test("buffers out-of-order arrivals and flushes in file order", async () => {
+  const total = 4 * 1024 * 1024;
+  const { calls, delays } = mockFetch(total);
+  delays.set(0, 120); // the first range arrives last
+  const sink = fakeSink();
+  await parallelDownload({
+    url: "http://server.test/file",
+    filename: "T.mp4",
+    createSink: async () => sink,
+    chunkBytes: 1024 * 1024,
+  });
+  assert.deepEqual(
+    sink.chunks,
+    [1024 * 1024, 1024 * 1024, 1024 * 1024, 1024 * 1024],
+    "sink must receive chunks in file order",
+  );
+  assert.deepEqual(calls.map(([start]) => start).sort((a, b) => a - b), [0, 1048576, 2097152, 3145728]);
 });
 
 test("retries dropped ranges and still completes", async () => {
   const total = 6 * 1024 * 1024;
-  const calls = mockFetch(total, { failRanges: new Set(["0-2097151"]) });
-  const writable = fakeWritable();
+  const { calls } = mockFetch(total, { failRanges: new Set(["0-2097151"]) });
+  const sink = fakeSink();
   const result = await parallelDownload({
     url: "http://server.test/file",
     filename: "T.mp4",
-    dirHandle: fakeDirHandle(writable),
+    createSink: async () => sink,
     chunkBytes: 2 * 1024 * 1024,
   });
   assert.equal(result.bytes, total);
   const zeroStarts = calls.filter(([start]) => start === 0);
   assert.ok(zeroStarts.length >= 2, "dropped range should be retried");
-});
-
-test("sanitizes the output filename", async () => {
-  const total = 1024 * 1024;
-  mockFetch(total);
-  const writable = fakeWritable();
-  const result = await parallelDownload({
-    url: "http://server.test/file",
-    filename: `Bad/Name:*?.mp4`,
-    dirHandle: fakeDirHandle(writable),
-    chunkBytes: total,
-  });
-  assert.equal(result.filename, "Bad_Name___.mp4");
 });

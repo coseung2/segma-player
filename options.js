@@ -21,7 +21,7 @@ const ytServerCheckButton = document.querySelector("#yt-server-check");
 
 
 try {
-  versionElement.textContent = `Aura Media Downloader v${chrome.runtime.getManifest().version}`;
+  versionElement.textContent = `Aura Media Downloader v${chrome.runtime.getManifest().version} · 확장 ID ${chrome.runtime.id}`;
 } catch {
   versionElement.textContent = "Aura Media Downloader";
 }

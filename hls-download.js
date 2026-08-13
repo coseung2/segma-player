@@ -11,6 +11,7 @@ import { filenameForDownload } from "./download.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { level5KeyErrorMessage, normalizeLevel5KeyError } from "./level5-key-error.js";
 import { createNativeFileWriter } from "./native-file-writer.js";
+import { parallelDownload } from "./parallel-download.js";
 import { progressiveDownloadErrorMessage, replayableRecordedHeaders } from "./progressive-redirect.js";
 import { productPlan } from "./product-plan.js";
 
@@ -125,9 +126,11 @@ export function browserDownloadFilename(value) {
 async function probeDownloadTotalBytes(url, referrer, context = defaultDownloadContext) {
   let total = null;
   let contentType = "";
+  let rangeSupported = false;
   await withMediaFetchLease(url, referrer, async (response) => {
     contentType = response.headers?.get?.("content-type") || "";
     if (!response.ok && response.status !== 206) return;
+    rangeSupported = response.status === 206;
     const contentRange = response.headers?.get?.("content-range") || "";
     const match = /\/\s*(\d+)\s*$/.exec(contentRange);
     if (match) {
@@ -141,6 +144,7 @@ async function probeDownloadTotalBytes(url, referrer, context = defaultDownloadC
   return {
     total: Number.isFinite(total) && total >= 0 ? total : null,
     contentType,
+    rangeSupported,
   };
 }
 
@@ -379,6 +383,28 @@ async function requestPageDecodedKey(url, videoTabId, videoFrameId = null) {
   } catch (error) {
     if (typeof error?.message === "string" && error.message.startsWith("보호된 영상 키 확인 실패:")) throw error;
     throw new Error(level5KeyErrorMessage("level5-key-unavailable"));
+  }
+}
+
+async function withParallelMediaFetchLease(url, referrer, context, run) {
+  await ensureMediaRoutes([url, referrer]);
+  const prepared = await chrome.runtime.sendMessage({
+    type: "prepare-media-fetch",
+    url,
+    referrer,
+  });
+  const leaseId = prepared?.leaseId;
+  if (!prepared?.ok || leaseId == null) {
+    throw new Error("미디어 요청을 준비하지 못했습니다. 확장 프로그램을 다시 로드한 뒤 다시 시도해 주세요.");
+  }
+  const keepAlive = setInterval(() => {
+    void chrome.runtime.sendMessage({ type: "touch-media-fetch", leaseId }).catch(() => {});
+  }, 60_000);
+  try {
+    return await run();
+  } finally {
+    clearInterval(keepAlive);
+    await chrome.runtime.sendMessage({ type: "release-media-fetch", leaseId }).catch(() => {});
   }
 }
 
@@ -771,6 +797,40 @@ async function saveProgressive(
     if (fallback) return fallback;
   }
 
+  if (context.rangeSupported) {
+    const referrer = referrerFor(session.url, session.referrer || pageUrl, context);
+    const fetchImpl = (targetUrl, { headers, signal }) => {
+      const all = new Headers(extraHeadersFor(targetUrl, context));
+      for (const [name, value] of Object.entries(headers || {})) all.set(name, value);
+      return fetch(targetUrl, {
+        credentials: "include",
+        referrer,
+        referrerPolicy: "unsafe-url",
+        headers: all,
+        cache: "no-store",
+        signal,
+      });
+    };
+    try {
+      const writable = await createNativeFileWriter(filename);
+      const sink = {
+        write: (data) => writeChunk(writable, data),
+        close: () => writable.close(),
+        abort: () => writable.abort(),
+      };
+      const result = await withParallelMediaFetchLease(session.url, referrer, context, () => parallelDownload({
+        url: session.url,
+        filename,
+        createSink: async () => sink,
+        fetchImpl,
+        onProgress: (written, total) => setStatus(saveProgressText(written, total), false, context),
+      }));
+      return { bytes: result.bytes };
+    } catch {
+      // Fall through to the single-stream path.
+    }
+  }
+
   let writable;
   try {
     writable = await createNativeFileWriter(filename);
@@ -879,6 +939,7 @@ export async function prepareDownloadCandidate(candidate, { onStatus = null, pau
         throw new Error("이 주소는 영상 파일이 아니라 웹페이지입니다. 실제 미디어 주소를 입력해 주세요.");
       }
       context.totalBytes = Number.isFinite(probed.total) && probed.total >= 0 ? probed.total : null;
+      context.rangeSupported = probed.rangeSupported === true;
     }
     return {
       type: "progressive",

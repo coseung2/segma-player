@@ -1,18 +1,13 @@
 // Parallel byte-range reception for server-hosted files. The peer supports
-// HTTP range requests, so multiple connections fetch disjoint chunks and the
-// File System Access API writes them at their byte positions. Failed chunks
-// are retried, which makes the transfer far more robust than a single
-// browser download stream.
+// HTTP range requests, so multiple connections fetch disjoint chunks while a
+// bounded buffer hands them to the sink in order. Failed chunks are retried,
+// which makes the transfer far more robust than a single browser download
+// stream. The sink is sequential (native writer), so out-of-order arrivals
+// are buffered and flushed in file order.
 
 export const PARALLEL_CONCURRENCY = 6;
 export const PARALLEL_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_RETRIES = 3;
-
-function sanitizeFilename(value) {
-  const name = String(value || "").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
-    .replace(/\.+$/, "").trim().slice(0, 180) || "download";
-  return /\.(mp4|m4v|webm|mkv|mov|ts|mp3|m4a)$/i.test(name) ? name : `${name}.mp4`;
-}
 
 async function probeTotal(url, signal) {
   const response = await fetch(url, {
@@ -29,13 +24,15 @@ async function probeTotal(url, signal) {
   return total;
 }
 
-async function fetchRange(url, start, end, signal, attempt = 1) {
+async function fetchRange(url, start, end, signal, attempt = 1, fetchImpl = null, extra = {}) {
   try {
-    const response = await fetch(url, {
-      headers: { Range: `bytes=${start}-${end}` },
-      cache: "no-store",
-      signal,
-    });
+    const response = fetchImpl
+      ? await fetchImpl(url, { headers: { Range: `bytes=${start}-${end}` }, signal, ...extra })
+      : await fetch(url, {
+        headers: { Range: `bytes=${start}-${end}` },
+        cache: "no-store",
+        signal,
+      });
     if (response.status !== 206) throw new Error(`범위 요청 실패 (${response.status})`);
     const data = new Uint8Array(await response.arrayBuffer());
     if (data.byteLength !== end - start + 1) throw new Error("범위 데이터 길이 불일치");
@@ -43,7 +40,7 @@ async function fetchRange(url, start, end, signal, attempt = 1) {
   } catch (error) {
     if (attempt < MAX_RETRIES && !signal?.aborted) {
       await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
-      return fetchRange(url, start, end, signal, attempt + 1);
+      return fetchRange(url, start, end, signal, attempt + 1, fetchImpl, extra);
     }
     throw error;
   }
@@ -52,30 +49,41 @@ async function fetchRange(url, start, end, signal, attempt = 1) {
 export async function parallelDownload({
   url,
   filename,
-  dirHandle,
+  createSink,
   concurrency = PARALLEL_CONCURRENCY,
   chunkBytes = PARALLEL_CHUNK_BYTES,
   onProgress = null,
   signal = null,
+  fetchImpl = null,
+  extra = {},
 }) {
   const total = await probeTotal(url, signal);
-  const safeName = sanitizeFilename(filename);
-  const fileHandle = await dirHandle.getFileHandle(safeName, { create: true });
-  const writable = await fileHandle.createWritable({ keepExistingData: true });
+  const sink = await createSink(filename);
   const ranges = [];
   for (let start = 0; start < total; start += chunkBytes) {
     ranges.push([start, Math.min(start + chunkBytes - 1, total - 1)]);
   }
   let cursor = 0;
+  let nextStart = 0;
   let written = 0;
+  const pending = new Map();
+  async function flush() {
+    while (pending.has(nextStart)) {
+      const data = pending.get(nextStart);
+      pending.delete(nextStart);
+      await sink.write(data);
+      nextStart += data.byteLength;
+      written += data.byteLength;
+      if (onProgress) onProgress(written, total);
+    }
+  }
   async function worker() {
     while (cursor < ranges.length && !signal?.aborted) {
       const [start, end] = ranges[cursor];
       cursor += 1;
-      const data = await fetchRange(url, start, end, signal);
-      await writable.write({ type: "write", position: start, data });
-      written += data.byteLength;
-      if (onProgress) onProgress(written, total);
+      const data = await fetchRange(url, start, end, signal, 1, fetchImpl, extra);
+      pending.set(start, data);
+      await flush();
     }
   }
   try {
@@ -84,15 +92,16 @@ export async function parallelDownload({
       () => worker(),
     );
     await Promise.all(workers);
+    await flush();
     if (written !== total) throw new Error(`수신 크기 불일치 (${written}/${total})`);
-    await writable.close();
+    await sink.close();
   } catch (error) {
     try {
-      await writable.abort();
+      await sink.abort();
     } catch {
       // already closed
     }
     throw error;
   }
-  return { bytes: total, filename: safeName };
+  return { bytes: total };
 }

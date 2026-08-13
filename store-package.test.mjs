@@ -45,7 +45,6 @@ const expectedFiles = [
   "popup.js",
   "product-plan.js",
   "progressive-redirect.js",
-  "save-directory.js",
   "youtube-server.js",
 ].sort();
 

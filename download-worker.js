@@ -1,5 +1,7 @@
 import { downloadPreparedCandidate, prepareDownloadCandidate, setRuntimePlan } from "./hls-download.js";
+import { writeChunk } from "./hls-download.js";
 import { parallelDownload } from "./parallel-download.js";
+import { createNativeFileWriter } from "./native-file-writer.js";
 import { createDownloadScheduler } from "./download-scheduler.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { resolvePlan } from "./license.js";
@@ -111,17 +113,25 @@ async function run(jobId, candidate) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "parallel-save" && sender.id === chrome.runtime.id) {
-    if (typeof message.jobId !== "string" || typeof message.url !== "string" || !message.dirHandle) {
+    if (typeof message.jobId !== "string" || typeof message.url !== "string") {
       sendResponse({ ok: false, error: "invalid-parallel-save" });
       return false;
     }
     void (async () => {
       try {
         await report(message.jobId, { status: "running", statusText: "병렬 수신 준비 중…" });
+        const writable = await createNativeFileWriter(
+          typeof message.filename === "string" && message.filename ? message.filename : "YouTube 영상.mp4",
+        );
+        const sink = {
+          write: (data) => writeChunk(writable, data),
+          close: () => writable.close(),
+          abort: () => writable.abort(),
+        };
         const result = await parallelDownload({
           url: message.url,
-          filename: typeof message.filename === "string" && message.filename ? message.filename : "YouTube 영상.mp4",
-          dirHandle: message.dirHandle,
+          filename: "YouTube 영상.mp4",
+          createSink: async () => sink,
           onProgress: (written, total) => {
             const percent = Math.max(0, Math.min(100, Math.round((written / total) * 100)));
             void report(message.jobId, { status: "running", statusText: `수신 중… ${percent}%` });

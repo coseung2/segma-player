@@ -1,3 +1,5 @@
+import { signToken, isValidDeviceId, TOKEN_TTL_MS } from "./youtube-token.js";
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -30,6 +32,23 @@ function issueLicenseKey() {
   let hex = "";
   for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
   return `AM-${hex.toUpperCase()}`;
+}
+
+// Per-IP token issuance throttle. The Map is per-isolate, which is enough to
+// slow down free-tier scraping without keeping durable state.
+const tokenRequestsByIp = new Map();
+
+function tokenRateLimited(request, limit = 30, windowMs = 60 * 60 * 1000) {
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  const now = Date.now();
+  const list = (tokenRequestsByIp.get(ip) || []).filter((stamp) => now - stamp < windowMs);
+  if (list.length >= limit) {
+    tokenRequestsByIp.set(ip, list);
+    return true;
+  }
+  list.push(now);
+  tokenRequestsByIp.set(ip, list);
+  return false;
 }
 
 function authorized(request, env) {
@@ -71,6 +90,31 @@ export default {
         });
       }
       return json({ ok: true, edition: "free", status: "pending" });
+    }
+
+    if (path === "/api/youtube-token" && request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      const deviceId = typeof body?.deviceId === "string" ? body.deviceId : "";
+      if (!isValidDeviceId(deviceId)) return json({ ok: false, error: "invalid-device-id" }, 400);
+      if (!env.YT_SERVER_SECRET) return json({ ok: false, error: "server-not-configured" }, 503);
+      if (tokenRateLimited(request)) return json({ ok: false, error: "rate-limited" }, 429);
+
+      const key = typeof body?.key === "string" ? body.key.trim().toUpperCase() : "";
+      let plan = "free";
+      let keyId = null;
+      if (key) {
+        if (!isValidLicenseKey(key)) return json({ ok: false, error: "invalid-key" }, 400);
+        const record = await readRecord(env, key);
+        if (!record || record.status !== "approved") {
+          return json({ ok: false, error: "license-not-approved" }, 403);
+        }
+        plan = "pro";
+        keyId = key;
+      }
+
+      const exp = Date.now() + TOKEN_TTL_MS;
+      const token = await signToken(env.YT_SERVER_SECRET, { deviceId, plan, keyId, exp });
+      return json({ ok: true, token, exp, plan });
     }
 
     if (path.startsWith("/api/admin/")) {

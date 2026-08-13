@@ -5,7 +5,7 @@ html::-webkit-scrollbar { display: none; width: 0; height: 0; }
 body { width: 100%; min-height: 0; margin: 0; overflow: visible; background: #0f141d; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
-.popup-shell { width: 100%; min-width: 0; padding: 16px; overflow: visible; }
+.popup-shell { width: 100%; min-width: 0; padding: 16px 16px 12px; overflow: visible; }
 .popup-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .eyebrow { margin: 0 0 3px; color: #73a5ff; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
 h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
@@ -28,13 +28,15 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
 .tab.active { background: #2a3e5c; color: #e8f1ff; box-shadow: 0 1px 4px #0005; }
 .tab:focus-visible { outline: 2px solid #73a5ff; outline-offset: 1px; }
 .tab-panel[hidden] { display: none; }
-.tab-panel { width: 100%; min-width: 0; max-width: 100%; overflow-x: hidden; }
-.status, .field-status { min-height: 17px; margin: 0 0 9px; color: #93a2b7; font-size: 11px; line-height: 1.45; }
+.tab-panel { width: 100%; min-width: 0; max-width: 100%; min-height: 183px; overflow-x: hidden; }
+.status { min-height: 17px; margin: 0 0 9px; color: #93a2b7; font-size: 11px; line-height: 1.45; }
+.field-status { min-height: 17px; margin: 0; color: #93a2b7; font-size: 11px; line-height: 1.45; }
 .detect-controls { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
 .summary { color: #cbd6e5; font-size: 12px; }
 .main-toggle { display: flex; align-items: center; gap: 5px; color: #9aa9bd; font-size: 11px; }
 .main-toggle input { accent-color: #4f86e8; }
 .candidate-list, .job-list { display: grid; width: 100%; min-width: 0; max-width: 100%; gap: 8px; }
+.job-list[hidden] { display: none; }
 .tab-panel .job-list { margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(13, 24, 43, .08); }
 .candidate-card, .job-card, .youtube-card { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; padding: 11px; border: 1px solid #2a3546; border-radius: 11px; background: #171e29; }
 .candidate-preview { display: grid; width: 100%; aspect-ratio: 16 / 9; margin-bottom: 10px; overflow: hidden; place-items: center; border-radius: 8px; background: #090d13; color: #65748a; }

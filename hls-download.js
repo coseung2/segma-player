@@ -814,25 +814,26 @@ async function saveProgressive(
     };
     try {
       let sink = null;
-      const dirHandle = await getStoredSaveDirectory();
-      if (dirHandle) {
-        const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-        const writable = await fileHandle.createWritable({ keepExistingData: true });
+      try {
+        const writable = await createNativeFileWriter(filename);
         sink = {
-          write: (data) => writable.write(data),
+          write: (data) => writeChunk(writable, data),
           close: () => writable.close(),
           abort: () => writable.abort(),
         };
-      } else {
-        try {
-          const writable = await createNativeFileWriter(filename);
+      } catch {
+        sink = null;
+      }
+      if (!sink) {
+        const dirHandle = await getStoredSaveDirectory();
+        if (dirHandle) {
+          const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+          const writable = await fileHandle.createWritable({ keepExistingData: true });
           sink = {
-            write: (data) => writeChunk(writable, data),
+            write: (data) => writable.write(data),
             close: () => writable.close(),
             abort: () => writable.abort(),
           };
-        } catch {
-          sink = null;
         }
       }
       if (!sink) throw new Error("no-save-sink");

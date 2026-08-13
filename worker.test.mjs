@@ -33,7 +33,7 @@ function environment(kv = memoryKv(), overrides = {}) {
         const path = new URL(request.url).pathname;
         if (path === "/404.html") return new Response("custom-404", { status: 200 });
         if (path === "/index.html") return new Response("index", { status: 200 });
-        return new Response("missing", { status: 500 });
+        return new Response("custom-404", { status: 404 });
       },
     },
     ...overrides,

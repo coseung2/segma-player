@@ -95,7 +95,7 @@ chrome.downloads.onChanged.addListener((delta) => {
       Math.round((delta.bytesReceived.current / delta.totalBytes.current) * 100)));
     void patchDownloadJob(jobId, {
       status: "running",
-      statusText: `저장 중… ${percent}%`,
+      statusText: `내 기기로 전송 중… ${percent}%`,
     });
   }
 });
@@ -204,6 +204,13 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
         },
       });
       if (waited.ok) {
+        if (waited.localFile && await isServerOnThisMachine(serverUrl)) {
+          await patchDownloadJob(jobId, {
+            status: "completed",
+            statusText: "저장 완료 — 이 PC의 Downloads\\Aura Media 폴더에 저장했습니다.",
+          });
+          return { mode: "youtube-local", jobId };
+        }
         const fileUrl = await youtubeJobFileUrl(submitted.jobId, serverUrl);
         const title = typeof waited.title === "string" && waited.title.trim() ? waited.title.trim() : "YouTube 영상";
         const safeTitle = (title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\.+$/, "").trim()
@@ -290,6 +297,30 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
   });
   port.postMessage({ type: "youtube-download", jobId, url, quality });
   return { mode: "youtube", jobId };
+}
+
+async function isServerOnThisMachine(serverUrl) {
+  try {
+    const parsed = new URL(serverUrl);
+    let port = parsed.port ? Number(parsed.port) : (parsed.protocol === "http:" ? 80 : 443);
+    if (port === 443) port = 8788; // Tailscale serve proxies to the local listener.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_500);
+    timer?.unref?.();
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/healthz`, {
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!response.ok) return false;
+      const data = await response.json();
+      return data?.ok === true && data?.service === "aura-youtube";
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
 }
 
 function progressiveRedirectTargetFor(value) {

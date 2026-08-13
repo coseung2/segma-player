@@ -181,7 +181,7 @@ test("waitForYouTubeJob polls with the bearer token until ready", async () => {
   const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
 
   const ready = await mod.waitForYouTubeJob("job-1", "http://server.test:8788", { pollMs: 1, timeoutMs: 2000 });
-  assert.deepEqual(ready, { ok: true, jobId: "job-1", title: "Test Video" });
+  assert.deepEqual(ready, { ok: true, jobId: "job-1", title: "Test Video", localFile: null });
 
   env.setFetch((url) => {
     if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") return jsonResponse(TOKEN_BODY);

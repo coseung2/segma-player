@@ -23,6 +23,7 @@ const DAILY_CAP = Number(process.env.AURA_YT_DAILY_CAP || 500);
 const MAX_QUEUE = Number(process.env.AURA_YT_MAX_QUEUE || 40);
 const MIN_FREE_BYTES = Number(process.env.AURA_YT_MIN_FREE_GB || 2) * 1024 * 1024 * 1024;
 const LOG_FILE = process.env.AURA_YT_LOG || path.join(PROFILE, "AppData", "Local", "Aura YouTube", "server.log");
+const LOCAL_SAVE_DIR = process.env.AURA_YT_LOCAL_SAVE_DIR || "";
 const JOB_TTL_MS = 60 * 60 * 1000;
 const ALLOWED_QUALITIES = new Set(["best", "2160", "1440", "1080", "720", "480"]);
 
@@ -170,6 +171,23 @@ function finishJob(job, filePath, error) {
   drain();
 }
 
+function saveLocalCopy(job, filePath) {
+  if (!filePath || !LOCAL_SAVE_DIR) return;
+  try {
+    fs.mkdirSync(LOCAL_SAVE_DIR, { recursive: true });
+    const extension = path.extname(filePath) || ".mp4";
+    const base = (job.title || "YouTube 영상")
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\.+$/, "").trim().slice(0, 150) || "YouTube 영상";
+    const target = path.join(LOCAL_SAVE_DIR, `${base}${extension}`);
+    fs.copyFileSync(filePath, target);
+    job.localFile = target;
+    logLine(`LOCAL_SAVE ${job.id} -> ${target}`);
+  } catch (error) {
+    logLine(`LOCAL_SAVE_FAIL ${job.id} ${error && error.message}`);
+    job.localFile = null;
+  }
+}
+
 function drain() {
   while (active < MAX_CONCURRENT && queue.length) {
     const job = queue.shift();
@@ -233,6 +251,7 @@ function runJob(job) {
       finishJob(job, null, "output-file-missing");
       return;
     }
+    saveLocalCopy(job, filePath);
     finishJob(job, filePath, null);
   });
 }
@@ -367,6 +386,7 @@ const server = http.createServer(async (req, res) => {
         title: job.title || "",
         error: job.error || "",
         progress: Number.isFinite(job.progress) ? job.progress : null,
+        localFile: typeof job.localFile === "string" ? job.localFile : null,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
       });

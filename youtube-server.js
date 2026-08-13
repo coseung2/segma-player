@@ -203,7 +203,14 @@ export async function waitForYouTubeJob(jobId, server = null, {
       if (authError) return { ok: false, error: "server-unauthorized" };
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.status) {
-        if (data.status === "ready") return { ok: true, jobId, title: data.title || "" };
+        if (data.status === "ready") {
+          return {
+            ok: true,
+            jobId,
+            title: data.title || "",
+            localFile: typeof data.localFile === "string" && data.localFile ? data.localFile : null,
+          };
+        }
         if (data.status === "failed") {
           return { ok: false, error: typeof data.error === "string" && data.error ? data.error : "job-failed" };
         }

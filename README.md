@@ -18,6 +18,10 @@ The development checkout uses the Pro profile in `edition.js`. The Chrome Web St
 - `download-worker.js` keeps accepted downloads running in an offscreen document.
 - `hls-download.js` streams data and enforces the active edition limits.
 - `com.aura.media_companion` writes local files and runs supported public YouTube downloads.
+- The notebook YouTube server accepts only HMAC capability tokens issued by the
+  license worker (`/api/youtube-token`); free tokens are quota- and
+  rate-limited, Pro tokens require an approved key, and the server enforces a
+  global daily cap, queue cap, and disk guard.
 - The commercial runtime has no VPN, proxy, private egress, or private native bridge dependency.
 
 The store ZIP excludes private page-key code, static site-specific redirect rules, tests, native source, build scripts, and fixed extension keys.

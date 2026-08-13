@@ -1,6 +1,6 @@
-// Aura YouTube proxy service — yt-dlp + ffmpeg on the user's OCI VM.
-// v1: device-id monthly quota, optional Pro shared secret, concurrency cap,
-// temp-file cleanup after delivery. Bind 127.0.0.1 only.
+// Aura YouTube proxy service — yt-dlp + ffmpeg on the notebook.
+// v2: HMAC capability tokens issued by the license worker, per-device quota,
+// global daily cap, queue cap, disk guard, temp-file cleanup after delivery.
 const http = require("http");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -15,16 +15,28 @@ const WORK_DIR = process.env.AURA_YT_WORK || path.join(PROFILE, "AppData", "Loca
 const QUOTA_FILE = process.env.AURA_YT_QUOTA || path.join(PROFILE, "AppData", "Local", "Aura YouTube", "quota.json");
 const COOKIES_FILE = process.env.AURA_YT_COOKIES || path.join(PROFILE, "AppData", "Local", "Aura YouTube", "cookies.txt");
 const PRO_SECRET = process.env.AURA_YT_PRO_SECRET || "";
+const YT_SECRET = process.env.AURA_YT_SECRET || "";
 const MAX_CONCURRENT = Number(process.env.AURA_YT_MAX_CONCURRENT || 2);
 const FREE_MONTHLY_LIMIT = Number(process.env.AURA_YT_FREE_LIMIT || 10);
+const DAILY_CAP = Number(process.env.AURA_YT_DAILY_CAP || 500);
+const MAX_QUEUE = Number(process.env.AURA_YT_MAX_QUEUE || 40);
+const MIN_FREE_BYTES = Number(process.env.AURA_YT_MIN_FREE_GB || 2) * 1024 * 1024 * 1024;
 const JOB_TTL_MS = 60 * 60 * 1000;
 const ALLOWED_QUALITIES = new Set(["best", "2160", "1440", "1080", "720", "480"]);
+
+// Shared token verification is loaded lazily from the same directory.
+let tokenModule = null;
+const tokenModuleReady = import(path.join(__dirname, "youtube-token.js"))
+  .then((module) => { tokenModule = module; })
+  .catch(() => { tokenModule = null; });
 
 fs.mkdirSync(WORK_DIR, { recursive: true });
 
 const jobs = new Map();
 const queue = [];
 let active = 0;
+let dailyKey = "";
+let dailyUsed = 0;
 
 function now() {
   return new Date().toISOString();
@@ -55,6 +67,46 @@ function quotaStatus(deviceId, licenseKey) {
   const key = `${deviceId}:${monthKey()}`;
   const used = quota[key] || 0;
   return { ok: used < FREE_MONTHLY_LIMIT, pro: false, used, limit: FREE_MONTHLY_LIMIT };
+}
+
+function dailyStatus() {
+  const key = new Date().toISOString().slice(0, 10);
+  if (dailyKey !== key) {
+    dailyKey = key;
+    dailyUsed = 0;
+  }
+  return dailyUsed;
+}
+
+function diskFreeBytes() {
+  try {
+    if (typeof fs.statfsSync === "function") {
+      const info = fs.statfsSync(WORK_DIR);
+      return Number(info.bavail) * Number(info.bsize);
+    }
+  } catch {
+    // Disk guard is best effort.
+  }
+  return Infinity;
+}
+
+async function authenticate(req) {
+  await tokenModuleReady;
+  if (!tokenModule || !YT_SECRET) return null;
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (!token) return null;
+  return tokenModule.verifyToken(YT_SECRET, token);
+}
+
+async function authenticateRequest(req, url) {
+  const fromHeader = await authenticate(req);
+  if (fromHeader) return fromHeader;
+  const fromQuery = url.searchParams.get("t");
+  if (!fromQuery) return null;
+  await tokenModuleReady;
+  if (!tokenModule || !YT_SECRET) return null;
+  return tokenModule.verifyToken(YT_SECRET, fromQuery);
 }
 
 function reserveQuota(deviceId) {
@@ -230,8 +282,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && /^\/api\/jobs\/[^/]+\/file$/.test(route)) {
+      const payload = await authenticateRequest(req, url);
+      if (!payload) {
+        json(res, 401, { error: "unauthorized" });
+        return;
+      }
       const job = jobs.get(route.split("/")[3]);
-      if (!job || job.status !== "ready" || !job.file) {
+      if (!job || job.deviceId !== payload.deviceId || job.status !== "ready" || !job.file) {
         json(res, 404, { error: "job-not-ready" });
         return;
       }
@@ -239,8 +296,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && /^\/api\/jobs\/[^/]+$/.test(route)) {
+      const payload = await authenticateRequest(req, url);
+      if (!payload) {
+        json(res, 401, { error: "unauthorized" });
+        return;
+      }
       const job = jobs.get(route.split("/")[3]);
-      if (!job) {
+      if (!job || job.deviceId !== payload.deviceId) {
         json(res, 404, { error: "job-not-found" });
         return;
       }
@@ -255,12 +317,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && route === "/api/youtube") {
-      const body = JSON.parse((await readBody(req)) || "{}");
-      const { url: mediaUrl, quality = "best", deviceId, licenseKey = "" } = body;
-      if (typeof deviceId !== "string" || !deviceId || deviceId.length > 64) {
-        json(res, 400, { error: "invalid-device-id" });
+      const payload = await authenticate(req);
+      if (!payload) {
+        json(res, 401, { error: "unauthorized" });
         return;
       }
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const { url: mediaUrl, quality = "best" } = body;
+      const deviceId = payload.deviceId;
+      const isPro = payload.plan === "pro";
       const canonical = canonicalYouTubeUrl(mediaUrl);
       if (!canonical) {
         json(res, 400, { error: "invalid-youtube-url" });
@@ -270,12 +335,25 @@ const server = http.createServer(async (req, res) => {
         json(res, 400, { error: "invalid-quality" });
         return;
       }
-      const status = quotaStatus(deviceId, typeof licenseKey === "string" ? licenseKey : "");
+      const status = isPro ? { ok: true, pro: true, used: 0, limit: null } : quotaStatus(deviceId, "");
       if (!status.ok) {
         json(res, 429, { error: "monthly-limit-reached", used: status.used, limit: status.limit });
         return;
       }
+      if (dailyStatus() >= DAILY_CAP) {
+        json(res, 429, { error: "daily-limit-reached", used: dailyUsed, limit: DAILY_CAP });
+        return;
+      }
+      if (queue.length >= MAX_QUEUE) {
+        json(res, 429, { error: "server-busy" });
+        return;
+      }
+      if (diskFreeBytes() < MIN_FREE_BYTES) {
+        json(res, 507, { error: "insufficient-storage" });
+        return;
+      }
       reserveQuota(deviceId);
+      dailyUsed += 1;
       const id = crypto.randomUUID();
       const job = {
         id,
@@ -289,15 +367,18 @@ const server = http.createServer(async (req, res) => {
         file: null,
         error: "",
       };
+      const statusForResponse = isPro
+        ? { pro: true, used: null, limit: null }
+        : { pro: false, used: status.used + 1, limit: FREE_MONTHLY_LIMIT };
       jobs.set(id, job);
       queue.push(job);
       drain();
       json(res, 202, {
         jobId: id,
         status: "queued",
-        quotaUsed: status.used + 1,
-        quotaLimit: status.limit,
-        pro: status.pro,
+        quotaUsed: statusForResponse.used,
+        quotaLimit: statusForResponse.limit,
+        pro: statusForResponse.pro,
       });
       return;
     }

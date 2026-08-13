@@ -11,7 +11,7 @@ const statusElement = byId("status");
 const candidatesElement = byId("candidates");
 const summaryElement = byId("summary");
 const mainOnlyElement = byId("main-only");
-const jobsElement = byId("download-jobs");
+const jobContainers = [byId("detect-jobs"), byId("link-jobs")].filter(Boolean);
 const popupShell = document.querySelector(".popup-shell");
 const scrollMoreButton = byId("scroll-more");
 let lastCandidates = [];
@@ -128,7 +128,6 @@ function showTab(name, focus = false) {
   for (const panel of panels) panel.hidden = panel.id !== `panel-${name}`;
   popupShell.scrollTop = 0;
   queueScrollUpdate();
-  if (name === "downloads") void requestJobs();
 }
 
 for (const tab of tabs) {
@@ -183,7 +182,7 @@ function renderCandidates(candidates) {
           candidateId: candidate.id,
         });
         if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
-        showTab("downloads");
+        void requestJobs();
       } catch (error) {
         statusElement.textContent = error?.message || "다운로드를 시작하지 못했습니다.";
         button.disabled = false;
@@ -207,66 +206,66 @@ async function requestCandidates() {
   }
 }
 
-function renderJobs(jobs) {
-  jobsElement.replaceChildren();
-  if (!jobs.length) {
-    jobsElement.append(text("div", "empty-state", "아직 다운로드 기록이 없습니다."));
-    queueScrollUpdate();
-    return;
+function buildJobCard(job) {
+  const view = downloadJobView(job);
+  const card = document.createElement("article");
+  card.className = "job-card";
+  const head = document.createElement("div");
+  head.className = "job-head";
+  const title = text("h2", "job-title", view.title);
+  title.title = view.title;
+  const state = text("span", `job-state ${view.status}`, view.statusLabel);
+  head.append(title, state);
+
+  const progress = document.createElement("div");
+  progress.className = `job-progress ${view.progress.mode} status-${view.status}`;
+  if (view.progress.mode !== "failed") {
+    progress.setAttribute("role", "progressbar");
+    progress.setAttribute("aria-label", `${view.title} ${view.stage}`);
+    progress.setAttribute("aria-valuemin", "0");
+    progress.setAttribute("aria-valuemax", "100");
+    if (view.progress.value !== null) progress.setAttribute("aria-valuenow", String(view.progress.value));
   }
-  for (const job of jobs) {
-    const view = downloadJobView(job);
-    const card = document.createElement("article");
-    card.className = "job-card";
-    const head = document.createElement("div");
-    head.className = "job-head";
-    const title = text("h2", "job-title", view.title);
-    title.title = view.title;
-    const state = text("span", `job-state ${view.status}`, view.statusLabel);
-    head.append(title, state);
+  const fill = document.createElement("span");
+  fill.className = "job-progress-fill";
+  if (view.progress.value !== null) fill.style.width = `${view.progress.value}%`;
+  progress.append(fill);
 
-    const progress = document.createElement("div");
-    progress.className = `job-progress ${view.progress.mode} status-${view.status}`;
-    if (view.progress.mode !== "failed") {
-      progress.setAttribute("role", "progressbar");
-      progress.setAttribute("aria-label", `${view.title} ${view.stage}`);
-      progress.setAttribute("aria-valuemin", "0");
-      progress.setAttribute("aria-valuemax", "100");
-      if (view.progress.value !== null) progress.setAttribute("aria-valuenow", String(view.progress.value));
-    }
-    const fill = document.createElement("span");
-    fill.className = "job-progress-fill";
-    if (view.progress.value !== null) fill.style.width = `${view.progress.value}%`;
-    progress.append(fill);
+  const status = text("p", "job-status", view.message);
+  if (view.status === "failed") status.setAttribute("role", "alert");
+  card.append(head, status, progress);
+  if (retryableDownloadJob(job)) {
+    const actions = document.createElement("div");
+    actions.className = "job-actions";
+    const feedback = text("span", "job-retry-feedback", "");
+    feedback.setAttribute("aria-live", "polite");
+    const retry = text("button", "job-retry-button", "재시도");
+    retry.type = "button";
+    retry.addEventListener("click", async () => {
+      retry.disabled = true;
+      retry.textContent = "재시도 중…";
+      feedback.textContent = "";
+      try {
+        const response = await chrome.runtime.sendMessage({ type: "retry-download-job", jobId: job.id });
+        if (!response?.ok) throw new Error(response?.error || "download-job-retry-failed");
+        await requestJobs();
+      } catch {
+        feedback.textContent = "재시도 요청에 실패했습니다.";
+        retry.disabled = false;
+        retry.textContent = "재시도";
+      }
+    });
+    actions.append(feedback, retry);
+    card.append(actions);
+  }
+  return card;
+}
 
-    const status = text("p", "job-status", view.message);
-    if (view.status === "failed") status.setAttribute("role", "alert");
-    card.append(head, status, progress);
-    if (retryableDownloadJob(job)) {
-      const actions = document.createElement("div");
-      actions.className = "job-actions";
-      const feedback = text("span", "job-retry-feedback", "");
-      feedback.setAttribute("aria-live", "polite");
-      const retry = text("button", "job-retry-button", "재시도");
-      retry.type = "button";
-      retry.addEventListener("click", async () => {
-        retry.disabled = true;
-        retry.textContent = "재시도 중…";
-        feedback.textContent = "";
-        try {
-          const response = await chrome.runtime.sendMessage({ type: "retry-download-job", jobId: job.id });
-          if (!response?.ok) throw new Error(response?.error || "download-job-retry-failed");
-          await requestJobs();
-        } catch {
-          feedback.textContent = "재시도 요청에 실패했습니다.";
-          retry.disabled = false;
-          retry.textContent = "재시도";
-        }
-      });
-      actions.append(feedback, retry);
-      card.append(actions);
-    }
-    jobsElement.append(card);
+function renderJobs(jobs) {
+  for (const container of jobContainers) {
+    container.hidden = jobs.length === 0;
+    container.replaceChildren();
+    for (const job of jobs) container.append(buildJobCard(job));
   }
   queueScrollUpdate();
 }
@@ -326,7 +325,7 @@ async function directDownload() {
       const response = await chrome.runtime.sendMessage({ type: "download-url", url: value });
       if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
     }
-    showTab("downloads");
+    void requestJobs();
   } catch (error) {
     output.textContent = error?.message || "다운로드를 시작하지 못했습니다.";
   } finally { button.disabled = false; }
@@ -349,7 +348,7 @@ async function rescan() {
 
 byId("refresh").addEventListener("click", () => {
   const active = tabs.find((tab) => tab.getAttribute("aria-selected") === "true")?.dataset.tab;
-  if (active === "downloads") void requestJobs(); else if (active === "detect") void requestCandidates();
+  if (active === "detect") void requestCandidates(); else void requestJobs();
 });
 byId("rescan").addEventListener("click", () => void rescan());
 byId("download-url").addEventListener("click", () => void directDownload());

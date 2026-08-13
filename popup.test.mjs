@@ -2,15 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-test("popover exposes detection, link input, and downloads without development test mode", async () => {
+test("popover exposes detection and link input without development test mode", async () => {
   const [html, script] = await Promise.all([
     readFile(new URL("./popup.html", import.meta.url), "utf8"),
     readFile(new URL("./popup.js", import.meta.url), "utf8"),
   ]);
-  for (const tab of ["detect", "link", "downloads"]) {
+  for (const tab of ["detect", "link"]) {
     assert.match(html, new RegExp(`data-tab="${tab}"`));
     assert.match(html, new RegExp(`id="panel-${tab}"`));
   }
+  assert.doesNotMatch(html, /data-tab="downloads"/);
+  assert.doesNotMatch(html, /id="panel-downloads"/);
   assert.doesNotMatch(html, /개발 테스트 모드|test-domains|test-mode/);
   assert.doesNotMatch(html, /choose-folder|폴더 선택/);
   assert.doesNotMatch(html, /tab-youtube|panel-youtube|youtube-mark|youtube-url|youtube-download/);
@@ -32,13 +34,18 @@ test("normal media downloads use the offscreen worker instead of opening a tab",
   assert.doesNotMatch(background, /chrome\.tabs\.create/);
 });
 
-test("downloads tab renders truthful accessible job progress", async () => {
+test("inline job lists render truthful accessible progress without a downloads tab", async () => {
   const [html, script, css] = await Promise.all([
     readFile(new URL("./popup.html", import.meta.url), "utf8"),
     readFile(new URL("./popup.js", import.meta.url), "utf8"),
     readFile(new URL("./popup.css", import.meta.url), "utf8"),
   ]);
   assert.doesNotMatch(html, /id="download-summary"/);
+  assert.doesNotMatch(html, /id="download-jobs"/);
+  assert.match(html, /id="detect-jobs"/);
+  assert.match(html, /id="link-jobs"/);
+  assert.match(script, /buildJobCard\(job\)/);
+  assert.match(script, /container\.hidden = jobs\.length === 0/);
   assert.match(script, /downloadJobView\(job\)/);
   assert.doesNotMatch(script, /job-marker/);
   assert.match(script, /role", "progressbar"/);

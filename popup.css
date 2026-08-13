@@ -33,6 +33,7 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
 .main-toggle { display: flex; align-items: center; gap: 5px; color: #9aa9bd; font-size: 11px; }
 .main-toggle input { accent-color: #4f86e8; }
 .candidate-list, .job-list { display: grid; width: 100%; min-width: 0; max-width: 100%; gap: 8px; }
+.tab-panel .job-list { margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(13, 24, 43, .08); }
 .candidate-card, .job-card, .youtube-card { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; padding: 11px; border: 1px solid #2a3546; border-radius: 11px; background: #171e29; }
 .candidate-preview { display: grid; width: 100%; aspect-ratio: 16 / 9; margin-bottom: 10px; overflow: hidden; place-items: center; border-radius: 8px; background: #090d13; color: #65748a; }
 .candidate-preview video { display: block; width: 100%; height: 100%; object-fit: contain; background: #090d13; }

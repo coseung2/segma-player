@@ -1099,6 +1099,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message?.type === "browser-download" && sender.id === chrome.runtime.id) {
+    const resourceUrl = canonicalHttpUrl(message.url);
+    if (!resourceUrl) {
+      sendResponse({ ok: false, error: "invalid-url" });
+      return false;
+    }
+    const rawName = typeof message.filename === "string" ? message.filename : "";
+    const safeName = (rawName.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\.+$/, "").trim()
+      || "download.mp4").slice(0, 180);
+    (async () => {
+      try {
+        const downloadId = await chrome.downloads.download({
+          url: resourceUrl.href,
+          filename: safeName,
+          conflictAction: "uniquify",
+          saveAs: false,
+        });
+        sendResponse({ ok: true, downloadId });
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || "download-failed" });
+      }
+    })();
+    return true;
+  }
+
   if (!sender.tab?.url || sender.id !== chrome.runtime.id) return false;
   const sanitized = sanitizePageMessage({
     ...message,

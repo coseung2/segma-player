@@ -164,18 +164,33 @@ export async function tryBrowserDownloadFallback(
     && probed?.total !== null && probed?.total !== undefined) {
     assertDownloadWithinPlan(0, probed.total, plan);
   }
-  let downloadId;
-  try {
-    downloadId = await chrome.downloads.download({
-      url,
-      filename: safeName,
-      conflictAction: "uniquify",
-      saveAs: false,
-    });
-  } catch (error) {
-    throw new Error(
-      `브라우저 다운로드로 저장하지 못했습니다 (${error instanceof Error ? error.message : "download-failed"}). 컴패니언 설치 후 다시 시도해 주세요.`,
-    );
+  let downloadId = null;
+  if (typeof chrome?.downloads?.download === "function") {
+    try {
+      downloadId = await chrome.downloads.download({
+        url,
+        filename: safeName,
+        conflictAction: "uniquify",
+        saveAs: false,
+      });
+    } catch (error) {
+      throw new Error(
+        `브라우저 다운로드로 저장하지 못했습니다 (${error instanceof Error ? error.message : "download-failed"}). 컴패니언 설치 후 다시 시도해 주세요.`,
+      );
+    }
+  } else {
+    // Offscreen documents cannot call chrome.downloads directly; route the
+    // browser download through the service worker.
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "browser-download",
+        url,
+        filename: safeName,
+      });
+      if (response?.ok && Number.isInteger(response.downloadId)) downloadId = response.downloadId;
+    } catch {
+      downloadId = null;
+    }
   }
   return Number.isInteger(downloadId) ? { fallback: true, bytes: 0 } : null;
 }

@@ -365,7 +365,7 @@ async function requestPageDecodedKey(url, videoTabId, videoFrameId = null) {
   if (!Number.isInteger(videoTabId) || videoTabId <= 0) {
     throw new Error(level5KeyErrorMessage("level5-key-unavailable"));
   }
-  try {
+  async function ask() {
     const response = await chrome.runtime.sendMessage({
       type: "decode-hls-key",
       url,
@@ -374,7 +374,28 @@ async function requestPageDecodedKey(url, videoTabId, videoFrameId = null) {
     });
     const bytes = response?.ok ? toBytes(response.key) : null;
     if (bytes && (bytes.byteLength === 16 || bytes.byteLength === 32)) return bytes;
-    throw new Error(level5KeyErrorMessage(normalizeLevel5KeyError(response?.error)));
+    return { code: normalizeLevel5KeyError(response?.error) };
+  }
+  try {
+    const first = await ask();
+    if (first instanceof Uint8Array) return first;
+    // The player often needs a moment to finish booting its key loader;
+    // transient loader failures get one short retry before reporting.
+    const transient = new Set([
+      "level5-loader-failed",
+      "level5-key-load-failed",
+      "level5-key-load-timeout",
+      "page-bridge-timeout",
+      "key-fetch-failed",
+      "runtime-import-failed",
+    ]);
+    if (transient.has(first.code)) {
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const retried = await ask();
+      if (retried instanceof Uint8Array) return retried;
+      throw new Error(level5KeyErrorMessage(retried.code || first.code));
+    }
+    throw new Error(level5KeyErrorMessage(first.code));
   } catch (error) {
     if (typeof error?.message === "string" && error.message.startsWith("보호된 영상 키 확인 실패:")) throw error;
     throw new Error(level5KeyErrorMessage("level5-key-unavailable"));
@@ -778,9 +799,11 @@ async function saveProgressive(
   videoTabId,
   context = defaultDownloadContext,
   preparedSession = null,
+  dirHandle = null,
 ) {
   const session = preparedSession
     || await prepareProgressiveFetch(await progressiveSession(url, pageUrl, videoTabId), context);
+  const saveHandle = dirHandle || await getStoredSaveDirectory();
 
   if (session.sourceFrameFallbackPreferred) {
     const fallback = await requestSourceFrameDownload(
@@ -807,9 +830,8 @@ async function saveProgressive(
       });
     };
     try {
-      const dirHandle = await getStoredSaveDirectory();
-      if (!dirHandle) throw new Error("no-save-sink");
-      const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+      if (!saveHandle) throw new Error("no-save-sink");
+      const fileHandle = await saveHandle.getFileHandle(filename, { create: true });
       const writable = await fileHandle.createWritable({ keepExistingData: true });
       const sink = {
         write: (data) => writable.write(data),
@@ -830,10 +852,9 @@ async function saveProgressive(
   }
 
   let writable = null;
-  const dirHandle = await getStoredSaveDirectory();
-  if (dirHandle) {
+  if (saveHandle) {
     try {
-      const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+      const fileHandle = await saveHandle.getFileHandle(filename, { create: true });
       writable = await fileHandle.createWritable({ keepExistingData: true });
     } catch {
       writable = null;
@@ -875,14 +896,14 @@ async function saveProgressive(
   }
 }
 
-async function saveHlsToNative(media, filename, referrer, videoTabId = null, context = defaultDownloadContext) {
-  const dirHandle = await getStoredSaveDirectory();
-  if (!dirHandle) {
+async function saveHlsToNative(media, filename, referrer, videoTabId = null, context = defaultDownloadContext, dirHandle = null) {
+  const saveHandle = dirHandle || await getStoredSaveDirectory();
+  if (!saveHandle) {
     throw new Error("분할 형식 영상은 저장 폴더 연결이 필요합니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
   }
   let writable;
   try {
-    const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+    const fileHandle = await saveHandle.getFileHandle(filename, { create: true });
     writable = await fileHandle.createWritable({ keepExistingData: true });
   } catch {
     throw new Error("저장 폴더에 쓸 수 없습니다. 옵션 → 저장 폴더 선택에서 새 빈 폴더를 다시 지정해 주세요.");
@@ -970,7 +991,7 @@ export async function prepareDownloadCandidate(candidate, { onStatus = null, pau
 
 export async function downloadPreparedCandidate(prepared) {
   if (!prepared?.candidate || !prepared.context) throw new Error("준비된 다운로드 작업이 올바르지 않습니다.");
-  const { candidate, context, filename } = prepared;
+  const { candidate, context, filename, dirHandle = null } = prepared;
   if (prepared.type === "progressive") {
     const result = await saveProgressive(
       candidate.resourceUrl,
@@ -979,6 +1000,7 @@ export async function downloadPreparedCandidate(prepared) {
       candidate.tabId,
       context,
       prepared.session,
+      dirHandle,
     );
     return {
       statusText: result.fallback
@@ -987,7 +1009,7 @@ export async function downloadPreparedCandidate(prepared) {
     };
   }
   if (prepared.type !== "hls" || !prepared.media) throw new Error("준비된 다운로드 형식을 지원하지 않습니다.");
-  const saved = await saveHlsToNative(prepared.media, filename, candidate.pageUrl, candidate.tabId, context);
+  const saved = await saveHlsToNative(prepared.media, filename, candidate.pageUrl, candidate.tabId, context, dirHandle);
   return {
     statusText: "다운로드를 완료했습니다. Downloads\\Aura Media에서 확인하세요.",
   };

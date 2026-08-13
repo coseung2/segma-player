@@ -67,7 +67,7 @@ function setPaused(jobId, paused) {
   return true;
 }
 
-async function run(jobId, candidate) {
+async function run(jobId, candidate, dirHandle = null) {
   runningJobs.set(jobId, { paused: false, sourceClosed: false, lease: null });
   const plan = await resolvePlan();
   setRuntimePlan(plan);
@@ -91,7 +91,7 @@ async function run(jobId, candidate) {
       if (state) state.lease = lease;
       await waitWhilePaused(jobId);
       await report(jobId, { status: "running", statusText: "다운로드를 시작하는 중…", folderName });
-      return downloadPreparedCandidate(prepared);
+      return downloadPreparedCandidate(dirHandle ? { ...prepared, dirHandle } : prepared);
     });
     await report(jobId, { status: "completed", statusText: result.statusText, folderName });
   } catch (error) {
@@ -191,7 +191,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   acceptedJobIds.add(message.jobId);
-  void run(message.jobId, message.candidate);
+  void run(message.jobId, message.candidate, message.dirHandle || null);
   sendResponse({ ok: true, concurrency: scheduler.concurrency });
   return false;
 });

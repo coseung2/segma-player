@@ -99,7 +99,7 @@ async function refreshSaveStatus() {
 }
 
 async function ensureSaveFolder() {
-  let handle = await getStoredSaveDirectory();
+  let handle = await ensureSaveDirectory();
   if (handle) return handle;
   try {
     handle = await ensureSaveDirectory({ pick: true });
@@ -237,6 +237,7 @@ function renderCandidates(candidates) {
         const response = await chrome.runtime.sendMessage({
           type: "download-candidate",
           candidateId: candidate.id,
+          dirHandle: folder,
         });
         if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
         void requestJobs();
@@ -305,7 +306,15 @@ function buildJobCard(job) {
       retry.textContent = "재시도 중…";
       feedback.textContent = "";
       try {
-        const response = await chrome.runtime.sendMessage({ type: "retry-download-job", jobId: job.id });
+        const folder = await ensureSaveFolder();
+        if (!folder) {
+          throw new Error("저장 폴더가 필요합니다. 다시 누르면 폴더 선택 창이 열립니다.");
+        }
+        const response = await chrome.runtime.sendMessage({
+          type: "retry-download-job",
+          jobId: job.id,
+          dirHandle: folder,
+        });
         if (!response?.ok) throw new Error(response?.error || "download-job-retry-failed");
         await requestJobs();
       } catch {
@@ -385,6 +394,7 @@ async function directDownload() {
         type: "youtube-download",
         url: value,
         quality: byId("youtube-quality").value,
+        dirHandle: folder,
       });
       if (!response?.ok) {
         if (response?.error === "pro-feature-required") throw new Error("이 화질은 Pro에서 사용할 수 있습니다.");
@@ -396,7 +406,7 @@ async function directDownload() {
         throw new Error("유튜브 저장에 실패했습니다. 서버 연결과 옵션의 서버 주소를 확인해 주세요.");
       }
     } else {
-      const response = await chrome.runtime.sendMessage({ type: "download-url", url: value });
+      const response = await chrome.runtime.sendMessage({ type: "download-url", url: value, dirHandle: folder });
       if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
     }
     void requestJobs();

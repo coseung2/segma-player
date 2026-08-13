@@ -873,12 +873,14 @@ async function saveProgressive(
   }
 
   let writable = null;
+  let sinkError = null;
   if (saveHandle) {
     try {
       const fileHandle = await saveHandle.getFileHandle(filename, { create: true });
       writable = await fileHandle.createWritable({ keepExistingData: true });
-    } catch {
+    } catch (error) {
       writable = null;
+      sinkError = error;
     }
   }
   if (!writable) {
@@ -890,7 +892,9 @@ async function saveProgressive(
       context,
     );
     if (downloaded) return downloaded;
-    throw new Error("저장 폴더에 쓸 수 없습니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
+    throw new Error(sinkError?.name === "NotAllowedError"
+      ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다."
+      : "저장 폴더에 쓸 수 없습니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
   }
   try {
     const bytes = await streamFetchToWritable(
@@ -926,8 +930,10 @@ async function saveHlsToNative(media, filename, referrer, videoTabId = null, con
   try {
     const fileHandle = await saveHandle.getFileHandle(filename, { create: true });
     writable = await fileHandle.createWritable({ keepExistingData: true });
-  } catch {
-    throw new Error("저장 폴더에 쓸 수 없습니다. 옵션 → 저장 폴더 선택에서 새 빈 폴더를 다시 지정해 주세요.");
+  } catch (error) {
+    throw new Error(error?.name === "NotAllowedError"
+      ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다."
+      : "저장 폴더에 쓸 수 없습니다. 옵션 → 저장 폴더 선택에서 새 빈 폴더를 다시 지정해 주세요.");
   }
   let count = 0;
   let writtenBytes = 0;

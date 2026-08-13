@@ -120,7 +120,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await report(message.jobId, { status: "running", statusText: "병렬 수신 준비 중…" });
         const filename = typeof message.filename === "string" && message.filename ? message.filename : "YouTube 영상.mp4";
         if (!message.dirHandle) throw new Error("no-save-sink");
-        const fileHandle = await message.dirHandle.getFileHandle(filename, { create: true });
+        let fileHandle;
+        try {
+          fileHandle = await message.dirHandle.getFileHandle(filename, { create: true });
+        } catch (error) {
+          throw new Error(error?.name === "NotAllowedError"
+            ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다."
+            : "저장 폴더에 접근할 수 없습니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
+        }
         const writable = await fileHandle.createWritable({ keepExistingData: true });
         const sink = {
           write: (data) => writable.write(data),

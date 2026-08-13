@@ -98,16 +98,30 @@ async function refreshSaveStatus() {
   for (const el of saveStatusElements) el.textContent = text;
 }
 
+async function verifySaveFolderWritable(handle) {
+  try {
+    const probe = await handle.getFileHandle(".aura-write-probe", { create: true });
+    const writable = await probe.createWritable();
+    await writable.write(new Uint8Array([1]));
+    await writable.close();
+    await handle.removeEntry(".aura-write-probe").catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function ensureSaveFolder() {
   let handle = await ensureSaveDirectory();
-  if (handle) return handle;
+  if (handle && await verifySaveFolderWritable(handle)) return handle;
   try {
     handle = await ensureSaveDirectory({ pick: true });
   } catch {
     handle = null;
   }
+  if (handle && await verifySaveFolderWritable(handle)) return handle;
   void refreshSaveStatus();
-  return handle;
+  return null;
 }
 
 async function refreshPlan() {

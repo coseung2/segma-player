@@ -64,12 +64,14 @@ export async function ensureSaveDirectory({ pick = false } = {}) {
   if (!handle) return null;
   try {
     const state = await handle.queryPermission?.({ mode: "readwrite" });
+    if (state === "granted") return handle;
     if (state === "prompt") {
       const requested = await handle.requestPermission?.({ mode: "readwrite" });
-      if (requested !== "granted") return null;
+      if (requested === "granted") return handle;
     }
   } catch {
-    // Keep the stored handle; writes may still work.
+    // Permission could not be confirmed in this context; the caller decides
+    // whether to open the picker again.
   }
-  return handle;
+  return null;
 }

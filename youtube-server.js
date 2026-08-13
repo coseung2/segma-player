@@ -1,4 +1,4 @@
-import { getStoredLicense } from "./license.js";
+import { getStoredLicense, LICENSE_API_URL } from "./license.js";
 
 export const YOUTUBE_SERVER_STORAGE_KEY = "auraYouTubeServer";
 // Tailscale serve HTTPS proxy (443 → local 8788). Port 443 keeps the
@@ -6,6 +6,9 @@ export const YOUTUBE_SERVER_STORAGE_KEY = "auraYouTubeServer";
 // tailnet.
 export const DEFAULT_YOUTUBE_SERVER_URL = "https://desktop-8n966j0.tail4cbe57.ts.net";
 const DEVICE_ID_STORAGE_KEY = "auraYouTubeDeviceId";
+const TOKEN_STORAGE_KEY = "auraYouTubeServerToken";
+const TOKEN_API_URL = LICENSE_API_URL.replace("/api/license", "/api/youtube-token");
+const TOKEN_FETCH_TIMEOUT_MS = 12_000;
 const JOB_POLL_MS = 2_000;
 const JOB_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -90,23 +93,70 @@ async function deviceId() {
   }
 }
 
+async function fetchYouTubeToken(force = false) {
+  try {
+    const stored = await chrome.storage.session.get(TOKEN_STORAGE_KEY);
+    const entry = stored?.[TOKEN_STORAGE_KEY];
+    if (!force && entry && typeof entry.token === "string" && Number(entry.exp) > Date.now() + 5 * 60 * 1000) {
+      return entry.token;
+    }
+    const license = await getStoredLicense();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TOKEN_FETCH_TIMEOUT_MS);
+    timer?.unref?.();
+    try {
+      const response = await fetch(TOKEN_API_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId: await deviceId(), key: license?.key || "" }),
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+      const data = await response.json();
+      if (data?.ok !== true || typeof data.token !== "string" || !data.token) return null;
+      await chrome.storage.session.set({
+        [TOKEN_STORAGE_KEY]: { token: data.token, exp: Number(data.exp) || 0 },
+      });
+      return data.token;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function youTubeFetch(url, options = {}) {
+  let token = await fetchYouTubeToken();
+  if (!token) return { response: null, authError: true };
+  const headers = new Headers(options.headers || {});
+  headers.set("authorization", `Bearer ${token}`);
+  let response = await fetch(url, { ...options, headers, cache: "no-store" });
+  if (response.status === 401) {
+    token = await fetchYouTubeToken(true);
+    if (token) {
+      headers.set("authorization", `Bearer ${token}`);
+      response = await fetch(url, { ...options, headers, cache: "no-store" });
+    }
+  }
+  return { response, authError: response.status === 401 };
+}
+
 export async function submitYouTubeJob(url, quality = "best", server = null) {
   const base = server || (await getYouTubeServerUrl());
   if (!base) return { ok: false, error: "server-not-configured" };
-  const license = await getStoredLicense();
   const body = {
     url,
     quality: String(quality || "best"),
-    deviceId: await deviceId(),
-    licenseKey: license?.key || "",
   };
+  const { response, authError } = await youTubeFetch(`${base}/api/youtube`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (authError || !response) return { ok: false, error: "server-unauthorized" };
   try {
-    const response = await fetch(`${base}/api/youtube`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       return {
@@ -137,10 +187,9 @@ export async function waitForYouTubeJob(jobId, server = null, {
   if (!base) return { ok: false, error: "server-not-configured" };
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    const { response, authError } = await youTubeFetch(`${base}/api/jobs/${encodeURIComponent(jobId)}`);
+    if (authError) return { ok: false, error: "server-unauthorized" };
     try {
-      const response = await fetch(`${base}/api/jobs/${encodeURIComponent(jobId)}`, {
-        cache: "no-store",
-      });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.status) {
         if (data.status === "ready") return { ok: true, jobId, title: data.title || "" };
@@ -156,7 +205,9 @@ export async function waitForYouTubeJob(jobId, server = null, {
   return { ok: false, error: "job-timeout" };
 }
 
-export function youtubeJobFileUrl(jobId, server = null) {
+export async function youtubeJobFileUrl(jobId, server = null) {
   const base = server || normalizeServerUrl(DEFAULT_YOUTUBE_SERVER_URL) || "";
-  return `${base}/api/jobs/${encodeURIComponent(jobId)}/file`;
+  const token = await fetchYouTubeToken();
+  const fileUrl = `${base}/api/jobs/${encodeURIComponent(jobId)}/file`;
+  return token ? `${fileUrl}?t=${encodeURIComponent(token)}` : fileUrl;
 }

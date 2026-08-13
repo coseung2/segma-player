@@ -152,7 +152,7 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
     if (submitted.ok) {
       const waited = await waitForYouTubeJob(submitted.jobId, serverUrl);
       if (waited.ok) {
-        const fileUrl = youtubeJobFileUrl(submitted.jobId, serverUrl);
+        const fileUrl = await youtubeJobFileUrl(submitted.jobId, serverUrl);
         const candidate = observeResource({
           pageTitle: waited.title || "YouTube 영상",
           pageUrl: url,

@@ -4,24 +4,37 @@ import assert from "node:assert/strict";
 let moduleCounter = 0;
 
 function serverEnvironment() {
-  const storage = new Map();
+  const local = new Map();
+  const session = new Map();
   const fetchCalls = [];
   let fetchHandler = null;
   globalThis.chrome = {
     storage: {
       local: {
         async get(defaults) {
-          if (typeof defaults === "string") return { [defaults]: storage.get(defaults) };
+          if (typeof defaults === "string") return { [defaults]: local.get(defaults) };
           return Object.fromEntries(Object.entries(defaults || {}).map(([key, fallback]) => [
             key,
-            storage.has(key) ? storage.get(key) : fallback,
+            local.has(key) ? local.get(key) : fallback,
           ]));
         },
         async set(values) {
-          for (const [key, value] of Object.entries(values)) storage.set(key, value);
+          for (const [key, value] of Object.entries(values)) local.set(key, value);
         },
         async remove(key) {
-          storage.delete(key);
+          local.delete(key);
+        },
+      },
+      session: {
+        async get(defaults) {
+          if (typeof defaults === "string") return { [defaults]: session.get(defaults) };
+          return Object.fromEntries(Object.entries(defaults || {}).map(([key, fallback]) => [
+            key,
+            session.has(key) ? session.get(key) : fallback,
+          ]));
+        },
+        async set(values) {
+          for (const [key, value] of Object.entries(values)) session.set(key, value);
         },
       },
     },
@@ -33,7 +46,8 @@ function serverEnvironment() {
   };
   globalThis.crypto.randomUUID = () => "00000000-0000-4000-8000-000000000000";
   return {
-    storage,
+    local,
+    session,
     fetchCalls,
     setFetch(handler) {
       fetchHandler = handler;
@@ -46,6 +60,13 @@ const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), 
   headers: { "content-type": "application/json" },
 });
 
+const TOKEN_BODY = {
+  ok: true,
+  token: "tok-1",
+  exp: Date.now() + 12 * 60 * 60 * 1000,
+  plan: "free",
+};
+
 test("defaults to the tailnet server and normalizes configured URLs", async () => {
   const env = serverEnvironment();
   const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
@@ -56,7 +77,7 @@ test("defaults to the tailnet server and normalizes configured URLs", async () =
   assert.deepEqual(saved, { ok: true, url: "https://example.com:9000" });
   assert.equal(await mod.getYouTubeServerUrl(), "https://example.com:9000");
   assert.deepEqual(await mod.setYouTubeServerUrl("ftp://bad"), { ok: false, error: "invalid-server-url" });
-  assert.equal(env.storage.get("auraYouTubeServer"), "https://example.com:9000");
+  assert.equal(env.local.get("auraYouTubeServer"), "https://example.com:9000");
 });
 
 test("checkYouTubeServer reports health and unreachable states", async () => {
@@ -76,16 +97,23 @@ test("checkYouTubeServer reports health and unreachable states", async () => {
   });
 });
 
-test("submitYouTubeJob posts device id and license key and parses quota", async () => {
+test("submitYouTubeJob mints a token and posts it with the job", async () => {
   const env = serverEnvironment();
-  env.storage.set("auraLicense", { key: "AM-TESTKEY", edition: "pro", status: "approved" });
+  env.local.set("auraLicense", { key: "AM-TESTKEY", edition: "pro", status: "approved" });
   env.setFetch((url, options) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") {
+      const body = JSON.parse(options.body);
+      assert.equal(body.deviceId, "00000000-0000-4000-8000-000000000000");
+      assert.equal(body.key, "AM-TESTKEY");
+      return jsonResponse(TOKEN_BODY);
+    }
     assert.equal(url, "http://server.test:8788/api/youtube");
     const body = JSON.parse(options.body);
     assert.equal(body.url, "https://youtube.com/watch?v=abc");
     assert.equal(body.quality, "1080");
-    assert.equal(body.deviceId, "00000000-0000-4000-8000-000000000000");
-    assert.equal(body.licenseKey, "AM-TESTKEY");
+    assert.equal(body.deviceId, undefined);
+    assert.equal(body.licenseKey, undefined);
+    assert.equal(options.headers.get("authorization"), "Bearer tok-1");
     return jsonResponse({ ok: true, jobId: "job-1", status: "queued", quotaUsed: 1, quotaLimit: 10, pro: false }, 202);
   });
   const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
@@ -94,9 +122,44 @@ test("submitYouTubeJob posts device id and license key and parses quota", async 
   assert.deepEqual(result, { ok: true, jobId: "job-1", pro: false, quotaUsed: 1, quotaLimit: 10 });
 });
 
+test("submitYouTubeJob refreshes the token once on 401", async () => {
+  const env = serverEnvironment();
+  let tokenCalls = 0;
+  let serverCalls = 0;
+  env.setFetch((url, options) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") {
+      tokenCalls += 1;
+      return jsonResponse({ ...TOKEN_BODY, token: `tok-${tokenCalls}` });
+    }
+    serverCalls += 1;
+    if (serverCalls === 1) return jsonResponse({ error: "unauthorized" }, 401);
+    assert.equal(options.headers.get("authorization"), "Bearer tok-2");
+    return jsonResponse({ ok: true, jobId: "job-2", status: "queued", quotaUsed: 0, quotaLimit: 10, pro: false }, 202);
+  });
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+
+  const result = await mod.submitYouTubeJob("https://youtube.com/watch?v=abc", "best", "http://server.test:8788");
+  assert.equal(result.ok, true);
+  assert.equal(result.jobId, "job-2");
+  assert.equal(tokenCalls, 2);
+  assert.equal(serverCalls, 2);
+});
+
+test("submitYouTubeJob reports unauthorized when no token can be minted", async () => {
+  const env = serverEnvironment();
+  env.setFetch(() => jsonResponse({ ok: false, error: "rate-limited" }, 429));
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+
+  const result = await mod.submitYouTubeJob("https://youtube.com/watch?v=abc", "best", "http://server.test:8788");
+  assert.deepEqual(result, { ok: false, error: "server-unauthorized" });
+});
+
 test("submitYouTubeJob surfaces the monthly quota error", async () => {
   const env = serverEnvironment();
-  env.setFetch(() => jsonResponse({ error: "monthly-limit-reached", used: 10, limit: 10 }, 429));
+  env.setFetch((url) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") return jsonResponse(TOKEN_BODY);
+    return jsonResponse({ error: "monthly-limit-reached", used: 10, limit: 10 }, 429);
+  });
   const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
 
   const result = await mod.submitYouTubeJob("https://youtube.com/watch?v=abc", "best", "http://server.test:8788");
@@ -105,11 +168,13 @@ test("submitYouTubeJob surfaces the monthly quota error", async () => {
   assert.equal(result.limit, 10);
 });
 
-test("waitForYouTubeJob polls until ready and reports failures", async () => {
+test("waitForYouTubeJob polls with the bearer token until ready", async () => {
   const env = serverEnvironment();
   let calls = 0;
-  env.setFetch(() => {
+  env.setFetch((url, options) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") return jsonResponse(TOKEN_BODY);
     calls += 1;
+    assert.equal(options.headers.get("authorization"), "Bearer tok-1");
     if (calls === 1) return jsonResponse({ id: "job-1", status: "queued" });
     return jsonResponse({ id: "job-1", status: "ready", title: "Test Video" });
   });
@@ -118,16 +183,19 @@ test("waitForYouTubeJob polls until ready and reports failures", async () => {
   const ready = await mod.waitForYouTubeJob("job-1", "http://server.test:8788", { pollMs: 1, timeoutMs: 2000 });
   assert.deepEqual(ready, { ok: true, jobId: "job-1", title: "Test Video" });
 
-  env.setFetch(() => jsonResponse({ id: "job-1", status: "failed", error: "video-unavailable" }));
+  env.setFetch((url) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") return jsonResponse(TOKEN_BODY);
+    return jsonResponse({ id: "job-1", status: "failed", error: "video-unavailable" });
+  });
   const failed = await mod.waitForYouTubeJob("job-1", "http://server.test:8788", { pollMs: 1, timeoutMs: 2000 });
   assert.deepEqual(failed, { ok: false, error: "video-unavailable" });
 });
 
-test("youtubeJobFileUrl points at the transient file endpoint", () => {
-  return import(`./youtube-server.js?test=${++moduleCounter}`).then((mod) => {
-    assert.equal(
-      mod.youtubeJobFileUrl("job-1", "http://server.test:8788"),
-      "http://server.test:8788/api/jobs/job-1/file",
-    );
-  });
+test("youtubeJobFileUrl appends the capability token", async () => {
+  const env = serverEnvironment();
+  env.setFetch(() => jsonResponse(TOKEN_BODY));
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+
+  const fileUrl = await mod.youtubeJobFileUrl("job-1", "http://server.test:8788");
+  assert.equal(fileUrl, "http://server.test:8788/api/jobs/job-1/file?t=tok-1");
 });

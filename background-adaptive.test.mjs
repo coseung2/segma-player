@@ -489,6 +489,14 @@ test("youtube downloads route through the remote server when configured", async 
   localStorage.delete("auraLicense");
   localStorage.set("auraYouTubeServer", "https://server.test");
   fetchHandler = (call) => {
+    if (call.url === "https://aura.mdownloader.workers.dev/api/youtube-token") {
+      return new Response(JSON.stringify({
+        ok: true,
+        token: "tok-1",
+        exp: Date.now() + 12 * 60 * 60 * 1000,
+        plan: "free",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (call.url === "https://server.test/api/youtube") {
       const body = JSON.parse(String(call.options.body || "{}"));
       assert.equal(body.quality, "1080");
@@ -520,7 +528,7 @@ test("youtube downloads route through the remote server when configured", async 
   await delay(400);
   const snapshot = lastCandidatesSnapshot || [];
   assert.ok(snapshot.some((candidate) => candidate.resourceUrl
-    === "https://server.test/api/jobs/job-1/file"));
+    .startsWith("https://server.test/api/jobs/job-1/file")));
 });
 
 test("youtube downloads fall back to companion when the server is unreachable", async () => {

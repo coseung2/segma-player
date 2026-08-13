@@ -13,6 +13,7 @@ const licenseStatusElement = document.querySelector("#license-status");
 const licenseKeyInput = document.querySelector("#license-key");
 const licenseActivateButton = document.querySelector("#license-activate");
 const licenseRefreshButton = document.querySelector("#license-refresh");
+const licenseSection = document.querySelector("#license-section");
 const ytServerUrlInput = document.querySelector("#yt-server-url");
 const ytServerStatusElement = document.querySelector("#yt-server-status");
 const ytServerSaveButton = document.querySelector("#yt-server-save");
@@ -66,11 +67,12 @@ async function refreshLicenseStatus() {
   try {
     const response = await chrome.runtime.sendMessage({ type: "license-status" });
     if (response?.ok && response.edition === "pro") {
-      licenseStatusElement.textContent = "Pro 활성화됨 — 동시 3개, 용량 제한 없음, 백그라운드 다운로드 지원.";
-      licenseKeyInput.disabled = true;
-      licenseActivateButton.disabled = true;
+      // The Pro build is already unlocked; the key entry is only for
+      // upgrading the free (store) edition.
+      licenseSection.hidden = true;
       return;
     }
+    licenseSection.hidden = false;
     licenseKeyInput.disabled = false;
     licenseActivateButton.disabled = false;
     licenseStatusElement.textContent = "일반 버전 사용 중 — 키가 있으면 입력 후 등록하세요.";

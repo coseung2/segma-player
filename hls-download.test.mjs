@@ -5,10 +5,46 @@ globalThis.document = { querySelector: () => null };
 
 const {
   browserDownloadFilename,
+  prepareDownloadCandidate,
   prepareProgressiveFetch,
   requestSourceFrameDownload,
   tryBrowserDownloadFallback,
 } = await import("./hls-download.js");
+
+test("loadMediaPlaylist accepts EXT-X-BYTERANGE playlists", async () => {
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: async (message) => {
+        if (message.type === "ensure-media-routes") return { ok: true };
+        if (message.type === "prepare-media-fetch") return { ok: true, leaseId: "lease-br" };
+        if (message.type === "release-media-fetch") return { ok: true };
+        return { ok: true };
+      },
+    },
+  };
+  globalThis.fetch = async () => new Response(
+    "#EXTM3U\n#EXTINF:4,\n#EXT-X-BYTERANGE:1000@0\nseg.bin\n#EXTINF:4,\n#EXT-X-BYTERANGE:500\n",
+    { status: 200, headers: { "content-type": "application/vnd.apple.mpegurl" } },
+  );
+  try {
+    const prepared = await prepareDownloadCandidate({
+      resourceUrl: "https://media.example/video/stream.m3u8",
+      pageUrl: "https://media.example/",
+      pageTitle: "바이트레인지 테스트",
+      tabId: 1,
+      mediaType: "HLS_MASTER",
+    });
+    assert.equal(prepared.media.byterange, true);
+    assert.equal(prepared.media.segments.length, 2);
+    assert.deepEqual(prepared.media.byteranges, [
+      { length: 1000, offset: 0 },
+      { length: 500, offset: 1000 },
+    ]);
+  } finally {
+    delete globalThis.fetch;
+    delete globalThis.chrome;
+  }
+});
 
 test("Dood-compatible media falls back to its source frame when an authenticated probe is CORS-blocked", async () => {
   globalThis.chrome = {

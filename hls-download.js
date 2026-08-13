@@ -342,15 +342,17 @@ async function fetchText(url, referrer, context = defaultDownloadContext) {
   };
 }
 
-async function fetchArrayBuffer(url, referrer, label, context = defaultDownloadContext) {
+async function fetchArrayBuffer(url, referrer, label, context = defaultDownloadContext, range = null) {
   const requestReferrer = referrerFor(url, referrer, context);
+  const hasRange = range && Number.isInteger(range?.offset) && Number.isInteger(range?.length) && range.length > 0;
+  const extraHeaders = hasRange ? { Range: `bytes=${range.offset}-${range.offset + range.length - 1}` } : {};
   let loaded;
   try {
     loaded = await withMediaFetchLease(url, requestReferrer, async (response) => ({
       ok: response.ok,
       status: response.status,
       data: new Uint8Array(await response.arrayBuffer()),
-    }), {}, context);
+    }), extraHeaders, context);
   } catch (error) {
     const host = hostForMessage(url);
     throw new Error(host
@@ -358,7 +360,21 @@ async function fetchArrayBuffer(url, referrer, label, context = defaultDownloadC
       : `${label} 요청 중 네트워크 오류가 발생했습니다.`);
   }
   if (!loaded.ok) throw new Error(`${label} 요청 실패 (${loaded.status}): ${redactUrlForMessage(url)}`);
-  return loaded.data;
+  let data = loaded.data;
+  if (hasRange) {
+    if (loaded.status === 206) {
+      if (data.byteLength !== range.length) {
+        throw new Error(`${label} 범위 데이터 길이가 올바르지 않습니다.`);
+      }
+    } else {
+      // Server ignored Range; take the requested sub-range from the full body.
+      data = data.subarray(range.offset, Math.min(range.offset + range.length, data.byteLength));
+      if (data.byteLength !== range.length) {
+        throw new Error(`${label} 범위 데이터가 부족합니다.`);
+      }
+    }
+  }
+  return data;
 }
 
 async function requestPageDecodedKey(url, videoTabId, videoFrameId = null) {
@@ -454,7 +470,6 @@ async function loadMediaPlaylist(url, depth = 0, referrer, context = defaultDown
     throw new Error(`받은 응답이 영상 목록 형식이 아닙니다 (${redactUrlForMessage(loaded.url)}). 직접 입력한 주소라면 페이지 주소가 아니라 실제 미디어 주소를 넣어 주세요.`);
   }
   const parsed = parseHlsPlaylist(loaded.text, loaded.url);
-  if (parsed.byterange) throw new Error("이 영상 형식은 지원하지 않습니다.");
   for (const key of parsed.keys) {
     if (!SUPPORTED_KEY_METHODS.has(key.method)) {
       throw new Error(key.method === "SAMPLE-AES" || key.method === "SAMPLE-AES-CTR"
@@ -496,7 +511,13 @@ async function fetchSegment(index, media, referrer, videoTabId = null, context =
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      let chunk = await fetchArrayBuffer(media.segments[index], referrer, `영상 ${index + 1}`, context);
+      let chunk = await fetchArrayBuffer(
+        media.segments[index],
+        referrer,
+        `영상 ${index + 1}`,
+        context,
+        media.byteranges?.[index] || null,
+      );
       if (activeKey) {
         const { keyBytes, importedKey } = await keyMaterial(activeKey, referrer, videoTabId, context);
         const iv = ivForSegment(activeKey, media.mediaSequence, index);
@@ -514,7 +535,7 @@ export async function* mediaChunks(media, referrer, videoTabId = null, context =
   let totalBytes = 0;
 
   if (media.initUrl) {
-    let chunk = await fetchArrayBuffer(media.initUrl, referrer, "영상 시작 데이터", context);
+    let chunk = await fetchArrayBuffer(media.initUrl, referrer, "영상 시작 데이터", context, media.initByterange || null);
     const firstKey = activeKeyForSegment(media.keys, 0);
     if (firstKey) {
       const { keyBytes, importedKey } = await keyMaterial(firstKey, referrer, videoTabId, context);

@@ -46,6 +46,14 @@ function parseHexIv(value) {
   return bytes;
 }
 
+function parseByterangeValue(value) {
+  const match = /^\s*(\d+)(?:@(\d+))?\s*$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const length = Number(match[1]);
+  const offset = match[2] === undefined ? null : Number(match[2]);
+  return { length, offset };
+}
+
 export function parseHlsPlaylist(text, baseUrl) {
   const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const variants = [];
@@ -55,10 +63,15 @@ export function parseHlsPlaylist(text, baseUrl) {
   let initUrl = null;
   let encrypted = false;
   let byterange = false;
+  const byteranges = [];
+  let pendingByterange = null;
+  let lastByteOffset = null;
+  let initByterange = null;
   let mediaSequence = 0;
   let currentKeyIndex = null;
 
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
     if (line.startsWith("#EXT-X-STREAM-INF:")) {
       pendingVariant = splitAttributeList(line.slice("#EXT-X-STREAM-INF:".length));
       continue;
@@ -98,21 +111,51 @@ export function parseHlsPlaylist(text, baseUrl) {
       continue;
     }
     if (line.startsWith("#EXT-X-MAP:")) {
-      const uri = splitAttributeList(line.slice("#EXT-X-MAP:".length)).URI;
-      initUrl = absoluteUrl(uri, baseUrl);
+      const attributes = splitAttributeList(line.slice("#EXT-X-MAP:".length));
+      initUrl = absoluteUrl(attributes.URI, baseUrl);
+      const parsedRange = parseByterangeValue(attributes.BYTERANGE);
+      initByterange = parsedRange ? { length: parsedRange.length, offset: parsedRange.offset ?? 0 } : null;
       continue;
     }
     if (line.startsWith("#EXT-X-BYTERANGE:")) {
-      byterange = true;
+      const parsedRange = parseByterangeValue(line.slice("#EXT-X-BYTERANGE:".length));
+      if (parsedRange) {
+        byterange = true;
+        const offset = parsedRange.offset === null
+          ? (lastByteOffset === null ? 0 : lastByteOffset)
+          : parsedRange.offset;
+        const range = { length: parsedRange.length, offset };
+        lastByteOffset = offset + parsedRange.length;
+        const next = lines[lineIndex + 1];
+        if (next && !next.startsWith("#")) {
+          // A URI line follows: this range belongs to that segment.
+          pendingByterange = range;
+        } else if (segments.length) {
+          // URI line omitted: the range reuses the previous segment URI.
+          segments.push(segments[segments.length - 1]);
+          byteranges.push(range);
+        } else {
+          pendingByterange = range;
+        }
+      }
       continue;
     }
     if (!line.startsWith("#")) {
       const uri = absoluteUrl(line, baseUrl);
-      if (uri) segments.push(uri);
+      if (uri) {
+        segments.push(uri);
+        byteranges.push(pendingByterange ? { ...pendingByterange } : null);
+        pendingByterange = null;
+      }
     }
   }
 
-  return { variants, segments, initUrl, encrypted, byterange, mediaSequence, keys };
+  // A trailing BYTERANGE with no URI line applies to the previous segment.
+  if (pendingByterange && segments.length) {
+    byteranges[byteranges.length - 1] = { ...pendingByterange };
+  }
+
+  return { variants, segments, byteranges, initUrl, initByterange, encrypted, byterange, mediaSequence, keys };
 }
 
 export function isHlsPlaylist(text, contentType = "") {

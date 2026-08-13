@@ -50,6 +50,38 @@ seg-2.ts`, "https://media.example/video/stream.m3u8");
   assert.equal(activeKeyForSegment(parsed.keys, 99).method, "AES-128");
 });
 
+test("parses EXT-X-BYTERANGE segments including URI reuse", () => {
+  const parsed = parseHlsPlaylist(`#EXTM3U
+#EXTINF:4,
+#EXT-X-BYTERANGE:1000@0
+seg.bin
+#EXTINF:4,
+#EXT-X-BYTERANGE:500
+#EXTINF:4,
+#EXT-X-BYTERANGE:700@2500
+seg.bin`, "https://media.example/video/stream.m3u8");
+  assert.equal(parsed.byterange, true);
+  assert.deepEqual(parsed.segments, [
+    "https://media.example/video/seg.bin",
+    "https://media.example/video/seg.bin",
+    "https://media.example/video/seg.bin",
+  ]);
+  assert.deepEqual(parsed.byteranges, [
+    { length: 1000, offset: 0 },
+    { length: 500, offset: 1000 },
+    { length: 700, offset: 2500 },
+  ]);
+});
+
+test("parses EXT-X-MAP BYTERANGE for fMP4 init sections", () => {
+  const parsed = parseHlsPlaylist(
+    '#EXTM3U\n#EXT-X-MAP:URI="init.mp4",BYTERANGE="720@0"\n#EXTINF:4,\nseg.m4s',
+    "https://media.example/video/stream.m3u8",
+  );
+  assert.deepEqual(parsed.initByterange, { length: 720, offset: 0 });
+  assert.equal(parsed.initUrl, "https://media.example/video/init.mp4");
+});
+
 test("derives per-segment IVs from the media sequence when no IV is given", () => {
   const key = { iv: null };
   assert.deepEqual(ivForSegment(key, 100, 0), new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100]));

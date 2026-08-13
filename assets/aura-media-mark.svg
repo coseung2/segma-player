@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Aura Media</title>
+  <defs>
+    <linearGradient id="surface" x1="64" y1="48" x2="448" y2="464" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#243956" />
+      <stop offset="1" stop-color="#101722" />
+    </linearGradient>
+    <linearGradient id="aura" x1="134" y1="106" x2="390" y2="392" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8FC0FF" />
+      <stop offset="1" stop-color="#4F86E8" />
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#surface)" />
+  <circle cx="256" cy="238" r="142" fill="none" stroke="url(#aura)" stroke-width="38" />
+  <path d="M256 130v174m-72-62 72 72 72-72M174 374h164" fill="none" stroke="#F4F8FF" stroke-width="46" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

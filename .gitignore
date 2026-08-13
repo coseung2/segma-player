@@ -4,6 +4,7 @@ node_modules/
 *.pem
 native-host/target/
 artifacts/
+dist/
 
 # wrangler files
 .wrangler

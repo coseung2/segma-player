@@ -1,6 +1,6 @@
 [package]
-name = "aura-youtube-host"
-version = "0.1.0"
+name = "aura-media-companion"
+version = "0.2.48"
 edition = "2021"
 
 [dependencies]

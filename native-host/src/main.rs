@@ -392,7 +392,7 @@ fn run_download(request: Request) {
         send(
             &request.job_id,
             "failed",
-            "YouTube 도구가 설치되지 않았습니다. install-youtube-host.ps1을 실행해 주세요.",
+            "미디어 도구가 설치되지 않았습니다. Aura Media Companion을 다시 설치해 주세요.",
             None,
             Some("tools-not-installed".into()),
         );

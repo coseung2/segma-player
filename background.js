@@ -164,7 +164,7 @@ function canonicalYouTubeUrl(value) {
 
 const YOUTUBE_QUALITIES = new Set(["best", "2160", "1440", "1080", "720", "480"]);
 
-async function startYouTubeDownload(rawUrl, rawQuality = "best", dirHandle = null) {
+async function startYouTubeDownload(rawUrl, rawQuality = "best", dirHandle = null, runInPopup = false) {
   const url = canonicalYouTubeUrl(rawUrl);
   if (!url) throw new Error("invalid-youtube-url");
   const quality = String(rawQuality || "best");
@@ -214,6 +214,13 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best", dirHandle = nul
         }
         const fileUrl = await youtubeJobFileUrl(submitted.jobId, serverUrl);
         const title = typeof waited.title === "string" && waited.title.trim() ? waited.title.trim() : "YouTube 영상";
+        if (runInPopup) {
+          await patchDownloadJob(jobId, {
+            status: "running",
+            statusText: "서버 처리 완료 — 기기로 수신하는 중…",
+          });
+          return { mode: "popup", jobId, fileUrl, title };
+        }
         const safeTitle = (title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\.+$/, "").trim()
           || "YouTube 영상").slice(0, 150);
         const saveHandle = dirHandle || await getStoredSaveDirectory();
@@ -353,6 +360,7 @@ function recordedHeadersForUrl(url) {
 function mediaFetchSenderTabId(sender) {
   if (sender?.id !== chrome.runtime.id) return null;
   if (sender.url === chrome.runtime.getURL("download-worker.html")) return OFFSCREEN_DOCUMENT_TAB_ID;
+  if (sender.url === chrome.runtime.getURL("popup.html")) return OFFSCREEN_DOCUMENT_TAB_ID;
   return null;
 }
 
@@ -570,7 +578,7 @@ chrome.storage.local?.onChanged?.addListener?.((changes, areaName) => {
   reapplyPauseState();
 });
 
-async function queueMediaDownload(candidate, dirHandle = null) {
+async function queueMediaDownload(candidate, dirHandle = null, runInPopup = false) {
   await downloadJobsReady;
   const plan = await resolvePlan();
   const jobId = crypto.randomUUID();
@@ -586,29 +594,36 @@ async function queueMediaDownload(candidate, dirHandle = null) {
     jobSourceTabs.set(jobId, candidate.tabId);
   }
   await persistDownloadJobs();
+  if (runInPopup) return { mode: "popup", jobId, candidate };
   void dispatchMediaDownload(jobId, candidate, dirHandle);
   return { mode, jobId };
 }
 
-async function beginCandidateDownload(candidate, dirHandle = null) {
+async function beginCandidateDownload(candidate, dirHandle = null, runInPopup = false) {
   if (isLikelyHlsSegmentUrl(candidate?.resourceUrl)) throw new Error("unsupported-media");
   if (candidate.mediaType === "PROGRESSIVE") {
-    return queueMediaDownload(candidate, dirHandle);
+    return queueMediaDownload(candidate, dirHandle, runInPopup);
   }
   if (isHlsCandidate(candidate)) {
-    return queueMediaDownload(candidate, dirHandle);
+    return queueMediaDownload(candidate, dirHandle, runInPopup);
   }
   throw new Error("unsupported-media");
 }
 
-async function retryDownloadJob(jobId, dirHandle = null) {
+async function retryDownloadJob(jobId, dirHandle = null, runInPopup = false) {
   await downloadJobsReady;
   const job = downloadJobs.get(jobId);
   if (!job) throw new Error("download-job-not-found");
   const payload = retryPayloadForJob(job);
   if (!payload) throw new Error("download-job-not-retryable");
-  if (payload.kind === "media" && payload.candidate) return beginCandidateDownload(payload.candidate, dirHandle);
-  if (payload.kind === "youtube") return startYouTubeDownload(payload.url, payload.quality, dirHandle);
+  if (payload.kind === "media" && payload.candidate) {
+    const result = await beginCandidateDownload(payload.candidate, dirHandle, runInPopup);
+    return runInPopup ? { ...result, kind: "media" } : result;
+  }
+  if (payload.kind === "youtube") {
+    const result = await startYouTubeDownload(payload.url, payload.quality, dirHandle, runInPopup);
+    return runInPopup ? { ...result, kind: "youtube" } : result;
+  }
   throw new Error("download-job-not-retryable");
 }
 
@@ -858,7 +873,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "retry-download-job" && !sender.tab) {
-    retryDownloadJob(message.jobId, message.dirHandle || null).then(
+    retryDownloadJob(message.jobId, message.dirHandle || null, message.runInPopup === true).then(
       (result) => sendResponse({ type: "download-result", ok: true, ...result }),
       (error) => sendResponse({
         type: "download-result",
@@ -879,7 +894,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "download-job-update"
     && sender.id === chrome.runtime.id
-    && sender.url === chrome.runtime.getURL("download-worker.html")) {
+    && (sender.url === chrome.runtime.getURL("download-worker.html")
+      || sender.url === chrome.runtime.getURL("popup.html"))) {
     if (["completed", "failed"].includes(message.patch?.status)) jobSourceTabs.delete(message.jobId);
     patchDownloadJob(message.jobId, message.patch).then(
       (job) => sendResponse({ ok: Boolean(job) }),
@@ -889,7 +905,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "youtube-download" && !sender.tab) {
-    startYouTubeDownload(message.url, message.quality, message.dirHandle || null).then(
+    startYouTubeDownload(message.url, message.quality, message.dirHandle || null, message.runInPopup === true).then(
       (result) => sendResponse({ type: "download-result", ok: true, ...result }),
       (error) => sendResponse({ type: "download-result", ok: false, error: error?.message || "media-companion-unavailable" }),
     );
@@ -930,7 +946,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
 
-    Promise.resolve(beginCandidateDownload(candidate, message.dirHandle || null)).then(
+    Promise.resolve(beginCandidateDownload(candidate, message.dirHandle || null, message.runInPopup === true)).then(
       (result) => sendResponse({ type: "download-result", candidateId: candidate.id, ok: true, ...result }),
       (error) => sendResponse({
         type: "download-result",
@@ -1119,7 +1135,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ type: "download-result", candidateId: null, ok: false, error: "invalid-url" });
         return;
       }
-      Promise.resolve(beginCandidateDownload(candidate, message.dirHandle || null)).then(
+      Promise.resolve(beginCandidateDownload(candidate, message.dirHandle || null, message.runInPopup === true)).then(
         (result) => sendResponse({ type: "download-result", candidateId: candidate.id, ok: true, ...result }),
         () => sendResponse({ type: "download-result", candidateId: candidate.id, ok: false, error: "unsupported-media" }),
       );

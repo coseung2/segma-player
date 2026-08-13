@@ -1038,7 +1038,7 @@ export async function downloadPreparedCandidate(prepared) {
   if (prepared.type !== "hls" || !prepared.media) throw new Error("준비된 다운로드 형식을 지원하지 않습니다.");
   const saved = await saveHlsToNative(prepared.media, filename, candidate.pageUrl, candidate.tabId, context, dirHandle);
   return {
-    statusText: "다운로드를 완료했습니다. Downloads\\Aura Media에서 확인하세요.",
+    statusText: "다운로드를 완료했습니다. 저장 폴더에서 확인하세요.",
   };
 }
 

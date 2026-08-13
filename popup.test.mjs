@@ -114,3 +114,16 @@ test("free plan UI gates paid work while keeping Pro benefits visible", async ()
   assert.match(script, /option\.disabled = !youtubeQualityAllowed/);
   assert.match(script, /\^https:\\\/\\\//);
 });
+
+test("popup-initiated downloads execute in the popup with the verified folder", async () => {
+  const [script, background] = await Promise.all([
+    readFile(new URL("./popup.js", import.meta.url), "utf8"),
+    readFile(new URL("./background.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(script, /runCandidateInPopup/);
+  assert.match(script, /runYouTubeReceptionInPopup/);
+  assert.match(script, /verifySaveFolderWritable/);
+  assert.match(script, /runInPopup:\s*true/);
+  assert.match(background, /runInPopup/);
+  assert.match(background, /mode:\s*"popup"/);
+});

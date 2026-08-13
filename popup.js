@@ -5,6 +5,9 @@ import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
 import { PRO_BENEFITS, productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
 import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
+import { downloadPreparedCandidate, prepareDownloadCandidate, setRuntimePlan } from "./hls-download.js";
+import { resolvePlan } from "./license.js";
+import { parallelDownload } from "./parallel-download.js";
 
 const byId = (id) => document.getElementById(id);
 const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -15,6 +18,7 @@ const summaryElement = byId("summary");
 const mainOnlyElement = byId("main-only");
 const saveStatusElements = [byId("detect-save-status"), byId("link-save-status")].filter(Boolean);
 const jobContainers = [byId("detect-jobs"), byId("link-jobs")].filter(Boolean);
+const activePopupJobs = new Set();
 let lastCandidates = [];
 let currentPlan = productPlan(PRODUCT_EDITION);
 let qualityCheckTimer = null;
@@ -123,6 +127,79 @@ async function ensureSaveFolder() {
   void refreshSaveStatus();
   return null;
 }
+
+async function reportJob(jobId, patch) {
+  await chrome.runtime.sendMessage({ type: "download-job-update", jobId, patch }).catch(() => {});
+}
+
+async function runCandidateInPopup(jobId, candidate, dirHandle) {
+  activePopupJobs.add(jobId);
+  try {
+    const plan = await resolvePlan();
+    setRuntimePlan(plan);
+    await reportJob(jobId, { status: "running", statusText: "다운로드를 준비하는 중…" });
+    const prepared = await prepareDownloadCandidate(candidate, {
+      onStatus: (statusText) => void reportJob(jobId, { status: "running", statusText }),
+    });
+    await reportJob(jobId, { status: "running", statusText: "다운로드를 시작하는 중…" });
+    const result = await downloadPreparedCandidate({ ...prepared, dirHandle });
+    await reportJob(jobId, { status: "completed", statusText: result.statusText });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "다운로드에 실패했습니다.";
+    await reportJob(jobId, { status: "failed", statusText: message, error: message });
+    throw error;
+  } finally {
+    activePopupJobs.delete(jobId);
+  }
+}
+
+function safeYouTubeTitle(title) {
+  return (String(title || "").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\.+$/, "").trim()
+    || "YouTube 영상").slice(0, 150);
+}
+
+async function runYouTubeReceptionInPopup(jobId, fileUrl, title, dirHandle) {
+  activePopupJobs.add(jobId);
+  try {
+    const filename = `${safeYouTubeTitle(title)}.mp4`;
+    const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+    const writable = await fileHandle.createWritable({ keepExistingData: true });
+    const sink = {
+      write: (data) => writable.write(data),
+      close: () => writable.close(),
+      abort: () => writable.abort(),
+    };
+    const result = await parallelDownload({
+      url: fileUrl,
+      filename,
+      createSink: async () => sink,
+      onProgress: (written, total) => {
+        const percent = Math.max(0, Math.min(100, Math.round((written / total) * 100)));
+        void reportJob(jobId, { status: "running", statusText: `수신 중… ${percent}%` });
+      },
+    });
+    await reportJob(jobId, {
+      status: "completed",
+      statusText: `저장 완료 (${Math.round(result.bytes / 1048576)} MB).`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "병렬 수신 실패";
+    await reportJob(jobId, { status: "failed", statusText: "병렬 수신 실패", error: message });
+    throw error;
+  } finally {
+    activePopupJobs.delete(jobId);
+  }
+}
+
+window.addEventListener("beforeunload", () => {
+  for (const jobId of activePopupJobs) {
+    void chrome.runtime.sendMessage({
+      type: "download-job-update",
+      jobId,
+      patch: { status: "failed", statusText: "팝오버가 닫혀 다운로드가 중단되었습니다.", error: "popup-closed" },
+    }).catch(() => {});
+  }
+});
 
 async function refreshPlan() {
   try {
@@ -252,8 +329,12 @@ function renderCandidates(candidates) {
           type: "download-candidate",
           candidateId: candidate.id,
           dirHandle: folder,
+          runInPopup: true,
         });
         if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
+        if (response.mode === "popup") {
+          await runCandidateInPopup(response.jobId, response.candidate, folder);
+        }
         void requestJobs();
       } catch (error) {
         statusElement.textContent = error?.message || "다운로드를 시작하지 못했습니다.";
@@ -328,8 +409,16 @@ function buildJobCard(job) {
           type: "retry-download-job",
           jobId: job.id,
           dirHandle: folder,
+          runInPopup: true,
         });
         if (!response?.ok) throw new Error(response?.error || "download-job-retry-failed");
+        if (response.mode === "popup") {
+          if (response.kind === "youtube") {
+            await runYouTubeReceptionInPopup(response.jobId, response.fileUrl, response.title || "", folder);
+          } else if (response.candidate) {
+            await runCandidateInPopup(response.jobId, response.candidate, folder);
+          }
+        }
         await requestJobs();
       } catch {
         feedback.textContent = "재시도 요청에 실패했습니다.";
@@ -409,6 +498,7 @@ async function directDownload() {
         url: value,
         quality: byId("youtube-quality").value,
         dirHandle: folder,
+        runInPopup: true,
       });
       if (!response?.ok) {
         if (response?.error === "pro-feature-required") throw new Error("이 화질은 Pro에서 사용할 수 있습니다.");
@@ -419,9 +509,20 @@ async function directDownload() {
         }
         throw new Error("유튜브 저장에 실패했습니다. 서버 연결과 옵션의 서버 주소를 확인해 주세요.");
       }
+      if (response.mode === "popup") {
+        await runYouTubeReceptionInPopup(response.jobId, response.fileUrl, response.title || "", folder);
+      }
     } else {
-      const response = await chrome.runtime.sendMessage({ type: "download-url", url: value, dirHandle: folder });
+      const response = await chrome.runtime.sendMessage({
+        type: "download-url",
+        url: value,
+        dirHandle: folder,
+        runInPopup: true,
+      });
       if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
+      if (response.mode === "popup") {
+        await runCandidateInPopup(response.jobId, response.candidate, folder);
+      }
     }
     void requestJobs();
   } catch (error) {

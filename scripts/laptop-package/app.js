@@ -22,6 +22,7 @@ const FREE_MONTHLY_LIMIT = Number(process.env.AURA_YT_FREE_LIMIT || 10);
 const DAILY_CAP = Number(process.env.AURA_YT_DAILY_CAP || 500);
 const MAX_QUEUE = Number(process.env.AURA_YT_MAX_QUEUE || 40);
 const MIN_FREE_BYTES = Number(process.env.AURA_YT_MIN_FREE_GB || 2) * 1024 * 1024 * 1024;
+const LOG_FILE = process.env.AURA_YT_LOG || path.join(PROFILE, "AppData", "Local", "Aura YouTube", "server.log");
 const JOB_TTL_MS = 60 * 60 * 1000;
 const ALLOWED_QUALITIES = new Set(["best", "2160", "1440", "1080", "720", "480"]);
 
@@ -45,6 +46,14 @@ let dailyUsed = 0;
 
 function now() {
   return new Date().toISOString();
+}
+
+function logLine(message) {
+  try {
+    fs.appendFileSync(LOG_FILE, `${now()} ${message}\n`, "utf8");
+  } catch {
+    // Logging is best effort.
+  }
 }
 
 function monthKey() {
@@ -263,6 +272,11 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+function logRequest(req, status, extra = "") {
+  const device = extra || "";
+  logLine(`${req.method} ${req.url} -> ${status} ${device}`);
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -284,31 +298,37 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && route === "/healthz") {
       json(res, 200, { ok: true, service: "aura-youtube", active, queued: queue.length });
+      logRequest(req, 200, `active=${active} queued=${queue.length}`);
       return;
     }
     if (req.method === "GET" && /^\/api\/jobs\/[^/]+\/file$/.test(route)) {
       const payload = await authenticateRequest(req, url);
       if (!payload) {
         json(res, 401, { error: "unauthorized" });
+        logRequest(req, 401);
         return;
       }
       const job = jobs.get(route.split("/")[3]);
       if (!job || job.deviceId !== payload.deviceId || job.status !== "ready" || !job.file) {
         json(res, 404, { error: "job-not-ready" });
+        logRequest(req, 404, `job=${route.split("/")[3]}`);
         return;
       }
       streamFile(job, res);
+      logRequest(req, 200, `job=${job.id} size=${fs.statSync(job.file).size}`);
       return;
     }
     if (req.method === "GET" && /^\/api\/jobs\/[^/]+$/.test(route)) {
       const payload = await authenticateRequest(req, url);
       if (!payload) {
         json(res, 401, { error: "unauthorized" });
+        logRequest(req, 401);
         return;
       }
       const job = jobs.get(route.split("/")[3]);
       if (!job || job.deviceId !== payload.deviceId) {
         json(res, 404, { error: "job-not-found" });
+        logRequest(req, 404, `job=${route.split("/")[3]}`);
         return;
       }
       json(res, 200, {
@@ -319,12 +339,14 @@ const server = http.createServer(async (req, res) => {
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
       });
+      logRequest(req, 200, `job=${job.id} status=${job.status}`);
       return;
     }
     if (req.method === "POST" && route === "/api/youtube") {
       const payload = await authenticate(req);
       if (!payload) {
         json(res, 401, { error: "unauthorized" });
+        logRequest(req, 401);
         return;
       }
       const body = JSON.parse((await readBody(req)) || "{}");
@@ -334,32 +356,39 @@ const server = http.createServer(async (req, res) => {
       const canonical = canonicalYouTubeUrl(mediaUrl);
       if (!canonical) {
         json(res, 400, { error: "invalid-youtube-url" });
+        logRequest(req, 400, `device=${deviceId}`);
         return;
       }
       if (!ALLOWED_QUALITIES.has(String(quality))) {
         json(res, 400, { error: "invalid-quality" });
+        logRequest(req, 400, `device=${deviceId} quality=${quality}`);
         return;
       }
       const status = isPro ? { ok: true, pro: true, used: 0, limit: null } : quotaStatus(deviceId, "");
       if (!status.ok) {
         json(res, 429, { error: "monthly-limit-reached", used: status.used, limit: status.limit });
+        logRequest(req, 429, `device=${deviceId}`);
         return;
       }
       if (dailyStatus() >= DAILY_CAP) {
         json(res, 429, { error: "daily-limit-reached", used: dailyUsed, limit: DAILY_CAP });
+        logRequest(req, 429, `device=${deviceId}`);
         return;
       }
       if (queue.length >= MAX_QUEUE) {
         json(res, 429, { error: "server-busy" });
+        logRequest(req, 429, `device=${deviceId}`);
         return;
       }
       if (diskFreeBytes() < MIN_FREE_BYTES) {
         json(res, 507, { error: "insufficient-storage" });
+        logRequest(req, 507, `device=${deviceId}`);
         return;
       }
       reserveQuota(deviceId);
       dailyUsed += 1;
       const id = crypto.randomUUID();
+      logLine(`JOB ${id} device=${deviceId} plan=${payload.plan} url=${canonical} quality=${quality}`);
       const job = {
         id,
         status: "queued",
@@ -385,11 +414,14 @@ const server = http.createServer(async (req, res) => {
         quotaLimit: statusForResponse.limit,
         pro: statusForResponse.pro,
       });
+      logRequest(req, 202, `job=${id} device=${deviceId} plan=${payload.plan}`);
       return;
     }
     json(res, 404, { error: "not-found" });
+    logRequest(req, 404);
   } catch (err) {
     json(res, 400, { error: err && err.message ? err.message : "bad-request" });
+    logRequest(req, 400, `error=${err && err.message ? err.message : "bad-request"}`);
   }
 });
 

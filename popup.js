@@ -315,8 +315,12 @@ async function directDownload() {
       if (!response?.ok) {
         if (response?.error === "pro-feature-required") throw new Error("이 화질은 Pro에서 사용할 수 있습니다.");
         if (response?.error === "invalid-youtube-url") throw new Error("올바른 YouTube 주소가 아닙니다.");
+        const detail = typeof response?.error === "string" && response.error ? response.error : "";
+        if (detail) {
+          throw new Error(detail);
+        }
         companionHelp.hidden = false;
-        throw new Error("유튜브 저장에는 PC 앱(Aura Media Companion) 설치가 필요합니다.");
+        throw new Error("유튜브 저장에 실패했습니다. 서버 연결과 옵션의 서버 주소를 확인해 주세요.");
       }
     } else {
       const response = await chrome.runtime.sendMessage({ type: "download-url", url: value });

@@ -2,6 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "aura",
   "compatibility_date": "2026-08-12",
+  "main": "worker.js",
   "observability": {
     "enabled": true
   },
@@ -10,5 +11,17 @@
   },
   "compatibility_flags": [
     "nodejs_compat"
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "LICENSES",
+      "id": "6cf06b4390d149788de9ee8d64b50efb"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "COMPANION_BUCKET",
+      "bucket_name": "aura-media-companion"
+    }
   ]
 }

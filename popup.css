@@ -1,11 +1,11 @@
 :root { color-scheme: dark; font-family: "Segoe UI", "Malgun Gothic", sans-serif; background: #0f141d; color: #f4f7fb; }
 * { box-sizing: border-box; }
-html { width: 380px; max-width: 380px; height: 600px; min-height: 600px; margin: 0; overflow: hidden; }
-body { width: 100%; height: 600px; min-height: 600px; margin: 0; overflow: hidden; background: #0f141d; }
+html { width: 380px; max-width: 380px; height: auto; min-height: 0; margin: 0; overflow-y: auto; scrollbar-width: none; }
+html::-webkit-scrollbar { display: none; width: 0; height: 0; }
+body { width: 100%; min-height: 0; margin: 0; overflow: visible; background: #0f141d; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
-.popup-shell { width: 100%; height: 100%; min-width: 0; padding: 16px 16px 56px; overflow-x: hidden; overflow-y: auto; scrollbar-width: none; }
-.popup-shell::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.popup-shell { width: 100%; min-width: 0; padding: 16px; overflow: visible; }
 .popup-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .eyebrow { margin: 0 0 3px; color: #73a5ff; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
 h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
@@ -88,8 +88,3 @@ option:disabled { color: #68768a; }
 .companion-help { display: inline-block; margin-top: 10px; color: #80b1f5; font-size: 10px; }
 .companion-help[hidden] { display: none; }
 .privacy-note { margin-top: 10px; }
-.scroll-more { position: fixed; z-index: 20; left: 50%; bottom: 8px; display: grid; width: 44px; height: 38px; padding: 0; transform: translateX(-50%); place-items: center; border: 1px solid #3b4b61; border-radius: 999px; background: #182230e8; color: #b8c8dd; box-shadow: 0 6px 18px #05070b99; backdrop-filter: blur(6px); }
-.scroll-more[hidden] { display: none; }
-.scroll-more:hover, .scroll-more:focus-visible { border-color: #73a5ff; color: #fff; }
-.scroll-more:focus-visible { outline: 2px solid #73a5ff; outline-offset: 2px; }
-.scroll-more svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

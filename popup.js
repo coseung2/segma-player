@@ -12,10 +12,7 @@ const candidatesElement = byId("candidates");
 const summaryElement = byId("summary");
 const mainOnlyElement = byId("main-only");
 const jobContainers = [byId("detect-jobs"), byId("link-jobs")].filter(Boolean);
-const popupShell = document.querySelector(".popup-shell");
-const scrollMoreButton = byId("scroll-more");
 let lastCandidates = [];
-let scrollUpdateQueued = false;
 let currentPlan = productPlan(PRODUCT_EDITION);
 
 function renderPlan() {
@@ -67,18 +64,6 @@ chrome.runtime.onMessage.addListener((message) => {
 
 void refreshPlan();
 
-function updateScrollMore() {
-  scrollUpdateQueued = false;
-  const remaining = popupShell.scrollHeight - popupShell.clientHeight - popupShell.scrollTop;
-  scrollMoreButton.hidden = remaining <= 12;
-}
-
-function queueScrollUpdate() {
-  if (scrollUpdateQueued) return;
-  scrollUpdateQueued = true;
-  requestAnimationFrame(updateScrollMore);
-}
-
 function text(tag, className, value) {
   const node = document.createElement(tag);
   node.className = className;
@@ -126,8 +111,7 @@ function showTab(name, focus = false) {
     if (active && focus) tab.focus();
   }
   for (const panel of panels) panel.hidden = panel.id !== `panel-${name}`;
-  popupShell.scrollTop = 0;
-  queueScrollUpdate();
+  window.scrollTo(0, 0);
 }
 
 for (const tab of tabs) {
@@ -272,7 +256,6 @@ function renderJobs(jobs) {
     container.replaceChildren();
     for (const job of jobs) container.append(buildJobCard(job));
   }
-  queueScrollUpdate();
 }
 
 async function requestJobs() {
@@ -365,17 +348,7 @@ byId("companion-help").addEventListener("click", (event) => {
 });
 mainOnlyElement.addEventListener("change", () => renderCandidates(lastCandidates));
 chrome.runtime.onMessage.addListener((message) => { if (message?.type === "download-jobs-changed") void requestJobs(); });
-popupShell.addEventListener("scroll", queueScrollUpdate, { passive: true });
-scrollMoreButton.addEventListener("click", () => {
-  popupShell.scrollBy({
-    top: Math.max(180, Math.round(popupShell.clientHeight * 0.65)),
-    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-  });
-});
-new MutationObserver(queueScrollUpdate).observe(popupShell, { childList: true, subtree: true });
-
 renderPlan();
 updateLinkPanel();
 void requestJobs();
 void requestCandidates();
-queueScrollUpdate();

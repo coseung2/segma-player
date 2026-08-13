@@ -75,18 +75,17 @@ test("candidate downloads queue without subtitle translation work", async () => 
   assert.doesNotMatch(script, /translatedTitle|translateTitleToKorean/);
 });
 
-test("popover hides its single scrollbar and exposes a more-content control", async () => {
+test("popover sizes to its content without a fixed wrapper or scroll control", async () => {
   const css = await readFile(new URL("./popup.css", import.meta.url), "utf8");
   const html = await readFile(new URL("./popup.html", import.meta.url), "utf8");
-  assert.match(css, /\.popup-shell\s*\{[^}]*overflow-y:\s*auto/s);
-  assert.match(css, /html\s*\{[^}]*height:\s*600px[^}]*min-height:\s*600px/s);
-  assert.doesNotMatch(css, /max-height:\s*100vh/);
-  assert.match(css, /\.popup-shell\s*\{[^}]*height:\s*100%/s);
+  assert.doesNotMatch(css, /height:\s*600px|min-height:\s*600px/);
+  assert.doesNotMatch(css, /\.popup-shell\s*\{[^}]*height:\s*100%/s);
+  assert.match(css, /html\s*\{[^}]*height:\s*auto[^}]*min-height:\s*0/s);
+  assert.match(css, /\.popup-shell\s*\{[^}]*overflow:\s*visible/s);
   assert.match(css, /\.tab-panel\s*\{[^}]*max-width:\s*100%[^}]*overflow-x:\s*hidden/s);
   assert.match(css, /scrollbar-width:\s*none/);
-  assert.match(css, /\.popup-shell::\-webkit-scrollbar\s*\{[^}]*display:\s*none/s);
-  assert.match(html, /id="scroll-more"/);
-  assert.match(html, /m7 6 5 5 5-5/);
+  assert.doesNotMatch(html, /id="scroll-more"/);
+  assert.doesNotMatch(html, /scroll-more/);
 });
 
 test("link tab exposes YouTube quality caps and sends the selection", async () => {

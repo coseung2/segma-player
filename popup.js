@@ -4,7 +4,6 @@ import { downloadJobView, retryableDownloadJob } from "./download-job-view.js";
 import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
 import { PRO_BENEFITS, productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
-import { ensureSaveDirectory } from "./save-directory.js";
 
 const byId = (id) => document.getElementById(id);
 const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -345,11 +344,6 @@ async function directDownload() {
   try {
     const value = input.value.trim();
     if (isYouTubeUrl(value)) {
-      try {
-        await ensureSaveDirectory({ pick: true });
-      } catch {
-        output.textContent = "폴더 선택이 차단됐어요. Downloads 대신 새로 만든 빈 폴더를 선택하면 병렬 저장이 됩니다. (지금은 브라우저 다운로드로 진행)";
-      }
       const response = await chrome.runtime.sendMessage({
         type: "youtube-download",
         url: value,

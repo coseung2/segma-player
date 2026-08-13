@@ -218,25 +218,31 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
         const title = typeof waited.title === "string" && waited.title.trim() ? waited.title.trim() : "YouTube 영상";
         const safeTitle = (title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\.+$/, "").trim()
           || "YouTube 영상").slice(0, 150);
-        const dirHandle = await getStoredSaveDirectory();
-        if (dirHandle) {
-          await ensureDownloadWorker().catch(() => {});
-          const dispatched = await chrome.runtime.sendMessage({
-            type: "parallel-save",
-            jobId,
-            url: fileUrl,
-            filename: `${safeTitle}.mp4`,
-            dirHandle,
-          }).catch(() => null);
-          if (dispatched?.ok) {
-            return { mode: "youtube-parallel", jobId };
+        const parallelEnabled = await chrome.storage.local
+          .get({ auraParallelSave: false })
+          .then((stored) => stored?.auraParallelSave === true)
+          .catch(() => false);
+        if (parallelEnabled) {
+          const dirHandle = await getStoredSaveDirectory();
+          if (dirHandle) {
+            await ensureDownloadWorker().catch(() => {});
+            const dispatched = await chrome.runtime.sendMessage({
+              type: "parallel-save",
+              jobId,
+              url: fileUrl,
+              filename: `${safeTitle}.mp4`,
+              dirHandle,
+            }).catch(() => null);
+            if (dispatched?.ok) {
+              return { mode: "youtube-parallel", jobId };
+            }
           }
         }
         let downloadId;
         try {
           downloadId = await chrome.downloads.download({
             url: fileUrl,
-            filename: `${safeTitle}.mp4`,
+            filename: `Aura Media/${safeTitle}.mp4`,
             conflictAction: "uniquify",
             saveAs: false,
           });

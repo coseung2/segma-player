@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isDownloadableMediaType, MEDIA_TYPES, makeCandidate, mediaTypeForResource, sanitizePageMessage } from "./candidate.js";
+import {
+  canonicalHttpUrl,
+  isDownloadableMediaType,
+  MEDIA_TYPES,
+  makeCandidate,
+  mediaTypeForResource,
+  sanitizePageMessage,
+} from "./candidate.js";
 import { downloadableMediaUrl, filenameForDownload } from "./download.js";
 
 test("classifies real media path extensions", () => {
@@ -13,6 +20,18 @@ test("classifies real media path extensions", () => {
     mediaTypeForResource("https://media.example/master.m3u8?token=secret"),
     MEDIA_TYPES.HLS_MEDIA,
   );
+});
+
+test("canonical media URLs reject IPv6 forms that embed private IPv4", () => {
+  for (const value of [
+    "https://[64:ff9b::a00:1]/video.mp4",
+    "https://[64:ff9b::7f00:1]/video.mp4",
+    "https://[2002:a00:1::]/video.mp4",
+    "https://[::a00:1]/video.mp4",
+    "https://[fec0::1]/video.mp4",
+  ]) assert.equal(canonicalHttpUrl(value), null, value);
+  assert.equal(canonicalHttpUrl("https://[64:ff9b::808:808]/video.mp4")?.hostname,
+    "[64:ff9b::808:808]");
 });
 
 test("classifies tokenized playlists by response content type", () => {

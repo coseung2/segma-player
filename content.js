@@ -5,6 +5,10 @@
   const MAX_TITLE_CHARACTERS = 512;
   const MAX_SEEN = 1000;
   const SCAN_DEBOUNCE_MS = 120;
+  const DOOD_RETRY_BASE_MS = 5_000;
+  const DOOD_RETRY_MAX_MS = 60_000;
+  const DOOD_RETRY_MAX_ATTEMPTS = 4;
+  const DOOD_FETCH_TIMEOUT_MS = 12_000;
   const seen = new Set();
   let scanTimer = null;
   let scanScheduled = false;
@@ -13,6 +17,9 @@
   let doodDirectCache = null;
   let doodDirty = true;
   let doodRetryAfter = 0;
+  let doodRetryAttempts = 0;
+  let doodRetryTimer = null;
+  let doodResolutionPromise = null;
   let scriptsDirty = true;
   let cachedEmbeddedUrls = null;
   let performanceCursorEntry = null;
@@ -36,6 +43,31 @@
     } catch {
       return "";
     }
+  }
+
+  function clearDoodRetry() {
+    doodRetryAfter = 0;
+    doodRetryAttempts = 0;
+    if (doodRetryTimer !== null) {
+      clearTimeout(doodRetryTimer);
+      doodRetryTimer = null;
+    }
+  }
+
+  function backoffDoodRetry() {
+    doodRetryAttempts += 1;
+    const retryDelay = Math.min(DOOD_RETRY_BASE_MS * (2 ** (doodRetryAttempts - 1)), DOOD_RETRY_MAX_MS);
+    doodRetryAfter = Date.now() + retryDelay;
+    if (doodRetryTimer !== null) clearTimeout(doodRetryTimer);
+    if (doodRetryAttempts >= DOOD_RETRY_MAX_ATTEMPTS) {
+      doodRetryTimer = null;
+      return;
+    }
+    doodRetryTimer = setTimeout(() => {
+      doodRetryTimer = null;
+      if (doodDirty) scheduleScan();
+    }, retryDelay);
+    doodRetryTimer?.unref?.();
   }
 
   function report(resourceUrl, contentType = "", main = false, fromMediaElement = false) {
@@ -125,47 +157,71 @@
     send({ type: "main-frame", urls: [url] });
   }
 
-  async function resolveDoodDirect(force = false) {
+  async function resolveDoodDirectOnce(force) {
     try {
-      const pathname = new URL(location.href).pathname;
-      if (!/^\/(?:[de])\//.test(pathname)) return null;
-      if (!force && doodRetryAfter > Date.now()) return null;
       if (!force && !doodDirty) return doodDirectCache;
       const text = document.documentElement?.outerHTML || "";
       const match = text.match(/(\/pass_md5\/[^"')\s<>]+)/);
       doodDirty = false;
-      if (!match) return null;
+      if (!match) {
+        lastDoodPassUrl = "";
+        doodDirectCache = null;
+        return null;
+      }
       const passUrl = new URL(match[1], location.href).href;
       if (!force && passUrl === lastDoodPassUrl && doodDirectCache) return doodDirectCache;
-      const response = await fetch(passUrl, { credentials: "include" });
-      if (!response.ok) {
-        doodDirty = true;
-        doodRetryAfter = Date.now() + 5_000;
-        return null;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), DOOD_FETCH_TIMEOUT_MS);
+      timeout?.unref?.();
+      try {
+        const response = await fetch(passUrl, { credentials: "include", signal: controller.signal });
+        if (!response.ok) {
+          doodDirty = true;
+          backoffDoodRetry();
+          return null;
+        }
+        const body = (await response.text()).trim();
+        let direct = body;
+        if (body.startsWith("{") || body.startsWith("[")) {
+          try {
+            const object = JSON.parse(body);
+            direct = object.f || object.url || object.src || object.file || direct;
+          } catch { /* not JSON */ }
+        }
+        direct = String(direct).replace(/^["']|["']$/g, "").trim();
+        if (!/^https?:\/\//i.test(direct) || direct.length > MAX_URL_BYTES) {
+          doodDirty = true;
+          backoffDoodRetry();
+          return null;
+        }
+        lastDoodPassUrl = passUrl;
+        doodDirectCache = { url: direct, frameUrl: currentFrameUrl() };
+        clearDoodRetry();
+        return doodDirectCache;
+      } finally {
+        clearTimeout(timeout);
       }
-      const body = (await response.text()).trim();
-      let direct = body;
-      if (body.startsWith("{") || body.startsWith("[")) {
-        try {
-          const object = JSON.parse(body);
-          direct = object.f || object.url || object.src || object.file || direct;
-        } catch { /* not JSON */ }
-      }
-      direct = String(direct).replace(/^["']|["']$/g, "").trim();
-      if (!/^https?:\/\//i.test(direct) || direct.length > MAX_URL_BYTES) {
-        doodDirty = true;
-        doodRetryAfter = Date.now() + 5_000;
-        return null;
-      }
-      lastDoodPassUrl = passUrl;
-      doodDirectCache = { url: direct, frameUrl: location.href };
-      doodRetryAfter = 0;
-      return doodDirectCache;
     } catch {
       doodDirty = true;
-      doodRetryAfter = Date.now() + 5_000;
+      backoffDoodRetry();
       return null;
     }
+  }
+
+  function resolveDoodDirect(force = false) {
+    try {
+      const pathname = new URL(location.href).pathname;
+      if (!/^\/(?:[de])\//.test(pathname)) return Promise.resolve(null);
+    } catch {
+      return Promise.resolve(null);
+    }
+    if (!force && doodRetryAfter > Date.now()) return Promise.resolve(null);
+    if (doodResolutionPromise) return doodResolutionPromise;
+    const operation = resolveDoodDirectOnce(force).finally(() => {
+      if (doodResolutionPromise === operation) doodResolutionPromise = null;
+    });
+    doodResolutionPromise = operation;
+    return operation;
   }
 
   function requestLevel5Key(url) {
@@ -288,24 +344,28 @@
       const containsScript = tag === "SCRIPT" || (includeDescendants && Boolean(node?.querySelector?.("script")));
       const containsFrame = tag === "IFRAME" || tag === "EMBED"
         || (includeDescendants && Boolean(node?.querySelector?.("iframe, embed")));
+      const containsPassLink = (tag === "A" && String(node?.href || node?.getAttribute?.("href") || "").includes("/pass_md5/"))
+        || (includeDescendants && Boolean(node?.querySelector?.('[href*="/pass_md5/"]')));
       if (containsScript) scriptsDirty = true;
-      if (containsScript || containsFrame) {
-        doodDirty = true;
-        doodRetryAfter = 0;
-      }
+      if (containsScript || containsFrame || containsPassLink) doodDirty = true;
     };
     for (const record of records || []) {
       if (record.type === "attributes") {
-        doodDirty = true;
-        doodRetryAfter = 0;
-        if (record.target?.tagName === "SCRIPT") scriptsDirty = true;
+        const tag = record.target?.tagName;
+        if (tag === "SCRIPT") {
+          scriptsDirty = true;
+          doodDirty = true;
+        } else if (tag === "IFRAME" || tag === "EMBED" || (tag === "A" && record.attributeName === "href")) {
+          doodDirty = true;
+        }
         continue;
       }
       if (record.type === "characterData") {
-        doodDirty = true;
-        doodRetryAfter = 0;
         const parent = record.target?.parentElement || record.target?.parentNode;
-        if (parent?.tagName === "SCRIPT" || parent?.closest?.("script")) scriptsDirty = true;
+        if (parent?.tagName === "SCRIPT" || parent?.closest?.("script")) {
+          scriptsDirty = true;
+          doodDirty = true;
+        }
         continue;
       }
       if (record.type !== "childList") continue;
@@ -354,7 +414,7 @@
     subtree: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ["src", "data-src"],
+    attributeFilter: ["src", "data-src", "href"],
   });
   for (const eventName of ["play", "playing", "loadstart", "loadedmetadata"]) {
     document.addEventListener(eventName, () => scheduleScan(), true);

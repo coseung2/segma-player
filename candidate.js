@@ -53,9 +53,20 @@ function publicIpLiteral(hostname) {
     if (words.length !== 8) return false;
     const first = words[0];
     if (words.every((word) => word === 0) || words.slice(0, 7).every((word) => word === 0) && words[7] === 1
-      || (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00) return false;
+      || (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80
+      || (first & 0xffc0) === 0xfec0 || (first & 0xff00) === 0xff00) return false;
     if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
       return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+    }
+    if (words.slice(0, 6).every((word) => word === 0)) {
+      return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+    }
+    if (words[0] === 0x0064 && words[1] === 0xff9b && words.slice(2, 6).every((word) => word === 0)) {
+      return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+    }
+    if (words[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return false;
+    if (words[0] === 0x2002) {
+      return publicIpLiteral(`${words[1] >> 8}.${words[1] & 255}.${words[2] >> 8}.${words[2] & 255}`);
     }
     return true;
   }

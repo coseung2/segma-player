@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 const runtimeId = "adaptive-test-extension";
 const workerUrl = `chrome-extension://${runtimeId}/download-worker.html`;
 const runtimeListeners = { onMessage: [], onConnect: [] };
+const webRequestListeners = { onBeforeRedirect: [] };
 const sessionStorage = new Map();
 let lastCandidatesSnapshot = null;
 let fetchHandler = null;
@@ -106,7 +107,7 @@ globalThis.chrome = {
   action: { onClicked: { addListener() {} } },
   webRequest: {
     onSendHeaders: { addListener() {} },
-    onBeforeRedirect: { addListener() {} },
+    onBeforeRedirect: { addListener: (listener) => webRequestListeners.onBeforeRedirect.push(listener) },
     onBeforeRequest: { addListener() {} },
     onHeadersReceived: { addListener() {} },
   },
@@ -133,6 +134,15 @@ const waitUntil = async (predicate, timeoutMs = 1000) => {
 };
 const html = (body) => new Response(body, { status: 200, headers: { "content-type": "text/html" } });
 const ok = () => new Response("", { status: 200 });
+const opaqueRedirect = () => ({
+  ok: false,
+  status: 0,
+  type: "opaqueredirect",
+  url: "",
+  redirected: false,
+  headers: { get: () => null },
+  body: { cancel: async () => {} },
+});
 
 async function sendRuntimeMessage(message, sender = {}) {
   let resolveResponse;
@@ -179,6 +189,28 @@ test("pasted player HLS stays typed and repeated requests reuse the shared resol
   assert.equal(second.response.mode, "hls");
   assert.equal(fetchCalls.filter((call) => call.url === pageUrl).length, 1,
     "the module-scope resolver must reuse its positive cache");
+});
+
+test("pasted players resolve Chrome opaque redirects through the background observer", async () => {
+  fetchCalls.length = 0;
+  const pageUrl = "https://player.example/e/redirect-source";
+  const redirectedUrl = "https://mirror.example/e/redirect-target";
+  const mediaUrl = "https://cdn.example/redirected.mp4";
+  fetchHandler = ({ url }) => {
+    if (url === pageUrl) {
+      webRequestListeners.onBeforeRedirect[0]({ url: pageUrl, redirectUrl: redirectedUrl });
+      return opaqueRedirect();
+    }
+    if (url === redirectedUrl) return html(`<script>file: "${mediaUrl}"</script>`);
+    return ok();
+  };
+
+  const result = await sendRuntimeMessage({ type: "download-url", url: pageUrl });
+  assert.equal(result.keepAlive, true);
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.mode, "stream");
+  assert.deepEqual(fetchCalls.slice(0, 2).map(({ url }) => url), [pageUrl, redirectedUrl]);
+  assert.ok(fetchCalls.slice(0, 2).every(({ options }) => options.redirect === "manual"));
 });
 
 test("port disconnect aborts player traversal and suppresses all port output", async () => {

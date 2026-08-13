@@ -12,6 +12,7 @@ export const PLAYER_GRAPH_LIMITS = Object.freeze({
   maxBodyBytes: 5_000_000,
   maxNodes: 12,
   maxFrameClues: 64,
+  maxRedirectHops: 8,
   maxCacheEntries: 64,
   positiveTtlMs: 60_000,
   negativeTtlMs: 15_000,
@@ -207,9 +208,20 @@ function publicIpLiteral(hostname) {
     if (words.length !== 8) return false;
     const first = words[0];
     if (words.every((word) => word === 0) || words.slice(0, 7).every((word) => word === 0) && words[7] === 1
-      || (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00) return false;
+      || (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80
+      || (first & 0xffc0) === 0xfec0 || (first & 0xff00) === 0xff00) return false;
     if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
       return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+    }
+    if (words.slice(0, 6).every((word) => word === 0)) {
+      return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+    }
+    if (words[0] === 0x0064 && words[1] === 0xff9b && words.slice(2, 6).every((word) => word === 0)) {
+      return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+    }
+    if (words[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return false;
+    if (words[0] === 0x2002) {
+      return publicIpLiteral(`${words[1] >> 8}.${words[1] & 255}.${words[2] >> 8}.${words[2] & 255}`);
     }
     return true;
   }
@@ -299,12 +311,105 @@ async function boundedResponseText(response, maxBodyBytes) {
   return new TextEncoder().encode(text).byteLength <= maxBodyBytes ? text : null;
 }
 
+async function cancelResponseBody(response) {
+  try {
+    if (typeof response?.body?.cancel === "function") {
+      await response.body.cancel();
+      return;
+    }
+    const reader = response?.body?.getReader?.();
+    await reader?.cancel?.();
+  } catch {
+    // Response cleanup is best effort after the URL and status are known.
+  }
+}
+
 function abortReason(signal) {
   return signal?.reason || new DOMException("The operation was aborted.", "AbortError");
 }
 
 function throwIfAborted(signal) {
   if (signal?.aborted) throw abortReason(signal);
+}
+
+async function fetchPublicResponse(startUrl, {
+  ensureRoute,
+  fetchImpl,
+  signal,
+  referrer = startUrl,
+  maxRedirectHops,
+  getRedirectTarget,
+}) {
+  let current = canonicalPublicHttpUrl(startUrl);
+  let currentReferrer = canonicalPublicHttpUrl(referrer)?.href || current?.href || "";
+  if (!current) return null;
+  const visited = new Set([current.href]);
+
+  for (let hop = 0; hop <= maxRedirectHops; hop += 1) {
+    throwIfAborted(signal);
+    let response;
+    try {
+      if (typeof ensureRoute === "function") await ensureRoute([current.href]);
+      throwIfAborted(signal);
+      response = await fetchImpl(current.href, {
+        credentials: "include",
+        // Chrome intentionally hides Location on redirect:"manual" responses.
+        // The extension's webRequest observer supplies that Location through
+        // getRedirectTarget; other runtimes may expose the header directly.
+        // Keeping every hop manual ensures private targets are rejected before
+        // the browser makes a request to them.
+        redirect: "manual",
+        ...(currentReferrer ? { referrer: currentReferrer, referrerPolicy: "unsafe-url" } : {}),
+        ...(signal ? { signal } : {}),
+      });
+    } catch {
+      if (signal?.aborted) throw abortReason(signal);
+      return null;
+    }
+
+    const reportedUrl = typeof response?.url === "string" && response.url
+      ? canonicalPublicHttpUrl(response.url)
+      : current;
+    if (!reportedUrl) {
+      await cancelResponseBody(response);
+      return null;
+    }
+
+    if (response?.redirected || reportedUrl.href !== current.href) {
+      await cancelResponseBody(response);
+      return null;
+    }
+
+    const status = Number(response?.status);
+    const redirectResponse = response?.type === "opaqueredirect"
+      || (Number.isFinite(status) && status >= 300 && status < 400);
+    if (redirectResponse) {
+      let location = response?.headers?.get?.("location");
+      if ((!location || response?.type === "opaqueredirect") && typeof getRedirectTarget === "function") {
+        try { location = await getRedirectTarget(current.href); } catch { location = null; }
+      }
+      await cancelResponseBody(response);
+      if (hop >= maxRedirectHops || typeof location !== "string" || !location) return null;
+      let next;
+      try {
+        next = canonicalPublicHttpUrl(new URL(location, current.href).href);
+      } catch {
+        return null;
+      }
+      if (!next || visited.has(next.href)) return null;
+      currentReferrer = current.href;
+      current = next;
+      visited.add(current.href);
+      continue;
+    }
+
+    if (!response?.ok) {
+      await cancelResponseBody(response);
+      return null;
+    }
+    return { response, url: current.href };
+  }
+  return null;
 }
 
 // Awaits a shared promise while honoring the caller's own AbortSignal without
@@ -340,9 +445,18 @@ function abortableAwait(promise, signal) {
 // Direct media URL pass: first canonical, non-decoy http(s) match in text
 // order. HLS playlists are typed as "hls"; mp4/webm as "progressive".
 function directMediaResult(text, pageUrl) {
-  const directRe = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4|webm)(?:[?#][^\s"'<>\\]*)?/gi;
+  const directRe = /https?:\/\/[^\s"'<>\\`]+/gi;
   for (const match of text.matchAll(directRe)) {
-    const result = mediaResultForValue(match[0], pageUrl);
+    // Raw URLs are often followed by JavaScript or prose punctuation. Trim
+    // only characters that cannot be part of the media extension itself;
+    // query-string bytes remain intact and are validated below.
+    const raw = match[0];
+    let candidate = raw;
+    const punctuation = /[.,;)\]}]+$/.exec(candidate)?.[0] || "";
+    if (punctuation && !(punctuation === ";" && candidate.includes("?"))) {
+      candidate = candidate.slice(0, -punctuation.length);
+    }
+    const result = mediaResultForValue(candidate, pageUrl);
     if (result) return result;
   }
 
@@ -398,7 +512,9 @@ function base64VideoUrlResult(text, pageUrl) {
 // Dood pass_md5 fallback: fetch the token endpoint and parse its direct URL.
 // Authenticated in-frame Dood resolution stays in content.js; this is the
 // on-demand static page fallback only.
-async function doodPassResult(text, pageUrl, { ensureRoute, fetchImpl, signal, maxBodyBytes }) {
+async function doodPassResult(text, pageUrl, {
+  ensureRoute, fetchImpl, signal, maxBodyBytes, maxRedirectHops, getRedirectTarget,
+}) {
   const pass = text.match(/["'(\s](\/pass_md5\/[^"')\s]+)["')]/)
     || text.match(/(\/pass_md5\/[^\s"'<>]+)/);
   if (!pass) return null;
@@ -411,16 +527,16 @@ async function doodPassResult(text, pageUrl, { ensureRoute, fetchImpl, signal, m
     return null;
   }
   try {
-    if (typeof ensureRoute === "function") await ensureRoute([passUrl]);
-    const response = await fetchImpl(passUrl, {
-      credentials: "include",
-      redirect: "follow",
+    const loaded = await fetchPublicResponse(passUrl, {
+      ensureRoute,
+      fetchImpl,
+      signal,
       referrer: pageUrl,
-      referrerPolicy: "unsafe-url",
-      ...(signal ? { signal } : {}),
+      maxRedirectHops,
+      getRedirectTarget,
     });
-    if (!response?.ok) return null;
-    const body = await boundedResponseText(response, maxBodyBytes);
+    if (!loaded) return null;
+    const body = await boundedResponseText(loaded.response, maxBodyBytes);
     if (body === null) return null;
     const direct = parseDoodResponse(body);
     if (!direct) return null;
@@ -453,8 +569,10 @@ function frameClueUrls(text, pageUrl, maxFrameClues) {
       return;
     }
     if (!canonical || seen.has(canonical.href)) return;
+    const target = likelyPlayerFrameUrl(canonical) ? preferred : fallback;
+    if (target.length >= maxFrameClues) return;
     seen.add(canonical.href);
-    (likelyPlayerFrameUrl(canonical) ? preferred : fallback).push(canonical.href);
+    target.push(canonical.href);
   };
 
   const tagRe = /<(?:iframe|embed)\b[^>]*>/gi;
@@ -488,21 +606,28 @@ function frameClueUrls(text, pageUrl, maxFrameClues) {
 export function createPlayerGraphResolver({
   fetchImpl = globalThis.fetch,
   ensureRoute = null,
+  getRedirectTarget = null,
   now = () => Date.now(),
   positiveTtlMs = PLAYER_GRAPH_LIMITS.positiveTtlMs,
   negativeTtlMs = PLAYER_GRAPH_LIMITS.negativeTtlMs,
   maxNodes = PLAYER_GRAPH_LIMITS.maxNodes,
   maxFrameClues = PLAYER_GRAPH_LIMITS.maxFrameClues,
+  maxRedirectHops = PLAYER_GRAPH_LIMITS.maxRedirectHops,
   maxBodyBytes = PLAYER_GRAPH_LIMITS.maxBodyBytes,
   maxCacheEntries = PLAYER_GRAPH_LIMITS.maxCacheEntries,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl must be a function");
   if (ensureRoute !== null && typeof ensureRoute !== "function") throw new TypeError("ensureRoute must be a function");
-  const boundOptions = { positiveTtlMs, negativeTtlMs, maxNodes, maxFrameClues, maxBodyBytes, maxCacheEntries };
+  if (getRedirectTarget !== null && typeof getRedirectTarget !== "function") {
+    throw new TypeError("getRedirectTarget must be a function");
+  }
+  const boundOptions = {
+    positiveTtlMs, negativeTtlMs, maxNodes, maxFrameClues, maxRedirectHops, maxBodyBytes, maxCacheEntries,
+  };
   for (const [name, value] of Object.entries(boundOptions)) {
     if (!Number.isFinite(value) || value <= 0) throw new TypeError(`${name} must be a positive finite number`);
   }
-  for (const name of ["maxNodes", "maxFrameClues", "maxCacheEntries"]) {
+  for (const name of ["maxNodes", "maxFrameClues", "maxRedirectHops", "maxCacheEntries"]) {
     if (!Number.isInteger(boundOptions[name])) throw new TypeError(`${name} must be an integer`);
   }
 
@@ -522,26 +647,17 @@ export function createPlayerGraphResolver({
       if (index >= maxNodes) break;
       const url = queue[index];
       throwIfAborted(signal);
-      let text = null;
-      try {
-        if (typeof ensureRoute === "function") await ensureRoute([url]);
-        const response = await fetchImpl(url, {
-          credentials: "include",
-          redirect: "follow",
-          referrer: url,
-          referrerPolicy: "unsafe-url",
-          ...(signal ? { signal } : {}),
-        });
-        if (!response?.ok) continue;
-        text = await boundedResponseText(response, maxBodyBytes);
-      } catch {
-        if (signal?.aborted) throw abortReason(signal);
-        continue;
-      }
+      const loaded = await fetchPublicResponse(url, {
+        ensureRoute, fetchImpl, signal, referrer: url, maxRedirectHops, getRedirectTarget,
+      });
+      if (!loaded) continue;
+      const pageUrl = loaded.url;
+      const text = await boundedResponseText(loaded.response, maxBodyBytes);
       if (text === null) continue;
       throwIfAborted(signal);
 
-      const streamtape = parseStreamtapeNorobotlink(text, url);
+      visited.add(pageUrl);
+      const streamtape = parseStreamtapeNorobotlink(text, pageUrl);
       if (streamtape) {
         const canonical = canonicalPublicHttpUrl(streamtape.url);
         if (canonical) {
@@ -550,26 +666,28 @@ export function createPlayerGraphResolver({
         }
       }
 
-      const pass = await doodPassResult(text, url, { ensureRoute, fetchImpl, signal, maxBodyBytes });
+      const pass = await doodPassResult(text, pageUrl, {
+        ensureRoute, fetchImpl, signal, maxBodyBytes, maxRedirectHops, getRedirectTarget,
+      });
       if (pass) {
         throwIfAborted(signal);
         return pass;
       }
 
-      const direct = directMediaResult(text, url);
+      const direct = directMediaResult(text, pageUrl);
       if (direct) {
         throwIfAborted(signal);
         return direct;
       }
 
-      const videoUrl = base64VideoUrlResult(text, url);
+      const videoUrl = base64VideoUrlResult(text, pageUrl);
       if (videoUrl) {
         throwIfAborted(signal);
         return videoUrl;
       }
 
       try {
-        const parsed = new URL(url);
+        const parsed = new URL(pageUrl);
         if (/^\/d\//i.test(parsed.pathname)) {
           const twin = canonicalPublicHttpUrl(`${parsed.origin}${parsed.pathname.replace(/^\/d\//i, "/e/")}`);
           if (twin && !visited.has(twin.href)) {
@@ -581,7 +699,7 @@ export function createPlayerGraphResolver({
         // Ignore malformed node URLs; nodes were canonical at enqueue time.
       }
 
-      for (const frameUrl of frameClueUrls(text, url, maxFrameClues)) {
+      for (const frameUrl of frameClueUrls(text, pageUrl, maxFrameClues)) {
         if (!visited.has(frameUrl)) {
           visited.add(frameUrl);
           queue.push(frameUrl);

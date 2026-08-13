@@ -71,6 +71,20 @@ function errorResponse() {
   return { ok: false, headers: { get: () => null }, async text() { return ""; } };
 }
 
+function redirectResponse(location, { opaque = false } = {}) {
+  let cancelled = false;
+  return {
+    ok: false,
+    status: 302,
+    type: opaque ? "opaqueredirect" : "basic",
+    redirected: false,
+    headers: { get: (name) => !opaque && name.toLowerCase() === "location" ? location : null },
+    body: { async cancel() { cancelled = true; } },
+    get cancelled() { return cancelled; },
+    async text() { throw new Error("redirect bodies must not be read"); },
+  };
+}
+
 function routeSpy() {
   const calls = [];
   const route = async (urls) => {
@@ -86,7 +100,7 @@ function harness({ ensureRoute = null, options = {} } = {}) {
   let clock = 0;
   const resolver = createPlayerGraphResolver({
     fetchImpl: async (url, fetchOptions) => {
-      calls.push({ url, signal: fetchOptions?.signal || null });
+      calls.push({ url, signal: fetchOptions?.signal || null, options: fetchOptions });
       const value = responses.get(url);
       return typeof value === "function" ? value(url, fetchOptions) : value || errorResponse();
     },
@@ -249,6 +263,34 @@ test("types direct m3u8 results as HLS and mp4 results as progressive", async ()
   assert.equal(progressive.url, "https://cdn.example/clip.mp4");
 });
 
+test("does not truncate extension-suffixed decoys before a real media URL", async () => {
+  const h = harness();
+  h.responses.set("https://media.example/e/extensions", okResponse(`
+    https://cdn.example/track.mp4.json
+    https://cdn.example/real.mp4
+  `));
+  assert.equal((await h.resolver.resolve("https://media.example/e/extensions"))?.url,
+    "https://cdn.example/real.mp4");
+});
+
+test("accepts media URLs followed by JavaScript punctuation without trimming query bytes", async () => {
+  const h = harness();
+  h.responses.set("https://media.example/e/punctuation", okResponse(`
+    const source = https://cdn.example/real.mp4?token=abc123);
+  `));
+  assert.equal((await h.resolver.resolve("https://media.example/e/punctuation"))?.url,
+    "https://cdn.example/real.mp4?token=abc123");
+});
+
+test("preserves a lone semicolon that may be part of a token query", async () => {
+  const h = harness();
+  h.responses.set("https://media.example/e/query-semicolon", okResponse(`
+    https://cdn.example/real.mp4?token=abc;
+  `));
+  assert.equal((await h.resolver.resolve("https://media.example/e/query-semicolon"))?.url,
+    "https://cdn.example/real.mp4?token=abc;");
+});
+
 test("accepts WebM media while rejecting WebP image decoys", async () => {
   const h = harness();
   h.responses.set("https://media.example/e/webm", okResponse(`
@@ -369,6 +411,18 @@ test("rejects private, loopback, credentialed, ported, and non-http URLs", () =>
   }
 });
 
+test("rejects IPv6 forms that embed private IPv4 and deprecated site-local space", () => {
+  for (const value of [
+    "https://[64:ff9b::a00:1]/e/x",
+    "https://[64:ff9b::7f00:1]/e/x",
+    "https://[2002:a00:1::]/e/x",
+    "https://[::a00:1]/e/x",
+    "https://[fec0::1]/e/x",
+  ]) assert.equal(canonicalPublicHttpUrl(value), null, value);
+  assert.equal(canonicalPublicHttpUrl("https://[64:ff9b::808:808]/e/x")?.hostname,
+    "[64:ff9b::808:808]");
+});
+
 test("accepts public URLs and normalizes casing, default ports, and trailing dots", () => {
   assert.equal(
     canonicalPublicHttpUrl("https://Media.Example:443/e/abc").href,
@@ -470,6 +524,79 @@ test("aborting during traversal stops fetches and caches nothing", async () => {
   assert.equal(h.resolver.negativeCacheSize, 0);
 });
 
+test("validates every manual redirect before fetching the next hop", async () => {
+  const redirects = new Map([
+    ["https://media.example/e/redirect", "https://redirect.example/player/final"],
+  ]);
+  const h = harness({ options: { maxRedirectHops: 3, getRedirectTarget: (url) => redirects.get(url) || null } });
+  const first = redirectResponse("https://redirect.example/player/final");
+  h.responses.set("https://media.example/e/redirect", first);
+  h.responses.set("https://redirect.example/player/final", okResponse(
+    'file: "../media/video.mp4"',
+  ));
+  const resolved = await h.resolver.resolve("https://media.example/e/redirect");
+  assert.equal(resolved?.url, "https://redirect.example/media/video.mp4");
+  assert.equal(resolved?.referrer, "https://redirect.example/player/final");
+  assert.equal(first.cancelled, true);
+  assert.deepEqual(h.calls.map(({ url }) => url), [
+    "https://media.example/e/redirect",
+    "https://redirect.example/player/final",
+  ]);
+  assert.ok(h.calls.every(({ options }) => options.redirect === "manual"));
+});
+
+test("never follows a redirect to a private or loopback target", async () => {
+  for (const location of ["http://127.0.0.1/admin", "http://169.254.169.254/latest/meta-data/"]) {
+    const h = harness({ options: { getRedirectTarget: () => location } });
+    h.responses.set("https://media.example/e/redirect", redirectResponse(null, { opaque: true }));
+    assert.equal(await h.resolver.resolve("https://media.example/e/redirect"), null);
+    assert.deepEqual(h.calls.map(({ url }) => url), ["https://media.example/e/redirect"]);
+  }
+});
+
+test("fails closed when the browser hides a manual redirect Location", async () => {
+  const h = harness();
+  const opaque = redirectResponse("https://redirect.example/e/final", { opaque: true });
+  h.responses.set("https://media.example/e/opaque", opaque);
+  assert.equal(await h.resolver.resolve("https://media.example/e/opaque"), null);
+  assert.equal(opaque.cancelled, true);
+  assert.equal(h.calls.length, 1);
+});
+
+test("resolves Chrome opaque redirects through an observed public target", async () => {
+  const h = harness({ options: {
+    getRedirectTarget: (url) => url === "https://media.example/e/opaque"
+      ? "https://redirect.example/e/final" : null,
+  } });
+  const opaque = redirectResponse(null, { opaque: true });
+  h.responses.set("https://media.example/e/opaque", opaque);
+  h.responses.set("https://redirect.example/e/final", okResponse('file: "https://cdn.example/video.mp4"'));
+  assert.equal((await h.resolver.resolve("https://media.example/e/opaque"))?.url,
+    "https://cdn.example/video.mp4");
+  assert.equal(opaque.cancelled, true);
+  assert.deepEqual(h.calls.map(({ url }) => url), [
+    "https://media.example/e/opaque",
+    "https://redirect.example/e/final",
+  ]);
+});
+
+test("rejects an unexpected browser-followed final URL without reading it", async () => {
+  const h = harness();
+  let cancelled = false;
+  let textCalls = 0;
+  h.responses.set("https://media.example/e/unexpected-follow", {
+    ok: true,
+    url: "http://127.0.0.1/admin",
+    redirected: true,
+    headers: { get: () => null },
+    body: { async cancel() { cancelled = true; } },
+    async text() { textCalls += 1; return "https://cdn.example/no.mp4"; },
+  });
+  assert.equal(await h.resolver.resolve("https://media.example/e/unexpected-follow"), null);
+  assert.equal(cancelled, true);
+  assert.equal(textCalls, 0);
+});
+
 test("one coalesced caller can abort without cancelling another caller", async () => {
   const h = harness();
   let releaseFetch;
@@ -493,6 +620,22 @@ test("skips pages whose declared content-length exceeds the body bound", async (
   h.responses.set("https://media.example/e/root", page);
   assert.equal(await h.resolver.resolve("https://media.example/e/root"), null);
   assert.equal(page.textCalls, 0);
+});
+
+test("cancels non-success response bodies without parsing them", async () => {
+  const h = harness();
+  let cancelled = false;
+  let textCalls = 0;
+  h.responses.set("https://media.example/e/failure", {
+    ok: false,
+    status: 503,
+    headers: { get: () => null },
+    body: { async cancel() { cancelled = true; } },
+    async text() { textCalls += 1; return "https://cdn.example/should-not-run.mp4"; },
+  });
+  assert.equal(await h.resolver.resolve("https://media.example/e/failure"), null);
+  assert.equal(cancelled, true);
+  assert.equal(textCalls, 0);
 });
 
 test("skips pages whose actual text length exceeds the body bound", async () => {

@@ -287,7 +287,7 @@ test("Dood pass_md5 is cached, skipped on irrelevant mutations, and re-detected 
   });
 });
 
-test("Dood retries a transient pass request failure and detects a text-only clue change", async () => {
+test("Dood backoff survives mutations while a forced request retries immediately", async () => {
   const env = baseEnvironment({
     locationHref: "https://dood.example/e/abc123#player",
     doodHtml: '<script>const pass = "/pass_md5/token";</script>',
@@ -309,10 +309,103 @@ test("Dood retries a transient pass request failure and detects a text-only clue
     target: { parentElement: { tagName: "SCRIPT" } },
   }]);
   await delay(180);
+  assert.equal(attempts, 1, "a script mutation must not defeat the five-second backoff");
+
+  const forced = await new Promise((resolve) => {
+    env.onMessage({ type: "get-dood-direct" }, {}, resolve);
+  });
   assert.equal(attempts, 2);
+  assert.deepEqual(forced, {
+    ok: true,
+    url: "https://cdn.dood.example/recovered.mp4",
+    frameUrl: "https://dood.example/e/abc123",
+  });
+  env.onMessage({ type: "rescan" }, {}, () => {});
+  await delay(0);
   const recovered = env.sent.find((message) => message.type === "resource"
     && message.resourceUrl === "https://cdn.dood.example/recovered.mp4");
   assert.equal(recovered?.frameUrl, "https://dood.example/e/abc123");
+});
+
+test("Dood coalesces overlapping scans into one pass request and supplies an abort signal", async () => {
+  const env = baseEnvironment({
+    locationHref: "https://dood.example/e/coalesce",
+    doodHtml: '<script>const pass = "/pass_md5/token";</script>',
+  });
+  let attempts = 0;
+  let releaseFetch;
+  let fetchSignal = null;
+  globalThis.fetch = (_url, options) => {
+    attempts += 1;
+    fetchSignal = options?.signal || null;
+    return new Promise((resolve) => {
+      releaseFetch = () => resolve({ ok: true, text: async () => "https://cdn.dood.example/coalesced.mp4" });
+    });
+  };
+  await import(`./content.js?test=${++moduleCounter}`);
+  assert.equal(attempts, 1);
+  assert.equal(fetchSignal instanceof AbortSignal, true);
+
+  env.onMessage({ type: "rescan" }, {}, () => {});
+  const forced = new Promise((resolve) => env.onMessage({ type: "get-dood-direct" }, {}, resolve));
+  env.onMessage({ type: "rescan" }, {}, () => {});
+  assert.equal(attempts, 1, "all overlapping scans and requests must share one fetch");
+  releaseFetch();
+  assert.equal((await forced).ok, true);
+  await delay(0);
+  assert.equal(attempts, 1);
+});
+
+test("Dood stops automatic retries after the bounded failure budget", async () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const realDateNow = Date.now;
+  const timers = [];
+  globalThis.setTimeout = (callback, delayMs) => {
+    const timer = { callback, delayMs, cancelled: false, unref() {} };
+    timers.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = (timer) => { if (timer) timer.cancelled = true; };
+  try {
+    let now = 1_000_000;
+    Date.now = () => now;
+    const env = baseEnvironment({
+      locationHref: "https://dood.example/e/retry-budget",
+      doodHtml: '<script>const pass = "/pass_md5/token";</script>',
+    });
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts += 1;
+      return { ok: false, text: async () => "" };
+    };
+    const flushAsync = async () => {
+      for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    };
+    await import(`./content.js?test=${++moduleCounter}`);
+    for (let expected = 1; expected < 4; expected += 1) {
+      await flushAsync();
+      const retry = timers.find((timer) => !timer.cancelled && timer.delayMs >= 5_000 && timer.delayMs <= 60_000);
+      assert.ok(retry, `retry ${expected} must be scheduled`);
+      retry.cancelled = true;
+      now += retry.delayMs;
+      retry.callback();
+      const scan = timers.find((timer) => !timer.cancelled && timer.delayMs === 120);
+      assert.ok(scan, `retry ${expected} scan must be debounced`);
+      scan.cancelled = true;
+      scan.callback();
+      await flushAsync();
+    }
+    await flushAsync();
+    assert.equal(attempts, 4);
+    assert.equal(timers.some((timer) => !timer.cancelled && timer.delayMs >= 5_000), false,
+      "the fourth failure must not create another automatic retry");
+    assert.equal(env.documentHtml.reads, 4);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+    Date.now = realDateNow;
+  }
 });
 
 test("initial detection runs synchronously without debounce latency", async () => {

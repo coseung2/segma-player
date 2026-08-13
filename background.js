@@ -76,6 +76,7 @@ const progressiveRedirectResolver = createProgressiveRedirectResolver({
 // aborts every in-flight traversal, including work owned by other tabs.
 const playerGraphResolver = createPlayerGraphResolver({
   ensureRoute: (urls) => mediaRouteClient.ensureRoutes(urls),
+  getRedirectTarget: (url) => progressiveRedirectTargetFor(url),
 });
 
 const downloadJobsReady = chrome.storage.session.get({ [DOWNLOAD_JOBS_KEY]: [] }).then((stored) => {
@@ -955,9 +956,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "dood-direct" && sender.tab?.id && typeof message.url === "string") {
+    const directUrl = canonicalHttpUrl(message.url)?.href;
+    const frameUrl = typeof message.frameUrl === "string" ? canonicalHttpUrl(message.frameUrl)?.href : "";
+    if (!directUrl) return false;
     doodDirectByTab.set(sender.tab.id, {
-      url: message.url,
-      frameUrl: typeof message.frameUrl === "string" ? message.frameUrl : "",
+      url: directUrl,
+      frameUrl: frameUrl || "",
       at: Date.now(),
     });
     return false;
@@ -1025,9 +1029,11 @@ chrome.runtime.onConnect.addListener((port) => {
         // context, giving a fresh token URL and the exact Referer the CDN
         // expects (the /e/ player frame, not the outer page).
         const fresh = await sendTabMessageWithTimeout(message.videoTabId, { type: "get-dood-direct" });
-        if (fresh?.ok && typeof fresh.url === "string") {
-          url = fresh.url;
-          if (typeof fresh.frameUrl === "string" && fresh.frameUrl) referrer = fresh.frameUrl;
+        const freshUrl = fresh?.ok && typeof fresh.url === "string" ? canonicalHttpUrl(fresh.url)?.href : null;
+        const freshFrameUrl = typeof fresh?.frameUrl === "string" ? canonicalHttpUrl(fresh.frameUrl)?.href : null;
+        if (freshUrl) {
+          url = freshUrl;
+          if (freshFrameUrl) referrer = freshFrameUrl;
           resolvedForTransfer = true;
         } else {
           const cached = doodDirectByTab.get(message.videoTabId);

@@ -7,7 +7,9 @@
     "enabled": true
   },
   "assets": {
-    "directory": "site"
+    "directory": "site",
+    "run_worker_first": true,
+    "not_found_handling": "404-page"
   },
   "compatibility_flags": [
     "nodejs_compat"

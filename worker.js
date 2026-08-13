@@ -171,15 +171,9 @@ export default {
     }
 
     try {
-      const response = await env.ASSETS.fetch(request);
-      if (response.status !== 500) return response;
+      return await env.ASSETS.fetch(request);
     } catch {
-      // Fall through to the explicit 404 page.
+      return json({ ok: false, error: "not-found" }, 404);
     }
-    const notFound = await env.ASSETS.fetch(new Request(new URL("/404.html", request.url), request));
-    return new Response(notFound.body, {
-      status: 404,
-      headers: { "content-type": notFound.headers.get("content-type") || "text/html; charset=utf-8" },
-    });
   },
 };

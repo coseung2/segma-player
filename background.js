@@ -27,7 +27,7 @@ import {
   MEDIA_FETCH_RULE_ID_START,
   OFFSCREEN_DOCUMENT_TAB_ID,
 } from "./media-fetch-lease.js";
-import { looksLikePlayerPage, resolvePlayerPage } from "./player-page-resolver.js";
+import { createPlayerGraphResolver, looksLikePlayerPage } from "./player-page-resolver.js";
 import {
   authenticatedRecoveryForProgressiveError,
   createProgressiveRedirectResolver,
@@ -69,6 +69,13 @@ const progressiveRedirectResolver = createProgressiveRedirectResolver({
     const recorded = recordedHeaders.get(canonicalMediaFetchUrl(url));
     return replayableRecordedHeaders(recorded);
   },
+});
+
+// Reuse one bounded resolver so identical player pages share in-flight work
+// and short-lived results. Do not clear it on one tab's navigation: clear()
+// aborts every in-flight traversal, including work owned by other tabs.
+const playerGraphResolver = createPlayerGraphResolver({
+  ensureRoute: (urls) => mediaRouteClient.ensureRoutes(urls),
 });
 
 const downloadJobsReady = chrome.storage.session.get({ [DOWNLOAD_JOBS_KEY]: [] }).then((stored) => {
@@ -855,12 +862,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (looksLikePlayerPage(targetUrl)) {
         // The pasted URL is likely a player page (playmogo /d/ or /e/, dood.to,
         // etc.). Resolve the embedded direct stream automatically.
-        const resolved = await resolvePlayerPage(targetUrl, {
-          ensureRoute: (urls) => mediaRouteClient.ensureRoutes(urls),
-        });
+        const resolved = await playerGraphResolver.resolve(targetUrl);
         if (resolved?.url) {
           targetUrl = resolved.url;
-          progressive = true;
+          if (resolved.type === "hls") hls = true;
+          else progressive = true;
           pageReferrer = resolved.referrer || pageReferrer;
         } else {
           sendResponse({
@@ -961,7 +967,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const sanitized = sanitizePageMessage({
     ...message,
     pageTitle: message.pageTitle || sender.tab.title || "",
-    pageUrl: sender.tab.url,
+    pageUrl: canonicalHttpUrl(sender.url)?.href
+      || (typeof message.frameUrl === "string" ? canonicalHttpUrl(message.frameUrl)?.href : null)
+      || canonicalHttpUrl(sender.tab.url)?.href
+      || "",
   });
   if (sanitized) sanitized.tabId = sender.tab.id;
   if (sanitized && Number.isInteger(sender.frameId) && sender.frameId >= 0) sanitized.frameId = sender.frameId;
@@ -1006,7 +1015,7 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 
   if (port.name === "media-stream" && validMediaFetchSender(port.sender)) {
-    async function resolveFreshUrl(message) {
+    async function resolveFreshUrl(message, signal) {
       let url = message.url;
       let referrer = typeof message.pageUrl === "string" ? message.pageUrl : "";
       await mediaRouteClient.ensureRoutes([url, referrer, message.pageUrl].filter(Boolean));
@@ -1030,9 +1039,7 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       }
       if (!resolvedForTransfer && typeof message.pageUrl === "string" && looksLikePlayerPage(message.pageUrl)) {
-        const resolved = await resolvePlayerPage(message.pageUrl, {
-          ensureRoute: (urls) => mediaRouteClient.ensureRoutes(urls),
-        });
+        const resolved = await playerGraphResolver.resolve(message.pageUrl, { signal });
         if (resolved?.url) {
           url = resolved.url;
           referrer = resolved.referrer || referrer;
@@ -1048,10 +1055,21 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     }
 
+    let activeController = null;
+    let disconnected = false;
+    port.onDisconnect.addListener(() => {
+      disconnected = true;
+      activeController?.abort();
+    });
     port.onMessage.addListener(async (message) => {
       if (message?.type !== "start" || typeof message.url !== "string") return;
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
+      const { signal } = controller;
       try {
-        const { url, referrer, authenticatedProbeRequired } = await resolveFreshUrl(message);
+        const { url, referrer, authenticatedProbeRequired } = await resolveFreshUrl(message, signal);
+        if (signal.aborted || disconnected) return;
         port.postMessage({
           type: "fetch-required",
           url,
@@ -1059,6 +1077,7 @@ chrome.runtime.onConnect.addListener((port) => {
           ...(authenticatedProbeRequired ? { authenticatedProbeRequired: true } : {}),
         });
       } catch (error) {
+        if (signal.aborted || disconnected) return;
         port.postMessage({
           type: "stream-error",
           message: progressiveDownloadErrorMessage(error),

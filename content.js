@@ -4,11 +4,19 @@
   const MAX_URL_BYTES = 4096;
   const MAX_TITLE_CHARACTERS = 512;
   const MAX_SEEN = 1000;
+  const SCAN_DEBOUNCE_MS = 120;
   const seen = new Set();
-  let scanQueued = false;
+  let scanTimer = null;
+  let scanScheduled = false;
   let lastMainFrames = "";
   let lastDoodPassUrl = "";
   let doodDirectCache = null;
+  let doodDirty = true;
+  let doodRetryAfter = 0;
+  let scriptsDirty = true;
+  let cachedEmbeddedUrls = null;
+  let performanceCursorEntry = null;
+  let performanceObserverActive = false;
 
   function send(message) {
     try {
@@ -16,6 +24,17 @@
       if (promise && typeof promise.catch === "function") promise.catch(() => {});
     } catch {
       // 확장 프로그램이 새로 로드되는 동안 페이지가 열려 있으면 메시지를 보낼 수 없습니다.
+    }
+  }
+
+  function currentFrameUrl() {
+    try {
+      const url = new URL(location.href);
+      if (!/^https?:$/.test(url.protocol)) return "";
+      url.hash = "";
+      return url.href.length <= MAX_URL_BYTES ? url.href : "";
+    } catch {
+      return "";
     }
   }
 
@@ -30,6 +49,7 @@
       contentType,
       main,
       fromMediaElement,
+      frameUrl: currentFrameUrl(),
       pageTitle: [...document.title].slice(0, MAX_TITLE_CHARACTERS).join(""),
     });
   }
@@ -64,6 +84,7 @@
   }
 
   function embeddedPlayerUrls() {
+    if (!scriptsDirty && cachedEmbeddedUrls !== null) return cachedEmbeddedUrls;
     const urls = [];
     const pattern = /\bvideo_url(?:_hd)?\s*:\s*(["'])([A-Za-z0-9+/]{8,}={0,2})\1/g;
     for (const script of document.querySelectorAll("script")) {
@@ -79,7 +100,9 @@
         }
       }
     }
-    return [...new Set(urls)];
+    cachedEmbeddedUrls = [...new Set(urls)];
+    scriptsDirty = false;
+    return cachedEmbeddedUrls;
   }
 
   function reportMainFrames() {
@@ -106,13 +129,20 @@
     try {
       const pathname = new URL(location.href).pathname;
       if (!/^\/(?:[de])\//.test(pathname)) return null;
+      if (!force && doodRetryAfter > Date.now()) return null;
+      if (!force && !doodDirty) return doodDirectCache;
       const text = document.documentElement?.outerHTML || "";
       const match = text.match(/(\/pass_md5\/[^"')\s<>]+)/);
+      doodDirty = false;
       if (!match) return null;
       const passUrl = new URL(match[1], location.href).href;
       if (!force && passUrl === lastDoodPassUrl && doodDirectCache) return doodDirectCache;
       const response = await fetch(passUrl, { credentials: "include" });
-      if (!response.ok) return null;
+      if (!response.ok) {
+        doodDirty = true;
+        doodRetryAfter = Date.now() + 5_000;
+        return null;
+      }
       const body = (await response.text()).trim();
       let direct = body;
       if (body.startsWith("{") || body.startsWith("[")) {
@@ -122,11 +152,18 @@
         } catch { /* not JSON */ }
       }
       direct = String(direct).replace(/^["']|["']$/g, "").trim();
-      if (!/^https?:\/\//i.test(direct) || direct.length > MAX_URL_BYTES) return null;
+      if (!/^https?:\/\//i.test(direct) || direct.length > MAX_URL_BYTES) {
+        doodDirty = true;
+        doodRetryAfter = Date.now() + 5_000;
+        return null;
+      }
       lastDoodPassUrl = passUrl;
       doodDirectCache = { url: direct, frameUrl: location.href };
+      doodRetryAfter = 0;
       return doodDirectCache;
     } catch {
+      doodDirty = true;
+      doodRetryAfter = Date.now() + 5_000;
       return null;
     }
   }
@@ -208,7 +245,7 @@
 
   function handleMessage(message, sendResponse) {
     if (message?.type === "rescan") {
-      queueScan();
+      scheduleScan(true);
       return false;
     }
     if (handleLevel5KeyRequest(message, sendResponse)) return true;
@@ -217,7 +254,6 @@
   }
 
   function scan() {
-    scanQueued = false;
     const elements = mediaElements();
     let mainUrl = null;
     if (elements.length) {
@@ -229,33 +265,101 @@
     }
     for (const item of elements) report(item.url, item.type, item.url === mainUrl, true);
     for (const url of embeddedPlayerUrls()) report(url, "video/mp4", true, true);
-    for (const entry of performance.getEntriesByType("resource")) report(entry.name);
+    if (!performanceObserverActive) {
+      const entries = performance.getEntriesByType("resource");
+      let start = 0;
+      if (performanceCursorEntry) {
+        const cursorIndex = entries.indexOf(performanceCursorEntry);
+        if (cursorIndex >= 0) start = cursorIndex + 1;
+        // The cursor entry can be evicted from the bounded resource buffer;
+        // every earlier entry is evicted too, so re-reading the remaining
+        // buffer is bounded and `seen` deduplicates already-reported URLs.
+      }
+      for (let i = start; i < entries.length; i++) report(entries[i].name);
+      if (entries.length) performanceCursorEntry = entries[entries.length - 1];
+    }
     reportMainFrames();
     void reportDoodPlayer();
   }
 
-  function queueScan() {
-    if (scanQueued) return;
-    scanQueued = true;
-    queueMicrotask(scan);
+  function markRelevantDirty(records) {
+    const markNode = (node, includeDescendants = true) => {
+      const tag = node?.tagName;
+      const containsScript = tag === "SCRIPT" || (includeDescendants && Boolean(node?.querySelector?.("script")));
+      const containsFrame = tag === "IFRAME" || tag === "EMBED"
+        || (includeDescendants && Boolean(node?.querySelector?.("iframe, embed")));
+      if (containsScript) scriptsDirty = true;
+      if (containsScript || containsFrame) {
+        doodDirty = true;
+        doodRetryAfter = 0;
+      }
+    };
+    for (const record of records || []) {
+      if (record.type === "attributes") {
+        doodDirty = true;
+        doodRetryAfter = 0;
+        if (record.target?.tagName === "SCRIPT") scriptsDirty = true;
+        continue;
+      }
+      if (record.type === "characterData") {
+        doodDirty = true;
+        doodRetryAfter = 0;
+        const parent = record.target?.parentElement || record.target?.parentNode;
+        if (parent?.tagName === "SCRIPT" || parent?.closest?.("script")) scriptsDirty = true;
+        continue;
+      }
+      if (record.type !== "childList") continue;
+      markNode(record.target, false);
+      for (const node of [...(record.addedNodes || []), ...(record.removedNodes || [])]) {
+        markNode(node);
+      }
+    }
   }
 
-  queueScan();
-  if (globalThis.PerformanceObserver) {
-    const observer = new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) report(entry.name);
-    });
-    observer.observe({ type: "resource", buffered: true });
+  function scheduleScan(prompt = false) {
+    if (prompt) {
+      if (scanTimer !== null) {
+        clearTimeout(scanTimer);
+        scanTimer = null;
+        scanScheduled = false;
+      }
+      scan();
+      return;
+    }
+    if (scanScheduled) return;
+    scanScheduled = true;
+    scanTimer = setTimeout(() => {
+      scanScheduled = false;
+      scanTimer = null;
+      scan();
+    }, SCAN_DEBOUNCE_MS);
   }
-  new MutationObserver(queueScan).observe(document.documentElement, {
+
+  if (globalThis.PerformanceObserver) {
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) report(entry.name);
+      });
+      observer.observe({ type: "resource", buffered: true });
+      performanceObserverActive = true;
+    } catch {
+      // Buffered resource observation is unavailable; the cursor below covers it.
+    }
+  }
+  new MutationObserver((records) => {
+    markRelevantDirty(records);
+    scheduleScan();
+  }).observe(document.documentElement, {
     childList: true,
     subtree: true,
+    characterData: true,
     attributes: true,
     attributeFilter: ["src", "data-src"],
   });
   for (const eventName of ["play", "playing", "loadstart", "loadedmetadata"]) {
-    document.addEventListener(eventName, () => queueScan(), true);
+    document.addEventListener(eventName, () => scheduleScan(), true);
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => handleMessage(message, sendResponse));
+  scan();
 })();

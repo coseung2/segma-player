@@ -1,70 +1,375 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-test("scans a visible playing media element without a runtime error", async () => {
-  const sent = [];
-  class MockElement {}
-  const video = new MockElement();
-  Object.assign(video, {
-    currentSrc: "https://media.example/stream-token",
-    src: "",
-    tagName: "VIDEO",
-    type: "video/mp4",
-    paused: false,
-    getBoundingClientRect: () => ({ width: 640, height: 360 }),
-  });
-  const preview = new MockElement();
-  Object.assign(preview, {
-    currentSrc: "https://cdn.example/cast/preview.gif",
-    src: "",
-    tagName: "VIDEO",
-    type: "video/mp4",
-    paused: false,
-    getBoundingClientRect: () => ({ width: 900, height: 500 }),
-  });
-  const embedded = {
-    textContent: "const flashvars = { video_url: 'aHR0cHM6Ly9hc2lhbnBvcm4ubGkvZ2V0X2ZpbGUvMTEvYWJjLzI3NDg2OS5tcDQvP2JyPTE3NjQ=' };",
-  };
+let moduleCounter = 0;
 
-  globalThis.Element = MockElement;
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function countResource(sent, url) {
+  return sent.filter((message) => message.type === "resource" && message.resourceUrl === url).length;
+}
+
+function mediaElement({ url, type = "video/mp4", paused = false, rect = { width: 640, height: 360 } }) {
+  return Object.assign(new (globalThis.Element)(), {
+    currentSrc: url,
+    src: "",
+    tagName: "VIDEO",
+    type,
+    paused,
+    getBoundingClientRect: () => rect,
+  });
+}
+
+function iframeElement(src) {
+  return Object.assign(new (globalThis.Element)(), {
+    src,
+    getBoundingClientRect: () => ({ width: 800, height: 450 }),
+  });
+}
+
+function baseEnvironment({ locationHref = "https://page.example/watch", doodHtml = "", withPerformanceObserver = false } = {}) {
+  const sent = [];
+  const resourceEntries = [];
+  const videos = [];
+  const scripts = [];
+  const iframes = [];
+  const eventHandlers = {};
+  const mutationObservers = [];
+  const performanceObservers = [];
+  const documentHtml = { text: doodHtml, reads: 0 };
+  let getEntriesCalls = 0;
+  let onMessage = null;
+
+  delete globalThis.__auraMediaDetectorInstalledV3;
+  delete globalThis.__personalVpnMediaDetectorInstalledV3;
+  globalThis.Element = class MockElement {};
   globalThis.window = globalThis;
   globalThis.top = globalThis;
-  globalThis.location = new URL("https://page.example/watch");
+  globalThis.location = new URL(locationHref);
   globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible", opacity: "1" });
-  globalThis.document = {
-    title: "Test video",
-    documentElement: {},
-    querySelectorAll(selector) {
-      if (selector === "video, audio, source") return [video, preview];
-      if (selector === "iframe") return [];
-      if (selector === "script") return [embedded];
+  globalThis.performance = {
+    getEntriesByType(type) {
+      if (type === "resource") {
+        getEntriesCalls += 1;
+        return [...resourceEntries];
+      }
       return [];
     },
-    addEventListener() {},
+  };
+  globalThis.document = {
+    title: "Test video",
+    documentElement: {
+      get outerHTML() {
+        documentHtml.reads += 1;
+        return documentHtml.text;
+      },
+    },
+    querySelectorAll(selector) {
+      if (selector === "video, audio, source") return [...videos];
+      if (selector === "iframe") return [...iframes];
+      if (selector === "script") return [...scripts];
+      return [];
+    },
+    addEventListener(name, handler) {
+      eventHandlers[name] = handler;
+    },
   };
   globalThis.MutationObserver = class {
+    constructor(callback) {
+      this.callback = callback;
+      mutationObservers.push(this);
+    }
     observe() {}
   };
+  globalThis.PerformanceObserver = withPerformanceObserver
+    ? class {
+      constructor(callback) {
+        this.callback = callback;
+        performanceObservers.push(this);
+      }
+      observe(options) {
+        this.options = options;
+      }
+    }
+    : undefined;
   globalThis.chrome = {
     runtime: {
       sendMessage(message) {
         sent.push(message);
         return Promise.resolve();
       },
-      onMessage: { addListener() {} },
+      onMessage: {
+        addListener(handler) {
+          onMessage = handler;
+        },
+      },
     },
   };
 
-  await import(`./content.js?test=${Date.now()}`);
-  await new Promise((resolve) => setImmediate(resolve));
+  return {
+    sent,
+    resourceEntries,
+    videos,
+    scripts,
+    iframes,
+    eventHandlers,
+    mutationObservers,
+    performanceObservers,
+    documentHtml,
+    get countScans() {
+      return getEntriesCalls;
+    },
+    get onMessage() {
+      return onMessage;
+    },
+  };
+}
 
-  const media = sent.find((message) => message.type === "resource"
+test("scans a visible playing media element without a runtime error", async () => {
+  const env = baseEnvironment();
+  env.videos.push(
+    mediaElement({ url: "https://media.example/stream-token" }),
+    mediaElement({ url: "https://cdn.example/cast/preview.gif", rect: { width: 900, height: 500 } }),
+  );
+  env.scripts.push({
+    textContent: "const flashvars = { video_url: 'aHR0cHM6Ly9hc2lhbnBvcm4ubGkvZ2V0X2ZpbGUvMTEvYWJjLzI3NDg2OS5tcDQvP2JyPTE3NjQ=' };",
+  });
+
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  const media = env.sent.find((message) => message.type === "resource"
     && message.resourceUrl === "https://media.example/stream-token");
   assert.equal(media?.main, true);
   assert.equal(media?.fromMediaElement, true);
-  assert.equal(sent.some((message) => message.resourceUrl?.endsWith("preview.gif")), false);
-  const configured = sent.find((message) => message.resourceUrl
+  assert.equal(media?.frameUrl, "https://page.example/watch");
+  assert.equal(env.sent.some((message) => message.resourceUrl?.endsWith("preview.gif")), false);
+  const configured = env.sent.find((message) => message.resourceUrl
     === "https://asianporn.li/get_file/11/abc/274869.mp4/?br=1764");
   assert.equal(configured?.main, true);
   assert.equal(configured?.fromMediaElement, true);
+  assert.equal(configured?.frameUrl, "https://page.example/watch");
+});
+
+test("blob media sources are never selected as main", async () => {
+  const env = baseEnvironment();
+  env.videos.push(
+    mediaElement({ url: "blob:https://page.example/hls-stream", paused: false, rect: { width: 1280, height: 720 } }),
+    mediaElement({ url: "https://media.example/real-stream", paused: false }),
+  );
+
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  assert.equal(env.sent.some((message) => message.type === "resource" && message.main === true), false);
+  assert.equal(countResource(env.sent, "blob:https://page.example/hls-stream"), 1);
+  assert.equal(countResource(env.sent, "https://media.example/real-stream"), 1);
+});
+
+test("a mutation burst and media events coalesce into one delayed scan", async () => {
+  const env = baseEnvironment();
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  const scansBefore = env.countScans;
+  env.scripts.push({ textContent: "const unrelated = 1;" });
+  for (let i = 0; i < 5; i += 1) {
+    await delay(0);
+    env.mutationObservers[0].callback([{ type: "childList", addedNodes: [{ tagName: "SCRIPT" }], removedNodes: [] }]);
+  }
+  env.eventHandlers.playing();
+  await delay(0);
+  assert.equal(env.countScans, scansBefore, "scan must wait for the debounce window to elapse");
+  await delay(180);
+  assert.equal(env.countScans, scansBefore + 1, "one burst must produce exactly one scan");
+});
+
+test("historical performance entries are not reread and inserted scripts are still detected", async () => {
+  const env = baseEnvironment();
+  env.resourceEntries.push(
+    { name: "https://cdn.example/video1.mp4" },
+    { name: "https://cdn.example/video2.mp4" },
+  );
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  assert.equal(countResource(env.sent, "https://cdn.example/video1.mp4"), 1);
+  assert.equal(countResource(env.sent, "https://cdn.example/video2.mp4"), 1);
+
+  env.scripts.push({
+    textContent: "var cfg = { video_url: 'aHR0cHM6Ly9hc2lhbnBvcm4ubGkvZ2V0X2ZpbGUvMTEvYWJjLzI3NDg2OS5tcDQvP2JyPTE3NjQ=' };",
+  });
+  env.mutationObservers[0].callback([{ type: "childList", addedNodes: [{ tagName: "SCRIPT" }], removedNodes: [] }]);
+  await delay(180);
+
+  assert.equal(countResource(env.sent, "https://cdn.example/video1.mp4"), 1, "history must not be reread");
+  assert.equal(countResource(env.sent, "https://cdn.example/video2.mp4"), 1, "history must not be reread");
+  assert.equal(countResource(env.sent, "https://asianporn.li/get_file/11/abc/274869.mp4/?br=1764"), 1);
+});
+
+test("nested script insertion and script text changes invalidate cached player clues", async () => {
+  const env = baseEnvironment();
+  await import(`./content.js?test=${++moduleCounter}`);
+
+  const first = {
+    textContent: "const cfg = { video_url: 'aHR0cHM6Ly9jZG4uZXhhbXBsZS9maXJzdC5tcDQ=' };",
+  };
+  env.scripts.push(first);
+  env.mutationObservers[0].callback([{
+    type: "childList",
+    target: { tagName: "DIV" },
+    addedNodes: [{ tagName: "SECTION", querySelector: (selector) => selector === "script" ? first : null }],
+    removedNodes: [],
+  }]);
+  await delay(180);
+  assert.equal(countResource(env.sent, "https://cdn.example/first.mp4"), 1);
+
+  first.textContent = "const cfg = { video_url: 'aHR0cHM6Ly9jZG4uZXhhbXBsZS9zZWNvbmQubXA0' };";
+  env.mutationObservers[0].callback([{
+    type: "characterData",
+    target: { parentElement: { tagName: "SCRIPT" } },
+  }]);
+  await delay(180);
+  assert.equal(countResource(env.sent, "https://cdn.example/second.mp4"), 1);
+});
+
+test("dynamically inserted media and iframe sources are detected", async () => {
+  const env = baseEnvironment();
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  env.videos.push(mediaElement({ url: "https://media.example/late-stream", paused: false }));
+  env.iframes.push(iframeElement("https://player.example/embed/late"));
+  env.mutationObservers[0].callback([
+    { type: "childList", addedNodes: [{ tagName: "VIDEO" }, { tagName: "IFRAME" }], removedNodes: [] },
+  ]);
+  await delay(180);
+
+  const media = env.sent.find((message) => message.type === "resource"
+    && message.resourceUrl === "https://media.example/late-stream");
+  assert.equal(media?.main, true);
+  assert.equal(media?.frameUrl, "https://page.example/watch");
+  const mainFrame = env.sent.find((message) => message.type === "main-frame");
+  assert.deepEqual(mainFrame?.urls, ["https://player.example/embed/late"]);
+});
+
+test("Dood pass_md5 is cached, skipped on irrelevant mutations, and re-detected after script insertion", async () => {
+  const env = baseEnvironment({ locationHref: "https://dood.example/d/abc123" });
+  globalThis.fetch = async () => ({ ok: true, text: async () => "https://cdn.dood.example/direct.mp4" });
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  assert.equal(env.documentHtml.reads, 1, "first scan must look for a pass_md5 clue once");
+  assert.equal(env.sent.some((message) => message.type === "dood-direct"), false);
+
+  env.mutationObservers[0].callback([{ type: "childList", addedNodes: [{ tagName: "DIV" }], removedNodes: [] }]);
+  await delay(180);
+  assert.equal(env.documentHtml.reads, 1, "irrelevant mutations must not re-serialize the document");
+
+  env.documentHtml.text = '<a href="/pass_md5/9f8e7d6c5b4a">download</a>';
+  env.mutationObservers[0].callback([{ type: "childList", addedNodes: [{ tagName: "SCRIPT" }], removedNodes: [] }]);
+  await delay(180);
+
+  const dood = env.sent.find((message) => message.type === "dood-direct");
+  assert.equal(dood?.url, "https://cdn.dood.example/direct.mp4");
+  assert.equal(dood?.frameUrl, "https://dood.example/d/abc123");
+  assert.equal(countResource(env.sent, "https://cdn.dood.example/direct.mp4"), 1);
+
+  const response = await new Promise((resolve) => {
+    env.onMessage({ type: "get-dood-direct" }, {}, resolve);
+  });
+  assert.deepEqual(response, {
+    ok: true,
+    url: "https://cdn.dood.example/direct.mp4",
+    frameUrl: "https://dood.example/d/abc123",
+  });
+});
+
+test("Dood retries a transient pass request failure and detects a text-only clue change", async () => {
+  const env = baseEnvironment({
+    locationHref: "https://dood.example/e/abc123#player",
+    doodHtml: '<script>const pass = "/pass_md5/token";</script>',
+  });
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    return attempts === 1
+      ? { ok: false, text: async () => "" }
+      : { ok: true, text: async () => "https://cdn.dood.example/recovered.mp4" };
+  };
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(0);
+  assert.equal(attempts, 1);
+
+  env.documentHtml.text = '<script>const pass = "/pass_md5/token-2";</script>';
+  env.mutationObservers[0].callback([{
+    type: "characterData",
+    target: { parentElement: { tagName: "SCRIPT" } },
+  }]);
+  await delay(180);
+  assert.equal(attempts, 2);
+  const recovered = env.sent.find((message) => message.type === "resource"
+    && message.resourceUrl === "https://cdn.dood.example/recovered.mp4");
+  assert.equal(recovered?.frameUrl, "https://dood.example/e/abc123");
+});
+
+test("initial detection runs synchronously without debounce latency", async () => {
+  const env = baseEnvironment();
+  env.videos.push(mediaElement({ url: "https://media.example/immediate.mp4" }));
+  await import(`./content.js?test=${++moduleCounter}`);
+  assert.equal(countResource(env.sent, "https://media.example/immediate.mp4"), 1);
+});
+
+test("an explicit rescan runs prompt detection", async () => {
+  const env = baseEnvironment();
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  const scansBefore = env.countScans;
+  env.videos.push(mediaElement({ url: "https://media.example/prompt-stream", paused: false }));
+  env.onMessage({ type: "rescan" }, {}, () => {});
+
+  assert.ok(env.sent.some((message) => message.type === "resource"
+    && message.resourceUrl === "https://media.example/prompt-stream"), "rescan must detect immediately");
+  assert.equal(env.countScans, scansBefore + 1);
+  await delay(180);
+  assert.equal(env.countScans, scansBefore + 1, "no extra scan after the prompt rescan");
+});
+
+test("an explicit rescan interrupts a pending debounce without double scanning", async () => {
+  const env = baseEnvironment();
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  const scansBefore = env.countScans;
+  env.mutationObservers[0].callback([{ type: "childList", addedNodes: [{ tagName: "DIV" }], removedNodes: [] }]);
+  env.videos.push(mediaElement({ url: "https://media.example/pending-stream", paused: false }));
+  env.onMessage({ type: "rescan" }, {}, () => {});
+
+  assert.ok(env.sent.some((message) => message.type === "resource"
+    && message.resourceUrl === "https://media.example/pending-stream"));
+  await delay(180);
+  assert.equal(env.countScans, scansBefore + 1, "the pending timer must be cancelled");
+});
+
+test("PerformanceObserver reports resource entries without DOM scan iteration", async () => {
+  const env = baseEnvironment({ withPerformanceObserver: true });
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  assert.equal(env.countScans, 0, "scans must not iterate performance history while the observer is active");
+  assert.equal(env.performanceObservers.length, 1);
+  assert.deepEqual(env.performanceObservers[0].options, { type: "resource", buffered: true });
+
+  env.performanceObservers[0].callback({ getEntries: () => [{ name: "https://cdn.example/observed.mp4" }] });
+  const observed = env.sent.find((message) => message.type === "resource"
+    && message.resourceUrl === "https://cdn.example/observed.mp4");
+  assert.ok(observed);
+  assert.equal(observed.frameUrl, "https://page.example/watch");
+
+  env.mutationObservers[0].callback([{ type: "childList", addedNodes: [{ tagName: "DIV" }], removedNodes: [] }]);
+  await delay(180);
+  assert.equal(env.countScans, 0, "DOM scans must not reread performance history");
 });

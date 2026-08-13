@@ -6,7 +6,7 @@ Chrome Manifest V3 extension and Windows native companion for detecting compatib
 
 | Capability | General | Pro |
 | --- | --- | --- |
-| Concurrent media jobs | 1 | 3 |
+| Concurrent media jobs | 1 | Unlimited |
 | Per-download byte limit | 1 GiB | No artificial cap |
 | YouTube tab | Not included in the store General edition | Direct Pro distribution only |
 

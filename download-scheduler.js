@@ -1,13 +1,13 @@
 export function createDownloadScheduler({ concurrency = 3 } = {}) {
-  if (!Number.isInteger(concurrency) || concurrency < 1) {
-    throw new TypeError("concurrency must be a positive integer");
+  if (concurrency !== null && (!Number.isInteger(concurrency) || concurrency < 1)) {
+    throw new TypeError("concurrency must be a positive integer or null for unlimited");
   }
 
   let activeCount = 0;
   const pending = [];
 
   function drain() {
-    while (activeCount < concurrency && pending.length > 0) {
+    while ((concurrency === null || activeCount < concurrency) && pending.length > 0) {
       const resolve = pending.shift();
       activeCount += 1;
       resolve();
@@ -22,8 +22,8 @@ export function createDownloadScheduler({ concurrency = 3 } = {}) {
   }
 
   function setConcurrency(value) {
-    if (!Number.isInteger(value) || value < 1) {
-      throw new TypeError("concurrency must be a positive integer");
+    if (value !== null && (!Number.isInteger(value) || value < 1)) {
+      throw new TypeError("concurrency must be a positive integer or null for unlimited");
     }
     concurrency = value;
     drain();

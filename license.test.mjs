@@ -64,7 +64,7 @@ test("activateLicense stores an approved key and resolvePlan switches to Pro", a
   await delay();
   assert.equal(env.storage.get("auraLicense").edition, "pro");
   assert.equal(await mod.resolveEdition(), "pro");
-  assert.equal((await mod.resolvePlan()).maxConcurrentMediaJobs, 3);
+  assert.equal((await mod.resolvePlan()).maxConcurrentMediaJobs, null);
 });
 
 test("pending keys are reported without storing Pro", async () => {

@@ -157,7 +157,7 @@ test("store packager builds and audits the exact free-edition ZIP", async () => 
     assert.deepEqual(plan.productPlan("pro"), {
       id: "pro",
       label: "Pro",
-      maxConcurrentMediaJobs: 3,
+      maxConcurrentMediaJobs: null,
       maxDownloadBytes: null,
       youtubeEnabled: true,
       youtubeMaxHeight: null,

@@ -131,7 +131,7 @@ licenseRefreshButton.addEventListener("click", async () => {
   try {
     const response = await chrome.runtime.sendMessage({ type: "license-refresh" });
     licenseStatusElement.textContent = response?.ok && response.edition === "pro"
-      ? "Pro 활성화됨 — 동시 3개, 용량 제한 없음, 백그라운드 다운로드 지원."
+      ? "Pro 활성화됨 — 동시 제한 없음, 용량 제한 없음, 백그라운드 다운로드 지원."
       : "아직 Pro가 아닙니다. 키 등록 여부를 확인해 주세요.";
   } catch {
     licenseStatusElement.textContent = "상태를 확인할 수 없습니다.";

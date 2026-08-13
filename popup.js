@@ -62,7 +62,7 @@ async function refreshAvailableQualities(url) {
 function renderPlan() {
   byId("plan-badge").textContent = currentPlan.label;
   byId("plan-summary").textContent = currentPlan.id === "pro"
-    ? "동시 3개 · 용량 제한 없음 · 최고 화질"
+    ? "동시 제한 없음 · 용량 제한 없음 · 최고 화질"
     : "동시 1개 · 파일당 1GB";
   const offer = byId("pro-offer");
   offer.hidden = currentPlan.id === "pro";

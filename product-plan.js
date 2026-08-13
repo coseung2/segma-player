@@ -14,7 +14,7 @@ const PLANS = Object.freeze({
   pro: Object.freeze({
     id: "pro",
     label: "Pro",
-    maxConcurrentMediaJobs: 3,
+    maxConcurrentMediaJobs: null,
     maxDownloadBytes: null,
     youtubeEnabled: true,
     youtubeMaxHeight: null,
@@ -24,7 +24,7 @@ const PLANS = Object.freeze({
 });
 
 export const PRO_BENEFITS = Object.freeze([
-  "미디어 3개 동시 다운로드",
+  "미디어 동시 다운로드 제한 없음",
   "파일 크기 제한 없음",
   "지원 미디어의 최고 화질 선택",
 ]);

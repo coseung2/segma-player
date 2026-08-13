@@ -17,7 +17,7 @@ test("free edition exposes enforceable commercial limits", () => {
 
 test("pro edition removes the artificial byte and quality caps", () => {
   const plan = productPlan("pro");
-  assert.equal(plan.maxConcurrentMediaJobs, 3);
+  assert.equal(plan.maxConcurrentMediaJobs, null);
   assert.equal(plan.maxDownloadBytes, null);
   assert.equal(plan.youtubeEnabled, true);
   assert.equal(plan.youtubeMaxHeight, null);

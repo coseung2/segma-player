@@ -215,7 +215,13 @@ export async function waitForYouTubeJob(jobId, server = null, {
           return { ok: false, error: typeof data.error === "string" && data.error ? data.error : "job-failed" };
         }
         if (typeof onProgress === "function" && Number.isFinite(data?.progress)) {
-          onProgress(Math.max(0, Math.min(100, Math.round(data.progress))));
+          onProgress(
+            Math.max(0, Math.min(100, Math.round(data.progress))),
+            {
+              speedMBps: Number.isFinite(data?.speedMBps) ? data.speedMBps : null,
+              etaSeconds: Number.isFinite(data?.etaSeconds) ? data.etaSeconds : null,
+            },
+          );
         }
       }
     } catch {

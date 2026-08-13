@@ -196,10 +196,12 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
     const submitted = await submitYouTubeJob(url, quality, serverUrl);
     if (submitted.ok) {
       const waited = await waitForYouTubeJob(submitted.jobId, serverUrl, {
-        onProgress: (percent) => {
+        onProgress: (percent, { speedMBps = null, etaSeconds = null } = {}) => {
+          const speed = Number.isFinite(speedMBps) ? ` · ${speedMBps.toFixed(1)}MB/s` : "";
+          const eta = Number.isFinite(etaSeconds) && etaSeconds > 0 ? ` · ETA ${etaSeconds}초` : "";
           void patchDownloadJob(jobId, {
             status: "running",
-            statusText: `서버 처리 중… ${percent}%`,
+            statusText: `서버 처리 중… ${percent}%${speed}${eta}`,
           });
         },
       });

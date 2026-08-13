@@ -228,6 +228,18 @@ function runJob(job) {
         const percent = Number(progressMatch[1]);
         if (Number.isFinite(percent)) job.progress = Math.max(0, Math.min(100, percent));
       }
+      const speedMatch = /at\s+([\d.]+)([KMG]iB)\/s/.exec(line);
+      if (speedMatch) {
+        const value = Number(speedMatch[1]);
+        const unit = speedMatch[2];
+        const multiplier = unit === "KiB" ? 1024 : unit === "MiB" ? 1024 ** 2 : 1024 ** 3;
+        if (Number.isFinite(value)) job.speedMBps = (value * multiplier) / (1024 ** 2);
+      }
+      const etaMatch = /ETA\s+(\d+)/.exec(line);
+      if (etaMatch) {
+        const eta = Number(etaMatch[1]);
+        if (Number.isFinite(eta)) job.etaSeconds = eta;
+      }
     }
   });
   child.stderr.on("data", (chunk) => {
@@ -386,6 +398,8 @@ const server = http.createServer(async (req, res) => {
         title: job.title || "",
         error: job.error || "",
         progress: Number.isFinite(job.progress) ? job.progress : null,
+        speedMBps: Number.isFinite(job.speedMBps) ? job.speedMBps : null,
+        etaSeconds: Number.isFinite(job.etaSeconds) ? job.etaSeconds : null,
         localFile: typeof job.localFile === "string" ? job.localFile : null,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,

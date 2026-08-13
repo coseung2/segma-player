@@ -63,7 +63,8 @@ test("failed retryable downloads expose an accessible retry action", async () =>
   assert.match(script, /type:\s*"retry-download-job",\s*jobId:\s*job\.id/);
   assert.match(script, /retry\.disabled = true/);
   assert.match(script, /aria-live", "polite"/);
-  assert.match(css, /\.job-retry-button\s*\{[^}]*min-height:\s*44px/s);
+  assert.match(css, /\.job-retry-button\s*\{[^}]*min-height:\s*30px/s);
+  assert.match(css, /\.job-status-row\s*\{/);
   assert.match(css, /\.job-retry-button:focus-visible/);
 });
 

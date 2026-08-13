@@ -233,8 +233,10 @@ function buildJobCard(job) {
 
   const status = text("p", "job-status", view.message);
   if (view.status === "failed") status.setAttribute("role", "alert");
-  card.append(head, status, progress);
   if (retryableDownloadJob(job)) {
+    const statusRow = document.createElement("div");
+    statusRow.className = "job-status-row";
+    statusRow.append(status);
     const actions = document.createElement("div");
     actions.className = "job-actions";
     const feedback = text("span", "job-retry-feedback", "");
@@ -256,7 +258,10 @@ function buildJobCard(job) {
       }
     });
     actions.append(feedback, retry);
-    card.append(actions);
+    statusRow.append(actions);
+    card.append(head, statusRow, progress);
+  } else {
+    card.append(head, status, progress);
   }
   return card;
 }

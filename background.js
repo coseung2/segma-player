@@ -70,6 +70,35 @@ const DOWNLOAD_JOBS_KEY = "downloadJobs";
 const MEDIA_COMPANION_NATIVE_HOST = "com.aura.media_companion";
 const downloadJobs = new Map();
 const youtubePorts = new Map();
+const youtubeBrowserDownloads = new Map();
+
+chrome.downloads.onChanged.addListener((delta) => {
+  const jobId = youtubeBrowserDownloads.get(delta.id);
+  if (!jobId) return;
+  if (delta.state?.current === "complete") {
+    youtubeBrowserDownloads.delete(delta.id);
+    void patchDownloadJob(jobId, {
+      status: "completed",
+      statusText: "다운로드를 완료했습니다 (브라우저 Downloads 폴더).",
+    });
+  } else if (delta.state?.current === "interrupted") {
+    youtubeBrowserDownloads.delete(delta.id);
+    void patchDownloadJob(jobId, {
+      status: "failed",
+      statusText: "브라우저 다운로드가 중단되었습니다.",
+      error: delta.error?.current || "download-interrupted",
+    });
+  } else if (Number.isFinite(delta.bytesReceived?.current)
+    && Number.isFinite(delta.totalBytes?.current)
+    && delta.totalBytes.current > 0) {
+    const percent = Math.max(0, Math.min(100,
+      Math.round((delta.bytesReceived.current / delta.totalBytes.current) * 100)));
+    void patchDownloadJob(jobId, {
+      status: "running",
+      statusText: `저장 중… ${percent}%`,
+    });
+  }
+});
 let offscreenCreatePromise = null;
 let persistTimer = null;
 const DOOD_MEDIA_HOST_RE = /(?:doodcdn|doimg|d000d|dood\.|playmogo|cloudatacdn)\./i;
@@ -153,15 +182,37 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
       const waited = await waitForYouTubeJob(submitted.jobId, serverUrl);
       if (waited.ok) {
         const fileUrl = await youtubeJobFileUrl(submitted.jobId, serverUrl);
-        const candidate = observeResource({
-          pageTitle: waited.title || "YouTube 영상",
-          pageUrl: url,
-          resourceUrl: fileUrl,
-          contentType: "video/mp4",
+        const title = typeof waited.title === "string" && waited.title.trim() ? waited.title.trim() : "YouTube 영상";
+        const safeTitle = (title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\.+$/, "").trim()
+          || "YouTube 영상").slice(0, 150);
+        let downloadId;
+        try {
+          downloadId = await chrome.downloads.download({
+            url: fileUrl,
+            filename: `${safeTitle}.mp4`,
+            conflictAction: "uniquify",
+            saveAs: false,
+          });
+        } catch (error) {
+          throw new Error(`브라우저 다운로드로 저장하지 못했습니다 (${error?.message || "download-failed"}).`);
+        }
+        await downloadJobsReady;
+        const jobId = crypto.randomUUID();
+        downloadJobs.set(jobId, createDownloadJob({
+          id: jobId,
+          title,
+          mediaType: "YOUTUBE",
+          source: "youtube",
+          folderName: "Downloads",
+          retryPayload: { kind: "youtube", url, quality },
+        }));
+        await persistDownloadJobs();
+        await patchDownloadJob(jobId, {
+          status: "running",
+          statusText: "브라우저 다운로드를 시작했습니다.",
         });
-        if (!candidate) throw new Error("unsupported-media");
-        const result = await beginCandidateDownload(candidate);
-        return { mode: "youtube-server", jobId: result.jobId };
+        youtubeBrowserDownloads.set(downloadId, jobId);
+        return { mode: "youtube-browser", jobId };
       }
       const detail = typeof waited.error === "string" && waited.error ? waited.error : "job-failed";
       throw new Error(`Aura YouTube 서버 처리 실패 (${detail.slice(0, 300)})`);

@@ -21,7 +21,7 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
 .upgrade-link { padding: 6px 8px; border-radius: 7px; background: #e9f1ff; color: #203c6b; text-decoration: none; }
 .upgrade-link:focus-visible { outline: 2px solid #73a5ff; outline-offset: 2px; }
 .upgrade-unavailable { color: #74849a; }
-.tab-list { display: grid; width: 100%; min-width: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 10px 0 12px; padding: 4px; border-radius: 11px; background: #171e29; }
+.tab-list { display: grid; width: 100%; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; margin: 10px 0 12px; padding: 4px; border-radius: 11px; background: #171e29; }
 .tab { min-height: 34px; border: 0; border-radius: 8px; background: transparent; color: #8998ad; font-size: 11px; font-weight: 700; }
 .tab.active { background: #2a3e5c; color: #e8f1ff; box-shadow: 0 1px 4px #0005; }
 .tab:focus-visible { outline: 2px solid #73a5ff; outline-offset: 1px; }
@@ -73,10 +73,11 @@ option:disabled { color: #68768a; }
 .job-progress.indeterminate .job-progress-fill { width: 34%; background: #5b91ed; animation: job-progress-slide 1.15s ease-in-out infinite; }
 .job-progress.failed { background: repeating-linear-gradient(135deg, #542c31 0 6px, #37262b 6px 12px); }
 .job-progress.status-completed .job-progress-fill { background: #78d99a; }
-.job-status { margin: 6px 0 0; overflow-wrap: anywhere; color: #8f9eb2; font-size: 10px; line-height: 1.4; user-select: text; }
-.job-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-top: 8px; }
+.job-status-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.job-status { margin: 0; overflow-wrap: anywhere; color: #8f9eb2; font-size: 10px; line-height: 1.4; user-select: text; }
+.job-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .job-retry-feedback { overflow-wrap: anywhere; color: #ffaaa5; font-size: 9px; line-height: 1.35; }
-.job-retry-button { min-width: 78px; min-height: 44px; padding: 0 12px; border: 1px solid #4a6281; border-radius: 9px; background: #202c3e; color: #e3ecf8; font-size: 10px; font-weight: 750; }
+.job-retry-button { min-width: 56px; min-height: 30px; padding: 0 10px; border: 1px solid #4a6281; border-radius: 9px; background: #202c3e; color: #e3ecf8; font-size: 10px; font-weight: 750; }
 .job-retry-button:hover, .job-retry-button:focus-visible { border-color: #73a5ff; color: #fff; }
 .job-retry-button:focus-visible { outline: 2px solid #73a5ff; outline-offset: 2px; }
 @keyframes job-progress-slide { from { transform: translateX(-110%); } to { transform: translateX(300%); } }

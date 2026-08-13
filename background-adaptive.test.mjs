@@ -86,6 +86,10 @@ globalThis.chrome = {
     onActivated: { addListener: () => {} },
   },
   windows: { onFocusChanged: { addListener: () => {} }, WINDOW_ID_NONE: -1 },
+  downloads: {
+    download: async () => 1,
+    onChanged: { addListener: () => {} },
+  },
   contextMenus: {
     removeAll: (callback) => callback?.(),
     create: () => {},
@@ -524,11 +528,11 @@ test("youtube downloads route through the remote server when configured", async 
   );
   assert.equal(result.keepAlive, true);
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.mode, "youtube-server");
+  assert.equal(result.response.mode, "youtube-browser");
   await delay(400);
-  const snapshot = lastCandidatesSnapshot || [];
-  assert.ok(snapshot.some((candidate) => candidate.resourceUrl
-    .startsWith("https://server.test/api/jobs/job-1/file")));
+  const stored = sessionStorage.get("downloadJobs") || [];
+  assert.ok(Array.isArray(stored) && stored.some((job) => job.source === "youtube"
+    && job.status === "running" && job.title === "Server Video"));
 });
 
 test("youtube downloads fall back to companion when the server is unreachable", async () => {

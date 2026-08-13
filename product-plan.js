@@ -25,7 +25,7 @@ const PLANS = Object.freeze({
 
 export const PRO_BENEFITS = Object.freeze([
   "미디어 3개 동시 다운로드",
-  "인위적인 파일 크기 제한 없음",
+  "파일 크기 제한 없음",
   "지원 미디어의 최고 화질 선택",
 ]);
 

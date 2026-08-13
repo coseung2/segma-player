@@ -63,7 +63,7 @@ export function createSpeedGate(bytesPerSecond) {
 export function assertDownloadWithinPlan(totalBytes, nextBytes, plan = activePlan) {
   const maximum = plan?.maxDownloadBytes;
   if (maximum !== null && Number.isFinite(maximum) && totalBytes + nextBytes > maximum) {
-    const error = new Error("일반 버전은 파일당 최대 1GB까지 다운로드할 수 있습니다. Pro에서는 인위적인 용량 제한이 없습니다.");
+    const error = new Error("일반 버전은 파일당 최대 1GB까지 다운로드할 수 있습니다. Pro에서는 용량 제한이 없습니다.");
     error.code = "pro-file-size-required";
     throw error;
   }

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>라이선스 관리 — Aura Media</title>
+    <style>
+      :root { color-scheme: dark; font-family: "Segoe UI", "Malgun Gothic", sans-serif; background: #0b0e14; color: #f4f7fb; }
+      body { width: min(720px, calc(100vw - 32px)); margin: 32px auto; }
+      h1 { font-size: 20px; }
+      .card { margin-top: 16px; padding: 18px; border: 1px solid #263149; border-radius: 12px; background: #10161f; }
+      input { width: 100%; box-sizing: border-box; min-height: 38px; padding: 8px 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
+      button { min-height: 36px; padding: 0 16px; border: 0; border-radius: 8px; cursor: pointer; font-weight: 700; }
+      .primary { background: #4d84e8; color: #fff; }
+      .ghost { background: #202c3d; color: #dce6f4; }
+      .row { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #1d2736; }
+      .muted { color: #8f9db0; font-size: 12px; }
+      .pill { padding: 2px 10px; border-radius: 999px; font-size: 12px; }
+      .pending { background: #4a3b12; color: #f0c96a; }
+      .approved { background: #123a26; color: #6fe3a2; }
+      .status { min-height: 16px; margin: 10px 0 0; color: #8f9db0; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>Aura Media 라이선스 관리</h1>
+    <p class="muted">개발자 전용 페이지입니다. 관리 토큰을 입력해야 사용할 수 있습니다.</p>
+    <div class="card">
+      <input id="token" type="password" placeholder="관리 토큰" autocomplete="off" />
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <div style="display:flex; gap:10px; margin-top:10px;">
+        <button id="connect" class="primary" type="button">연결</button>
+        <button id="issue" class="ghost" type="button" disabled>새 키 발급</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2 style="margin:0 0 8px; font-size:15px;">발급된 키</h2>
+      <div id="keys"></div>
+    </div>
+    <script>
+      const tokenInput = document.querySelector("#token");
+      const connectButton = document.querySelector("#connect");
+      const issueButton = document.querySelector("#issue");
+      const statusElement = document.querySelector("#status");
+      const keysElement = document.querySelector("#keys");
+
+      let token = sessionStorage.getItem("aura-admin-token") || "";
+      if (token) tokenInput.value = token;
+
+      async function api(path, options = {}) {
+        const response = await fetch(path, {
+          ...options,
+          headers: {
+            ...(options.headers || {}),
+            authorization: `Bearer ${token}`,
+            ...(options.body ? { "content-type": "application/json" } : {}),
+          },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+        return data;
+      }
+
+      function keyRow(entry) {
+        const row = document.createElement("div");
+        row.className = "row";
+        const left = document.createElement("div");
+        const code = document.createElement("div");
+        code.textContent = entry.key;
+        const meta = document.createElement("div");
+        meta.className = "muted";
+        meta.textContent = `발급 ${entry.createdAt || "-"}${entry.approvedAt ? ` · 승인 ${entry.approvedAt}` : ""}`;
+        left.append(code, meta);
+        row.append(left);
+        const pill = document.createElement("span");
+        pill.className = `pill ${entry.status === "approved" ? "approved" : "pending"}`;
+        pill.textContent = entry.status === "approved" ? "승인됨" : "대기 중";
+        row.append(pill);
+        if (entry.status !== "approved") {
+          const approve = document.createElement("button");
+          approve.className = "primary";
+          approve.type = "button";
+          approve.textContent = "승인";
+          approve.addEventListener("click", async () => {
+            try {
+              await api("/api/admin/approve", {
+                method: "POST",
+                body: JSON.stringify({ key: entry.key }),
+              });
+              await loadKeys();
+            } catch (error) {
+              statusElement.textContent = `승인 실패: ${error.message}`;
+            }
+          });
+          row.append(approve);
+        }
+        return row;
+      }
+
+      async function loadKeys() {
+        const data = await api("/api/admin/keys");
+        keysElement.replaceChildren();
+        if (!data.keys?.length) {
+          const empty = document.createElement("p");
+          empty.className = "muted";
+          empty.textContent = "아직 발급된 키가 없습니다.";
+          keysElement.append(empty);
+          return;
+        }
+        for (const entry of data.keys) keysElement.append(keyRow(entry));
+      }
+
+      connectButton.addEventListener("click", async () => {
+        token = tokenInput.value.trim();
+        sessionStorage.setItem("aura-admin-token", token);
+        statusElement.textContent = "확인 중…";
+        try {
+          await loadKeys();
+          issueButton.disabled = false;
+          statusElement.textContent = "연결됨.";
+        } catch (error) {
+          issueButton.disabled = true;
+          statusElement.textContent = `연결 실패: ${error.message}`;
+        }
+      });
+
+      issueButton.addEventListener("click", async () => {
+        try {
+          const data = await api("/api/admin/issue", { method: "POST", body: "{}" });
+          await navigator.clipboard?.writeText(data.key).catch(() => {});
+          statusElement.textContent = `발급 완료: ${data.key} (클립보드에 복사됨)`;
+          await loadKeys();
+        } catch (error) {
+          statusElement.textContent = `발급 실패: ${error.message}`;
+        }
+      });
+
+      if (token) connectButton.click();
+    </script>
+  </body>
+</html>

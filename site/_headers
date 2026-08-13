@@ -6,3 +6,7 @@
 
 /assets/*
   Cache-Control: public, max-age=3600, must-revalidate
+
+/downloads/*
+  Cache-Control: public, max-age=3600
+  Content-Disposition: attachment

@@ -250,19 +250,42 @@ function streamFile(job, res) {
       return;
     }
     const name = path.basename(job.file);
-    res.writeHead(200, {
+    const headers = {
       "Content-Type": "video/mp4",
-      "Content-Length": stat.size,
       "Content-Disposition": `attachment; filename="${name}"`,
       "Cache-Control": "no-store",
-    });
-    const stream = fs.createReadStream(job.file);
+      "Accept-Ranges": "bytes",
+    };
+    let start = 0;
+    let end = stat.size - 1;
+    let status = 200;
+    const range = res.req?.headers?.range;
+    if (typeof range === "string" && range.trim()) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+      if (match && (match[1] !== "" || match[2] !== "")) {
+        const requestedStart = match[1] === "" ? null : Number(match[1]);
+        const requestedEnd = match[2] === "" ? null : Number(match[2]);
+        if ((requestedStart === null || Number.isFinite(requestedStart))
+          && (requestedEnd === null || Number.isFinite(requestedEnd))) {
+          start = requestedStart === null ? 0 : requestedStart;
+          end = requestedEnd === null ? stat.size - 1 : Math.min(requestedEnd, stat.size - 1);
+          if (start <= end && start < stat.size) {
+            status = 206;
+            headers["Content-Range"] = `bytes ${start}-${end}/${stat.size}`;
+            headers["Content-Length"] = end - start + 1;
+          }
+        }
+      }
+    }
+    if (status === 200) headers["Content-Length"] = stat.size;
+    res.writeHead(status, headers);
+    const stream = fs.createReadStream(job.file, { start, end });
     stream.pipe(res);
-    const done = () => cleanupJob(job);
-    stream.on("end", done);
-    stream.on("error", done);
-    res.on("close", () => {
-      if (!res.writableEnded) done();
+    // Remove the job only after a full (non-range) transfer was flushed.
+    // Range probes (bytes=0-0) must leave the file for the real download;
+    // aborted or partial transfers are cleaned up by the TTL sweep.
+    res.on("finish", () => {
+      if (status === 200) cleanupJob(job);
     });
   });
 }

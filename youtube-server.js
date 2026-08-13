@@ -127,17 +127,17 @@ async function fetchYouTubeToken(force = false) {
   }
 }
 
-async function youTubeFetch(url, options = {}) {
+async function youTubeFetch(url, options = {}, signal = null) {
   let token = await fetchYouTubeToken();
   if (!token) return { response: null, authError: true };
   const headers = new Headers(options.headers || {});
   headers.set("authorization", `Bearer ${token}`);
-  let response = await fetch(url, { ...options, headers, cache: "no-store" });
+  let response = await fetch(url, { ...options, headers, cache: "no-store", signal });
   if (response.status === 401) {
     token = await fetchYouTubeToken(true);
     if (token) {
       headers.set("authorization", `Bearer ${token}`);
-      response = await fetch(url, { ...options, headers, cache: "no-store" });
+      response = await fetch(url, { ...options, headers, cache: "no-store", signal });
     }
   }
   return { response, authError: response.status === 401 };
@@ -150,11 +150,14 @@ export async function submitYouTubeJob(url, quality = "best", server = null) {
     url,
     quality: String(quality || "best"),
   };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  timer?.unref?.();
   const { response, authError } = await youTubeFetch(`${base}/api/youtube`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
-  });
+  }, controller.signal).finally(() => clearTimeout(timer));
   if (authError || !response) return { ok: false, error: "server-unauthorized" };
   try {
     const data = await response.json().catch(() => ({}));
@@ -187,9 +190,16 @@ export async function waitForYouTubeJob(jobId, server = null, {
   if (!base) return { ok: false, error: "server-not-configured" };
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const { response, authError } = await youTubeFetch(`${base}/api/jobs/${encodeURIComponent(jobId)}`);
-    if (authError) return { ok: false, error: "server-unauthorized" };
     try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      timer?.unref?.();
+      const { response, authError } = await youTubeFetch(
+        `${base}/api/jobs/${encodeURIComponent(jobId)}`,
+        {},
+        controller.signal,
+      ).finally(() => clearTimeout(timer));
+      if (authError) return { ok: false, error: "server-unauthorized" };
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.status) {
         if (data.status === "ready") return { ok: true, jobId, title: data.title || "" };
@@ -198,7 +208,7 @@ export async function waitForYouTubeJob(jobId, server = null, {
         }
       }
     } catch {
-      // Transient network error; keep polling.
+      // Transient network error or poll timeout; keep polling.
     }
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }

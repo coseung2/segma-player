@@ -1,0 +1,319 @@
+// Aura YouTube proxy service — yt-dlp + ffmpeg on the user's OCI VM.
+// v1: device-id monthly quota, optional Pro shared secret, concurrency cap,
+// temp-file cleanup after delivery. Bind 127.0.0.1 only.
+const http = require("http");
+const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const PORT = Number(process.env.AURA_YT_PORT || 8788);
+const PROFILE = process.env.USERPROFILE || "C:\\Users\\coseung2";
+const YT_DLP = process.env.AURA_YT_DLP || path.join(PROFILE, "AppData", "Local", "AuraDownloader", "youtube", "tools", "yt-dlp.exe");
+const FFMPEG_LOCATION = process.env.AURA_YT_FFMPEG || path.join(PROFILE, "AppData", "Local", "AuraDownloader", "youtube", "tools", "ffmpeg");
+const WORK_DIR = process.env.AURA_YT_WORK || path.join(PROFILE, "AppData", "Local", "Aura YouTube", "work");
+const QUOTA_FILE = process.env.AURA_YT_QUOTA || path.join(PROFILE, "AppData", "Local", "Aura YouTube", "quota.json");
+const COOKIES_FILE = process.env.AURA_YT_COOKIES || path.join(PROFILE, "AppData", "Local", "Aura YouTube", "cookies.txt");
+const PRO_SECRET = process.env.AURA_YT_PRO_SECRET || "";
+const MAX_CONCURRENT = Number(process.env.AURA_YT_MAX_CONCURRENT || 2);
+const FREE_MONTHLY_LIMIT = Number(process.env.AURA_YT_FREE_LIMIT || 10);
+const JOB_TTL_MS = 60 * 60 * 1000;
+const ALLOWED_QUALITIES = new Set(["best", "2160", "1440", "1080", "720", "480"]);
+
+fs.mkdirSync(WORK_DIR, { recursive: true });
+
+const jobs = new Map();
+const queue = [];
+let active = 0;
+
+function now() {
+  return new Date().toISOString();
+}
+
+function monthKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function loadQuota() {
+  try {
+    return JSON.parse(fs.readFileSync(QUOTA_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveQuota(quota) {
+  fs.writeFileSync(QUOTA_FILE, JSON.stringify(quota));
+}
+
+function quotaStatus(deviceId, licenseKey) {
+  if (PRO_SECRET && licenseKey && licenseKey === PRO_SECRET) {
+    return { ok: true, pro: true, used: 0, limit: null };
+  }
+  const quota = loadQuota();
+  const key = `${deviceId}:${monthKey()}`;
+  const used = quota[key] || 0;
+  return { ok: used < FREE_MONTHLY_LIMIT, pro: false, used, limit: FREE_MONTHLY_LIMIT };
+}
+
+function reserveQuota(deviceId) {
+  const quota = loadQuota();
+  const key = `${deviceId}:${monthKey()}`;
+  quota[key] = (quota[key] || 0) + 1;
+  saveQuota(quota);
+}
+
+function refundQuota(deviceId) {
+  const quota = loadQuota();
+  const key = `${deviceId}:${monthKey()}`;
+  if ((quota[key] || 0) > 0) {
+    quota[key] -= 1;
+    saveQuota(quota);
+  }
+}
+
+function qualityFormat(quality) {
+  if (quality === "best") return "b/bv*+ba";
+  const height = Number(quality);
+  if (Number.isFinite(height) && height > 0) {
+    return `b[height<=${height}]/bv*[height<=${height}]+ba/b[height<=${height}]`;
+  }
+  return "b/bv*+ba";
+}
+
+function canonicalYouTubeUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.hostname === "youtu.be"
+      || url.hostname === "youtube.com"
+      || url.hostname.endsWith(".youtube.com")) return url.href;
+  } catch {
+    // invalid URL
+  }
+  return null;
+}
+
+function finishJob(job, filePath, error) {
+  active = Math.max(0, active - 1);
+  job.status = error ? "failed" : "ready";
+  job.file = filePath;
+  job.error = error || "";
+  job.updatedAt = now();
+  if (error) refundQuota(job.deviceId);
+  drain();
+}
+
+function drain() {
+  while (active < MAX_CONCURRENT && queue.length) {
+    const job = queue.shift();
+    runJob(job);
+  }
+}
+
+function runJob(job) {
+  active += 1;
+  job.status = "processing";
+  job.updatedAt = now();
+  const outputBase = path.join(WORK_DIR, job.id);
+  const args = [
+    "--no-playlist",
+    "--no-warnings",
+    "--newline",
+    "--js-runtimes", `node:${process.execPath}`,
+    "--merge-output-format", "mp4",
+    "--print", "after_move:%(title)s",
+    "-f", qualityFormat(job.quality),
+    "-o", `${outputBase}.%(ext)s`,
+    job.url,
+  ];
+  if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
+    args.splice(args.length - 1, 0, "--cookies", COOKIES_FILE);
+  }
+  if (FFMPEG_LOCATION && fs.existsSync(FFMPEG_LOCATION)) {
+    args.splice(args.length - 1, 0, "--ffmpeg-location", FFMPEG_LOCATION);
+  }
+  const child = spawn(YT_DLP, args, { stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    const line = String(chunk);
+    if (line.startsWith("after_move:")) job.title = line.slice("after_move:".length).trim().slice(0, 200);
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += String(chunk);
+    if (stderr.length > 4000) stderr = stderr.slice(-4000);
+  });
+  child.on("error", (err) => finishJob(job, null, err.message));
+  child.on("close", (code) => {
+    if (code !== 0) {
+      finishJob(job, null, stderr.trim() || `yt-dlp exit ${code}`);
+      return;
+    }
+    let filePath = null;
+    try {
+      const file = fs.readdirSync(WORK_DIR).find((name) => name.startsWith(`${job.id}.`));
+      if (file) filePath = path.join(WORK_DIR, file);
+    } catch {
+      // cleanup sweep
+    }
+    if (!filePath) {
+      finishJob(job, null, "output-file-missing");
+      return;
+    }
+    finishJob(job, filePath, null);
+  });
+}
+
+function cleanupJob(job) {
+  if (job.file) {
+    try {
+      fs.unlinkSync(job.file);
+    } catch {
+      // already gone
+    }
+    job.file = null;
+  }
+  jobs.delete(job.id);
+}
+
+function streamFile(job, res) {
+  fs.stat(job.file, (err, stat) => {
+    if (err || !stat.isFile()) {
+      cleanupJob(job);
+      json(res, 404, { error: "file-gone" });
+      return;
+    }
+    const name = path.basename(job.file);
+    res.writeHead(200, {
+      "Content-Type": "video/mp4",
+      "Content-Length": stat.size,
+      "Content-Disposition": `attachment; filename="${name}"`,
+      "Cache-Control": "no-store",
+    });
+    const stream = fs.createReadStream(job.file);
+    stream.pipe(res);
+    const done = () => cleanupJob(job);
+    stream.on("end", done);
+    stream.on("error", done);
+    res.on("close", () => {
+      if (!res.writableEnded) done();
+    });
+  });
+}
+
+function json(res, status, body) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(body));
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => {
+      data += chunk;
+      if (data.length > 64 * 1024) {
+        reject(new Error("payload-too-large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, "http://127.0.0.1");
+  const route = url.pathname;
+  try {
+    if (req.method === "GET" && route === "/healthz") {
+      json(res, 200, { ok: true, service: "aura-youtube", active, queued: queue.length });
+      return;
+    }
+    if (req.method === "GET" && /^\/api\/jobs\/[^/]+\/file$/.test(route)) {
+      const job = jobs.get(route.split("/")[3]);
+      if (!job || job.status !== "ready" || !job.file) {
+        json(res, 404, { error: "job-not-ready" });
+        return;
+      }
+      streamFile(job, res);
+      return;
+    }
+    if (req.method === "GET" && /^\/api\/jobs\/[^/]+$/.test(route)) {
+      const job = jobs.get(route.split("/")[3]);
+      if (!job) {
+        json(res, 404, { error: "job-not-found" });
+        return;
+      }
+      json(res, 200, {
+        id: job.id,
+        status: job.status,
+        title: job.title || "",
+        error: job.error || "",
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+      });
+      return;
+    }
+    if (req.method === "POST" && route === "/api/youtube") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const { url: mediaUrl, quality = "best", deviceId, licenseKey = "" } = body;
+      if (typeof deviceId !== "string" || !deviceId || deviceId.length > 64) {
+        json(res, 400, { error: "invalid-device-id" });
+        return;
+      }
+      const canonical = canonicalYouTubeUrl(mediaUrl);
+      if (!canonical) {
+        json(res, 400, { error: "invalid-youtube-url" });
+        return;
+      }
+      if (!ALLOWED_QUALITIES.has(String(quality))) {
+        json(res, 400, { error: "invalid-quality" });
+        return;
+      }
+      const status = quotaStatus(deviceId, typeof licenseKey === "string" ? licenseKey : "");
+      if (!status.ok) {
+        json(res, 429, { error: "monthly-limit-reached", used: status.used, limit: status.limit });
+        return;
+      }
+      reserveQuota(deviceId);
+      const id = crypto.randomUUID();
+      const job = {
+        id,
+        status: "queued",
+        url: canonical,
+        quality: String(quality),
+        deviceId,
+        title: "",
+        createdAt: now(),
+        updatedAt: now(),
+        file: null,
+        error: "",
+      };
+      jobs.set(id, job);
+      queue.push(job);
+      drain();
+      json(res, 202, {
+        jobId: id,
+        status: "queued",
+        quotaUsed: status.used + 1,
+        quotaLimit: status.limit,
+        pro: status.pro,
+      });
+      return;
+    }
+    json(res, 404, { error: "not-found" });
+  } catch (err) {
+    json(res, 400, { error: err && err.message ? err.message : "bad-request" });
+  }
+});
+
+setInterval(() => {
+  const cutoff = Date.now() - JOB_TTL_MS;
+  for (const [id, job] of jobs) {
+    if (job.status !== "processing" && new Date(job.updatedAt).getTime() < cutoff) cleanupJob(job);
+  }
+}, 5 * 60 * 1000).unref();
+
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`aura-youtube listening on 127.0.0.1:${PORT}`);
+});

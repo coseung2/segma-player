@@ -141,7 +141,7 @@ function refundQuota(deviceId) {
 }
 
 function qualityFormat(quality) {
-  if (quality === "best") return "b/bv*+ba";
+  if (quality === "best") return "bv*+ba/b";
   const height = Number(quality);
   if (Number.isFinite(height) && height > 0) {
     return `b[height<=${height}]/bv*[height<=${height}]+ba/b[height<=${height}]`;

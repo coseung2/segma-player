@@ -199,3 +199,37 @@ test("youtubeJobFileUrl appends the capability token", async () => {
   const fileUrl = await mod.youtubeJobFileUrl("job-1", "http://server.test:8788");
   assert.equal(fileUrl, "http://server.test:8788/api/jobs/job-1/file?t=tok-1");
 });
+
+test("listYouTubeQualities fetches and caches available heights", async () => {
+  const env = serverEnvironment();
+  let formatsCalls = 0;
+  env.setFetch((url, options) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") return jsonResponse(TOKEN_BODY);
+    assert.equal(url, "http://server.test:8788/api/youtube-formats");
+    formatsCalls += 1;
+    const body = JSON.parse(options.body);
+    assert.equal(body.url, "https://youtube.com/watch?v=abc");
+    return jsonResponse({ ok: true, qualities: [2160, 1440, 1080, 720, 480] });
+  });
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+
+  const first = await mod.listYouTubeQualities("https://youtube.com/watch?v=abc", "http://server.test:8788");
+  assert.deepEqual(first, { ok: true, qualities: [2160, 1440, 1080, 720, 480] });
+  const second = await mod.listYouTubeQualities("https://youtube.com/watch?v=abc", "http://server.test:8788");
+  assert.equal(second.cached, true);
+  assert.deepEqual(second.qualities, [2160, 1440, 1080, 720, 480]);
+  assert.equal(formatsCalls, 1);
+});
+
+test("listYouTubeQualities falls back when the server cannot list formats", async () => {
+  const env = serverEnvironment();
+  env.setFetch((url) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") return jsonResponse(TOKEN_BODY);
+    return jsonResponse({ ok: false, error: "formats-unavailable" }, 502);
+  });
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+
+  const result = await mod.listYouTubeQualities("https://youtu.be/abc", "http://server.test:8788");
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "formats-unavailable");
+});

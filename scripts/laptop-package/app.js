@@ -41,6 +41,9 @@ fs.mkdirSync(WORK_DIR, { recursive: true });
 
 const jobs = new Map();
 const queue = [];
+const formatsCache = new Map();
+const FORMATS_TTL_MS = 10 * 60 * 1000;
+const FORMATS_CACHE_MAX = 200;
 let active = 0;
 let dailyKey = "";
 let dailyUsed = 0;
@@ -159,6 +162,64 @@ function canonicalYouTubeUrl(value) {
     // invalid URL
   }
   return null;
+}
+
+function youtubeVideoId(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.hostname === "youtu.be") return url.pathname.slice(1).split("/")[0] || null;
+    return url.searchParams.get("v");
+  } catch {
+    return null;
+  }
+}
+
+function runFormatsProbe(url) {
+  return new Promise((resolve) => {
+    const args = [
+      "--no-playlist",
+      "--no-warnings",
+      "--skip-download",
+      "--dump-single-json",
+      "--js-runtimes", `node:${process.execPath}`,
+    ];
+    if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) args.push("--cookies", COOKIES_FILE);
+    args.push(url);
+    const child = spawn(YT_DLP, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    const timer = setTimeout(() => child.kill(), 25_000);
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if (stdout.length > 4_000_000) child.kill();
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    child.on("close", () => {
+      clearTimeout(timer);
+      try {
+        const data = JSON.parse(stdout);
+        const heights = new Set();
+        for (const format of data?.formats || []) {
+          const height = Number(format?.height);
+          if (Number.isFinite(height) && height > 0) heights.add(height);
+        }
+        const qualities = [...heights].sort((a, b) => b - a);
+        resolve(qualities.length ? qualities : null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+function rememberFormats(videoId, qualities) {
+  if (formatsCache.size >= FORMATS_CACHE_MAX) {
+    const oldest = [...formatsCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) formatsCache.delete(oldest[0]);
+  }
+  formatsCache.set(videoId, { qualities, at: Date.now() });
 }
 
 function finishJob(job, filePath, error) {
@@ -480,6 +541,42 @@ const server = http.createServer(async (req, res) => {
         pro: statusForResponse.pro,
       });
       logRequest(req, 202, `job=${id} device=${deviceId} plan=${payload.plan}`);
+      return;
+    }
+    if (req.method === "POST" && route === "/api/youtube-formats") {
+      const payload = await authenticate(req);
+      if (!payload) {
+        json(res, 401, { error: "unauthorized" });
+        logRequest(req, 401);
+        return;
+      }
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const canonical = canonicalYouTubeUrl(body?.url);
+      if (!canonical) {
+        json(res, 400, { error: "invalid-youtube-url" });
+        logRequest(req, 400, `device=${payload.deviceId}`);
+        return;
+      }
+      const videoId = youtubeVideoId(canonical);
+      if (!videoId) {
+        json(res, 400, { error: "invalid-youtube-url" });
+        logRequest(req, 400, `device=${payload.deviceId}`);
+        return;
+      }
+      const cached = formatsCache.get(videoId);
+      if (cached && Date.now() - cached.at < FORMATS_TTL_MS) {
+        json(res, 200, { ok: true, qualities: cached.qualities, cached: true });
+        return;
+      }
+      const qualities = await runFormatsProbe(canonical);
+      if (!qualities) {
+        json(res, 502, { error: "formats-unavailable" });
+        logRequest(req, 502, `device=${payload.deviceId} video=${videoId}`);
+        return;
+      }
+      rememberFormats(videoId, qualities);
+      json(res, 200, { ok: true, qualities });
+      logRequest(req, 200, `device=${payload.deviceId} video=${videoId} q=${qualities.join(",")}`);
       return;
     }
     json(res, 404, { error: "not-found" });

@@ -3,6 +3,7 @@ import { isDownloadableMediaType } from "./candidate.js";
 import { downloadJobView, retryableDownloadJob } from "./download-job-view.js";
 import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
 import { PRO_BENEFITS, productPlan, youtubeQualityAllowed } from "./product-plan.js";
+import { listYouTubeQualities } from "./youtube-server.js";
 
 const byId = (id) => document.getElementById(id);
 const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -14,6 +15,49 @@ const mainOnlyElement = byId("main-only");
 const jobContainers = [byId("detect-jobs"), byId("link-jobs")].filter(Boolean);
 let lastCandidates = [];
 let currentPlan = productPlan(PRODUCT_EDITION);
+let qualityCheckTimer = null;
+let lastQualityCheckUrl = "";
+
+const STATIC_QUALITIES = ["best", "2160", "1440", "1080", "720", "480"];
+
+function qualityLabel(value) {
+  if (value === "best") return "최고 화질 · 자동 · Pro";
+  const height = Number(value);
+  return Number.isFinite(height) && height > 1080 ? `최대 ${height}p · Pro` : `최대 ${height}p`;
+}
+
+function rebuildQualityOptions(values) {
+  const select = byId("youtube-quality");
+  const current = select.value;
+  select.replaceChildren();
+  for (const value of values) {
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = qualityLabel(value);
+    select.append(option);
+  }
+  if ([...select.options].some((option) => option.value === current)) select.value = current;
+}
+
+function applyQualityGating() {
+  const quality = byId("youtube-quality");
+  for (const option of quality.options) {
+    option.disabled = !youtubeQualityAllowed(currentPlan, option.value);
+  }
+  if (!youtubeQualityAllowed(currentPlan, quality.value)) {
+    quality.value = String(currentPlan.youtubeMaxHeight);
+  }
+}
+
+async function refreshAvailableQualities(url) {
+  const result = await listYouTubeQualities(url);
+  if (result.ok && Array.isArray(result.qualities) && result.qualities.length) {
+    rebuildQualityOptions(["best", ...result.qualities]);
+  } else {
+    rebuildQualityOptions(STATIC_QUALITIES);
+  }
+  applyQualityGating();
+}
 
 function renderPlan() {
   byId("plan-badge").textContent = currentPlan.label;
@@ -22,23 +66,18 @@ function renderPlan() {
     : "동시 1개 · 파일당 1GB";
   const offer = byId("pro-offer");
   offer.hidden = currentPlan.id === "pro";
-  if (offer.hidden) return;
-  byId("pro-benefits").textContent = `Pro · ${PRO_BENEFITS.join(" · ")}`;
-  const upgrade = byId("upgrade-link");
-  if (/^https:\/\//i.test(UPGRADE_URL)) {
-    upgrade.href = UPGRADE_URL;
-    upgrade.hidden = false;
-  } else {
-    upgrade.hidden = true;
+  if (!offer.hidden) {
+    byId("pro-benefits").textContent = `Pro · ${PRO_BENEFITS.join(" · ")}`;
+    const upgrade = byId("upgrade-link");
+    if (/^https:\/\//i.test(UPGRADE_URL)) {
+      upgrade.href = UPGRADE_URL;
+      upgrade.hidden = false;
+    } else {
+      upgrade.hidden = true;
+    }
+    byId("license-entry").hidden = false;
   }
-  byId("license-entry").hidden = false;
-  const quality = byId("youtube-quality");
-  for (const option of quality.options) {
-    option.disabled = !youtubeQualityAllowed(currentPlan, option.value);
-  }
-  if (!youtubeQualityAllowed(currentPlan, quality.value)) {
-    quality.value = String(currentPlan.youtubeMaxHeight);
-  }
+  applyQualityGating();
 }
 
 async function refreshPlan() {
@@ -279,7 +318,18 @@ function isYouTubeUrl(value) {
 }
 
 function updateLinkPanel() {
-  byId("youtube-quality-row").hidden = !isYouTubeUrl(byId("direct-url").value);
+  const value = byId("direct-url").value;
+  byId("youtube-quality-row").hidden = !isYouTubeUrl(value);
+  if (qualityCheckTimer) {
+    clearTimeout(qualityCheckTimer);
+    qualityCheckTimer = null;
+  }
+  if (isYouTubeUrl(value) && value.trim() !== lastQualityCheckUrl) {
+    qualityCheckTimer = setTimeout(() => {
+      lastQualityCheckUrl = value.trim();
+      void refreshAvailableQualities(value.trim());
+    }, 700);
+  }
 }
 
 async function directDownload() {

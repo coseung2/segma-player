@@ -7,8 +7,10 @@ export const YOUTUBE_SERVER_STORAGE_KEY = "auraYouTubeServer";
 export const DEFAULT_YOUTUBE_SERVER_URL = "https://desktop-8n966j0.tail4cbe57.ts.net";
 const DEVICE_ID_STORAGE_KEY = "auraYouTubeDeviceId";
 const TOKEN_STORAGE_KEY = "auraYouTubeServerToken";
+const QUALITIES_STORAGE_KEY = "auraYouTubeQualities";
 const TOKEN_API_URL = LICENSE_API_URL.replace("/api/license", "/api/youtube-token");
 const TOKEN_FETCH_TIMEOUT_MS = 12_000;
+const QUALITIES_TTL_MS = 10 * 60 * 1000;
 const JOB_POLL_MS = 2_000;
 const JOB_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -237,4 +239,54 @@ export async function youtubeJobFileUrl(jobId, server = null) {
   const token = await fetchYouTubeToken();
   const fileUrl = `${base}/api/jobs/${encodeURIComponent(jobId)}/file`;
   return token ? `${fileUrl}?t=${encodeURIComponent(token)}` : fileUrl;
+}
+
+function youtubeVideoId(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.hostname === "youtu.be") return url.pathname.slice(1).split("/")[0] || null;
+    return url.searchParams.get("v");
+  } catch {
+    return null;
+  }
+}
+
+export async function listYouTubeQualities(url, server = null) {
+  const base = server || (await getYouTubeServerUrl());
+  if (!base) return { ok: false, error: "server-not-configured" };
+  const videoId = youtubeVideoId(url);
+  if (!videoId) return { ok: false, error: "invalid-youtube-url" };
+  try {
+    const stored = await chrome.storage.session.get(QUALITIES_STORAGE_KEY);
+    const cache = stored?.[QUALITIES_STORAGE_KEY] || {};
+    const entry = cache[videoId];
+    if (entry && Array.isArray(entry.qualities) && Number(entry.at) > Date.now() - QUALITIES_TTL_MS) {
+      return { ok: true, qualities: entry.qualities, cached: true };
+    }
+  } catch {
+    // Cache is best effort.
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  timer?.unref?.();
+  const { response, authError } = await youTubeFetch(`${base}/api/youtube-formats`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ url }),
+  }, controller.signal).finally(() => clearTimeout(timer));
+  if (authError || !response) return { ok: false, error: "server-unauthorized" };
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data?.ok !== true || !Array.isArray(data.qualities)) {
+    return { ok: false, error: typeof data?.error === "string" ? data.error : `http-${response.status}` };
+  }
+  const qualities = data.qualities.map(Number).filter((value) => Number.isFinite(value) && value > 0);
+  try {
+    const stored = await chrome.storage.session.get(QUALITIES_STORAGE_KEY);
+    const cache = stored?.[QUALITIES_STORAGE_KEY] || {};
+    cache[videoId] = { qualities, at: Date.now() };
+    await chrome.storage.session.set({ [QUALITIES_STORAGE_KEY]: cache });
+  } catch {
+    // Cache is best effort.
+  }
+  return { ok: true, qualities };
 }

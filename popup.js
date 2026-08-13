@@ -4,6 +4,7 @@ import { downloadJobView, retryableDownloadJob } from "./download-job-view.js";
 import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
 import { PRO_BENEFITS, productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
+import { ensureSaveDirectory } from "./save-directory.js";
 
 const byId = (id) => document.getElementById(id);
 const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -344,6 +345,7 @@ async function directDownload() {
   try {
     const value = input.value.trim();
     if (isYouTubeUrl(value)) {
+      await ensureSaveDirectory({ pick: true });
       const response = await chrome.runtime.sendMessage({
         type: "youtube-download",
         url: value,

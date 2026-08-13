@@ -1,0 +1,98 @@
+// Parallel byte-range reception for server-hosted files. The peer supports
+// HTTP range requests, so multiple connections fetch disjoint chunks and the
+// File System Access API writes them at their byte positions. Failed chunks
+// are retried, which makes the transfer far more robust than a single
+// browser download stream.
+
+export const PARALLEL_CONCURRENCY = 6;
+export const PARALLEL_CHUNK_BYTES = 8 * 1024 * 1024;
+const MAX_RETRIES = 3;
+
+function sanitizeFilename(value) {
+  const name = String(value || "").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/\.+$/, "").trim().slice(0, 180) || "download";
+  return /\.(mp4|m4v|webm|mkv|mov|ts|mp3|m4a)$/i.test(name) ? name : `${name}.mp4`;
+}
+
+async function probeTotal(url, signal) {
+  const response = await fetch(url, {
+    headers: { Range: "bytes=0-0" },
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok && response.status !== 206) throw new Error(`영상 요청 실패 (${response.status})`);
+  const contentRange = response.headers.get("content-range") || "";
+  const match = /bytes\s+\d+-\d+\/(\d+)/.exec(contentRange);
+  await response.body?.cancel?.().catch(() => {});
+  const total = match ? Number(match[1]) : null;
+  if (!Number.isFinite(total) || total <= 0) throw new Error("파일 크기를 확인할 수 없습니다.");
+  return total;
+}
+
+async function fetchRange(url, start, end, signal, attempt = 1) {
+  try {
+    const response = await fetch(url, {
+      headers: { Range: `bytes=${start}-${end}` },
+      cache: "no-store",
+      signal,
+    });
+    if (response.status !== 206) throw new Error(`범위 요청 실패 (${response.status})`);
+    const data = new Uint8Array(await response.arrayBuffer());
+    if (data.byteLength !== end - start + 1) throw new Error("범위 데이터 길이 불일치");
+    return data;
+  } catch (error) {
+    if (attempt < MAX_RETRIES && !signal?.aborted) {
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+      return fetchRange(url, start, end, signal, attempt + 1);
+    }
+    throw error;
+  }
+}
+
+export async function parallelDownload({
+  url,
+  filename,
+  dirHandle,
+  concurrency = PARALLEL_CONCURRENCY,
+  chunkBytes = PARALLEL_CHUNK_BYTES,
+  onProgress = null,
+  signal = null,
+}) {
+  const total = await probeTotal(url, signal);
+  const safeName = sanitizeFilename(filename);
+  const fileHandle = await dirHandle.getFileHandle(safeName, { create: true });
+  const writable = await fileHandle.createWritable({ keepExistingData: true });
+  const ranges = [];
+  for (let start = 0; start < total; start += chunkBytes) {
+    ranges.push([start, Math.min(start + chunkBytes - 1, total - 1)]);
+  }
+  let cursor = 0;
+  let written = 0;
+  async function worker() {
+    while (cursor < ranges.length && !signal?.aborted) {
+      const [start, end] = ranges[cursor];
+      cursor += 1;
+      const data = await fetchRange(url, start, end, signal);
+      await writable.write({ type: "write", position: start, data });
+      written += data.byteLength;
+      if (onProgress) onProgress(written, total);
+    }
+  }
+  try {
+    const workers = Array.from(
+      { length: Math.min(concurrency, Math.max(ranges.length, 1)) },
+      () => worker(),
+    );
+    await Promise.all(workers);
+    if (written !== total) throw new Error(`수신 크기 불일치 (${written}/${total})`);
+    await writable.close();
+  } catch (error) {
+    try {
+      await writable.abort();
+    } catch {
+      // already closed
+    }
+    throw error;
+  }
+  return { bytes: total, filename: safeName };
+}

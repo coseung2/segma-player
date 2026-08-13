@@ -38,12 +38,14 @@ const expectedFiles = [
   "native-file-writer.js",
   "options.html",
   "options.js",
+  "parallel-download.js",
   "player-page-resolver.js",
   "popup.css",
   "popup.html",
   "popup.js",
   "product-plan.js",
   "progressive-redirect.js",
+  "save-directory.js",
   "youtube-server.js",
 ].sort();
 

@@ -20,7 +20,7 @@ function segmentProgress(message) {
 }
 
 function percentProgress(message) {
-  const match = /(?:저장 중|서버 처리 중|내 기기로 전송 중)…\s+(\d{1,3})%/.exec(message);
+  const match = /(?:저장 중|서버 처리 중|내 기기로 전송 중|수신 중)…\s+(\d{1,3})%/.exec(message);
   if (!match) return null;
   const value = Number(match[1]);
   return Number.isFinite(value) ? boundedPercent(value) : null;

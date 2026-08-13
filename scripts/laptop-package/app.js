@@ -205,7 +205,9 @@ function runFormatsProbe(url) {
           const height = Number(format?.height);
           if (Number.isFinite(height) && height > 0) heights.add(height);
         }
-        const qualities = [...heights].sort((a, b) => b - a);
+        const sorted = [...heights].sort((a, b) => b - a);
+        const maxHeight = sorted[0] || 0;
+        const qualities = sorted.filter((height) => height >= 360 || height === maxHeight);
         resolve(qualities.length ? qualities : null);
       } catch {
         resolve(null);

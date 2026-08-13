@@ -1,4 +1,5 @@
 import { downloadPreparedCandidate, prepareDownloadCandidate, setRuntimePlan } from "./hls-download.js";
+import { parallelDownload } from "./parallel-download.js";
 import { createDownloadScheduler } from "./download-scheduler.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { resolvePlan } from "./license.js";
@@ -109,6 +110,40 @@ async function run(jobId, candidate) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "parallel-save" && sender.id === chrome.runtime.id) {
+    if (typeof message.jobId !== "string" || typeof message.url !== "string" || !message.dirHandle) {
+      sendResponse({ ok: false, error: "invalid-parallel-save" });
+      return false;
+    }
+    void (async () => {
+      try {
+        await report(message.jobId, { status: "running", statusText: "병렬 수신 준비 중…" });
+        const result = await parallelDownload({
+          url: message.url,
+          filename: typeof message.filename === "string" && message.filename ? message.filename : "YouTube 영상.mp4",
+          dirHandle: message.dirHandle,
+          onProgress: (written, total) => {
+            const percent = Math.max(0, Math.min(100, Math.round((written / total) * 100)));
+            void report(message.jobId, { status: "running", statusText: `수신 중… ${percent}%` });
+          },
+        });
+        await report(message.jobId, {
+          status: "completed",
+          statusText: `저장 완료 (${Math.round(result.bytes / 1048576)} MB).`,
+        });
+        sendResponse({ ok: true, bytes: result.bytes });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "parallel-save-failed";
+        await report(message.jobId, {
+          status: "failed",
+          statusText: "병렬 수신 실패",
+          error: detail,
+        });
+        sendResponse({ ok: false, error: detail });
+      }
+    })();
+    return true;
+  }
   if (message?.type === "download-pause-state"
     && sender.id === chrome.runtime.id
     && typeof message.jobId === "string") {

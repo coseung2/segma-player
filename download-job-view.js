@@ -20,7 +20,7 @@ function segmentProgress(message) {
 }
 
 function percentProgress(message) {
-  const match = /저장 중…\s+(\d{1,3})%/.exec(message);
+  const match = /(?:저장 중|서버 처리 중)…\s+(\d{1,3})%/.exec(message);
   if (!match) return null;
   const value = Number(match[1]);
   return Number.isFinite(value) ? boundedPercent(value) : null;
@@ -34,6 +34,7 @@ function stageFor(status, message) {
   if (/영상 정보|구간\s+\d+개/.test(message)) return "영상 확인";
   if (/저장 중…\s+\d+\s*\//.test(message)) return "저장 중";
   if (/저장 중|영상을 저장/.test(message)) return "파일 저장";
+  if (/서버 처리/.test(message)) return "서버 처리";
   if (/확인|준비|경로|주소/.test(message)) return "다운로드 준비";
   return "처리 중";
 }

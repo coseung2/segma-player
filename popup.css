@@ -16,6 +16,7 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
 .plan-card { margin-top: 12px; padding: 9px 10px; border: 1px solid #2b3b51; border-radius: 10px; background: #151e2a; }
 .plan-summary, .pro-benefits { margin: 0; color: #c3cede; font-size: 10px; line-height: 1.45; }
 .pro-offer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-top: 6px; padding-top: 6px; border-top: 1px solid #29374a; }
+.pro-offer[hidden] { display: none; }
 .pro-benefits { color: #8fa5c1; }
 .upgrade-link, .upgrade-unavailable { white-space: nowrap; font-size: 9px; font-weight: 800; }
 .upgrade-link { padding: 6px 8px; border-radius: 7px; background: #e9f1ff; color: #203c6b; text-decoration: none; }
@@ -85,6 +86,7 @@ option:disabled { color: #68768a; }
 .legal-note, .privacy-note { margin: 15px 0 0; color: #728197; font-size: 9px; line-height: 1.5; }
 .quality-row { margin: 0; }
 .companion-help { display: inline-block; margin-top: 10px; color: #80b1f5; font-size: 10px; }
+.companion-help[hidden] { display: none; }
 .privacy-note { margin-top: 10px; }
 .scroll-more { position: fixed; z-index: 20; left: 50%; bottom: 8px; display: grid; width: 44px; height: 38px; padding: 0; transform: translateX(-50%); place-items: center; border: 1px solid #3b4b61; border-radius: 999px; background: #182230e8; color: #b8c8dd; box-shadow: 0 6px 18px #05070b99; backdrop-filter: blur(6px); }
 .scroll-more[hidden] { display: none; }

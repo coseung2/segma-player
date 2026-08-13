@@ -532,7 +532,7 @@ test("youtube downloads route through the remote server when configured", async 
   await delay(400);
   const stored = sessionStorage.get("downloadJobs") || [];
   assert.ok(Array.isArray(stored) && stored.some((job) => job.source === "youtube"
-    && job.status === "running" && job.title === "Server Video"));
+    && job.status === "running" && job.title === "YouTube 영상"));
 });
 
 test("youtube downloads fall back to companion when the server is unreachable", async () => {

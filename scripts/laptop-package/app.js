@@ -186,6 +186,7 @@ function runJob(job) {
     "--no-playlist",
     "--no-warnings",
     "--newline",
+    "--progress",
     "--js-runtimes", `node:${process.execPath}`,
     "--merge-output-format", "mp4",
     "--print", "after_move:%(title)s",
@@ -202,8 +203,14 @@ function runJob(job) {
   const child = spawn(YT_DLP, args, { stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   child.stdout.on("data", (chunk) => {
-    const line = String(chunk);
-    if (line.startsWith("after_move:")) job.title = line.slice("after_move:".length).trim().slice(0, 200);
+    for (const line of String(chunk).split(/\r?\n/)) {
+      if (line.startsWith("after_move:")) job.title = line.slice("after_move:".length).trim().slice(0, 200);
+      const progressMatch = /\[download\]\s+(\d+(?:\.\d+)?)%/.exec(line);
+      if (progressMatch) {
+        const percent = Number(progressMatch[1]);
+        if (Number.isFinite(percent)) job.progress = Math.max(0, Math.min(100, percent));
+      }
+    }
   });
   child.stderr.on("data", (chunk) => {
     stderr += String(chunk);
@@ -359,6 +366,7 @@ const server = http.createServer(async (req, res) => {
         status: job.status,
         title: job.title || "",
         error: job.error || "",
+        progress: Number.isFinite(job.progress) ? job.progress : null,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
       });
@@ -455,6 +463,6 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`aura-youtube listening on 127.0.0.1:${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`aura-youtube listening on 0.0.0.0:${PORT}`);
 });

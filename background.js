@@ -175,11 +175,34 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
     throw new Error("pro-feature-required");
   }
 
+  await downloadJobsReady;
+  const jobId = crypto.randomUUID();
+  downloadJobs.set(jobId, createDownloadJob({
+    id: jobId,
+    title: "YouTube 영상",
+    mediaType: "YOUTUBE",
+    source: "youtube",
+    folderName: "Downloads",
+    retryPayload: { kind: "youtube", url, quality },
+  }));
+  await persistDownloadJobs();
+  await patchDownloadJob(jobId, {
+    status: "running",
+    statusText: "서버에 요청하는 중…",
+  });
+
   const serverUrl = await getYouTubeServerUrl();
   if (serverUrl) {
     const submitted = await submitYouTubeJob(url, quality, serverUrl);
     if (submitted.ok) {
-      const waited = await waitForYouTubeJob(submitted.jobId, serverUrl);
+      const waited = await waitForYouTubeJob(submitted.jobId, serverUrl, {
+        onProgress: (percent) => {
+          void patchDownloadJob(jobId, {
+            status: "running",
+            statusText: `서버 처리 중… ${percent}%`,
+          });
+        },
+      });
       if (waited.ok) {
         const fileUrl = await youtubeJobFileUrl(submitted.jobId, serverUrl);
         const title = typeof waited.title === "string" && waited.title.trim() ? waited.title.trim() : "YouTube 영상";
@@ -194,19 +217,13 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
             saveAs: false,
           });
         } catch (error) {
+          await patchDownloadJob(jobId, {
+            status: "failed",
+            statusText: "브라우저 다운로드 실패",
+            error: error?.message || "download-failed",
+          });
           throw new Error(`브라우저 다운로드로 저장하지 못했습니다 (${error?.message || "download-failed"}).`);
         }
-        await downloadJobsReady;
-        const jobId = crypto.randomUUID();
-        downloadJobs.set(jobId, createDownloadJob({
-          id: jobId,
-          title,
-          mediaType: "YOUTUBE",
-          source: "youtube",
-          folderName: "Downloads",
-          retryPayload: { kind: "youtube", url, quality },
-        }));
-        await persistDownloadJobs();
         await patchDownloadJob(jobId, {
           status: "running",
           statusText: "브라우저 다운로드를 시작했습니다.",
@@ -215,26 +232,24 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
         return { mode: "youtube-browser", jobId };
       }
       const detail = typeof waited.error === "string" && waited.error ? waited.error : "job-failed";
+      await patchDownloadJob(jobId, {
+        status: "failed",
+        statusText: "서버 처리 실패",
+        error: detail.slice(0, 500),
+      });
       throw new Error(`Aura YouTube 서버 처리 실패 (${detail.slice(0, 300)})`);
     }
     if (submitted.error === "monthly-limit-reached") {
       const limit = Number.isInteger(submitted.limit) ? ` (${submitted.limit}개)` : "";
+      await patchDownloadJob(jobId, {
+        status: "failed",
+        statusText: "월간 한도 도달",
+        error: "monthly-limit-reached",
+      });
       throw new Error(`이번 달 Aura YouTube 무료 다운로드 한도를 사용했습니다${limit}. Pro 라이선스를 등록하면 제한이 풀립니다.`);
     }
     // Unreachable or transient server errors fall through to the Companion path.
   }
-
-  await downloadJobsReady;
-  const jobId = crypto.randomUUID();
-  downloadJobs.set(jobId, createDownloadJob({
-    id: jobId,
-    title: "YouTube 영상",
-    mediaType: "YOUTUBE",
-    source: "youtube",
-    folderName: "Downloads",
-    retryPayload: { kind: "youtube", url, quality },
-  }));
-  await persistDownloadJobs();
 
   let port;
   try {

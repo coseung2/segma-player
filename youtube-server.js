@@ -185,6 +185,7 @@ export async function submitYouTubeJob(url, quality = "best", server = null) {
 export async function waitForYouTubeJob(jobId, server = null, {
   pollMs = JOB_POLL_MS,
   timeoutMs = JOB_TIMEOUT_MS,
+  onProgress = null,
 } = {}) {
   const base = server || (await getYouTubeServerUrl());
   if (!base) return { ok: false, error: "server-not-configured" };
@@ -205,6 +206,9 @@ export async function waitForYouTubeJob(jobId, server = null, {
         if (data.status === "ready") return { ok: true, jobId, title: data.title || "" };
         if (data.status === "failed") {
           return { ok: false, error: typeof data.error === "string" && data.error ? data.error : "job-failed" };
+        }
+        if (typeof onProgress === "function" && Number.isFinite(data?.progress)) {
+          onProgress(Math.max(0, Math.min(100, Math.round(data.progress))));
         }
       }
     } catch {

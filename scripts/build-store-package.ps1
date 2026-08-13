@@ -70,6 +70,7 @@ $runtimeFiles = @(
   'popup.js',
   'progressive-redirect.js',
   'product-plan.js',
+  'save-directory.js',
   'youtube-server.js',
   'edition.js',
   'manifest.json'

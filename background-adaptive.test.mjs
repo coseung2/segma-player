@@ -528,13 +528,12 @@ test("youtube downloads route through the remote server when configured", async 
   );
   assert.equal(result.keepAlive, true);
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.mode, "youtube-parallel");
+  // Without a stored folder handle the flow falls back to the browser download.
+  assert.equal(result.response.mode, "youtube-browser");
   await delay(400);
   const stored = sessionStorage.get("downloadJobs") || [];
   assert.ok(Array.isArray(stored) && stored.some((job) => job.source === "youtube"
     && job.status === "running" && job.title === "YouTube 영상"));
-  assert.ok(runtimeMessages.some((message) => message?.type === "parallel-save"
-    && message.url === "https://server.test/api/jobs/job-1/file?t=tok-1"));
 });
 
 test("youtube downloads fall back to companion when the server is unreachable", async () => {

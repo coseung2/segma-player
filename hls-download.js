@@ -14,6 +14,7 @@ import { createNativeFileWriter } from "./native-file-writer.js";
 import { parallelDownload } from "./parallel-download.js";
 import { progressiveDownloadErrorMessage, replayableRecordedHeaders } from "./progressive-redirect.js";
 import { productPlan } from "./product-plan.js";
+import { getStoredSaveDirectory } from "./save-directory.js";
 
 export const MAX_HLS_SEGMENTS = 10_000;
 const SUPPORTED_KEY_METHODS = new Set(["AES-128", "AES-256"]);
@@ -812,12 +813,29 @@ async function saveProgressive(
       });
     };
     try {
-      const writable = await createNativeFileWriter(filename);
-      const sink = {
-        write: (data) => writeChunk(writable, data),
-        close: () => writable.close(),
-        abort: () => writable.abort(),
-      };
+      let sink = null;
+      const dirHandle = await getStoredSaveDirectory();
+      if (dirHandle) {
+        const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+        const writable = await fileHandle.createWritable({ keepExistingData: true });
+        sink = {
+          write: (data) => writable.write(data),
+          close: () => writable.close(),
+          abort: () => writable.abort(),
+        };
+      } else {
+        try {
+          const writable = await createNativeFileWriter(filename);
+          sink = {
+            write: (data) => writeChunk(writable, data),
+            close: () => writable.close(),
+            abort: () => writable.abort(),
+          };
+        } catch {
+          sink = null;
+        }
+      }
+      if (!sink) throw new Error("no-save-sink");
       const result = await withParallelMediaFetchLease(session.url, referrer, context, () => parallelDownload({
         url: session.url,
         filename,

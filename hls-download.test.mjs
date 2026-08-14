@@ -6,7 +6,9 @@ globalThis.document = { querySelector: () => null };
 const {
   browserDownloadFilename,
   chooseDashRepresentation,
+  createDownloadContext,
   dashTracksForPlan,
+  mediaChunks,
   prepareDownloadCandidate,
   prepareProgressiveFetch,
   progressiveSession,
@@ -166,6 +168,58 @@ test("Dood-compatible media falls back to its source frame when an authenticated
   assert.equal(prepared.sourceFrameFallbackPreferred, true);
   delete globalThis.fetch;
   delete globalThis.chrome;
+});
+
+test("mediaChunks resumes from a segment checkpoint", async () => {
+  const requested = [];
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: async (message) => {
+        if (message.type === "prepare-media-fetch") return { ok: true, leaseId: "lease-resume" };
+        if (message.type === "release-media-fetch") return { ok: true };
+        return { ok: true };
+      },
+    },
+  };
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    const index = Number(/s(\d+)/.exec(String(url))?.[1]);
+    return new Response(new Uint8Array([index + 1]), { status: 200 });
+  };
+  try {
+    const media = {
+      initUrl: null,
+      segments: [
+        "https://media.example/video/s0.ts",
+        "https://media.example/video/s1.ts",
+        "https://media.example/video/s2.ts",
+        "https://media.example/video/s3.ts",
+      ],
+      keys: [],
+      mediaSequence: 0,
+      byteranges: null,
+    };
+    const chunks = [];
+    for await (const chunk of mediaChunks(
+      media,
+      "https://media.example/",
+      1,
+      createDownloadContext(),
+      { resumeFromSegment: 2, startingBytes: 5 },
+    )) {
+      chunks.push(new Uint8Array(chunk));
+    }
+    assert.equal(chunks.length, 2);
+    assert.deepEqual([...chunks[0]], [3]);
+    assert.deepEqual([...chunks[1]], [4]);
+    assert.equal(requested.includes("https://media.example/video/s0.ts"), false);
+    assert.equal(requested.includes("https://media.example/video/s1.ts"), false);
+    assert.equal(requested.includes("https://media.example/video/s2.ts"), true);
+    assert.equal(requested.includes("https://media.example/video/s3.ts"), true);
+  } finally {
+    delete globalThis.fetch;
+    delete globalThis.chrome;
+  }
 });
 
 test("source-frame download requests are relayed through the background worker", async () => {

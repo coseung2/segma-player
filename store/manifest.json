@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aura Media Downloader",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "description": "Detect and save compatible video and audio streams you are authorized to download.",
   "permissions": [
     "activeTab",

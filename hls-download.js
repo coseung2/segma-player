@@ -19,11 +19,20 @@ import { level5KeyErrorMessage, normalizeLevel5KeyError } from "./level5-key-err
 import { parallelDownload } from "./parallel-download.js";
 import { progressiveDownloadErrorMessage, replayableRecordedHeaders } from "./progressive-redirect.js";
 import { productPlan } from "./product-plan.js";
+import {
+  clearDownloadCheckpoint,
+  getDownloadCheckpoint,
+  setDownloadCheckpoint,
+} from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
 
 export const MAX_HLS_SEGMENTS = 10_000;
 const SUPPORTED_KEY_METHODS = new Set(["AES-128", "AES-256"]);
 const DOWNLOAD_CONCURRENCY = 6;
+const CHECKPOINT_SEGMENT_INTERVAL = 48;
+const CHECKPOINT_BYTE_INTERVAL = 48 * 1024 * 1024;
+const SEGMENT_RETRY_DELAYS_MS = [0, 400, 1200];
+const SEGMENT_RETRY_STATUSES = new Set([403, 408, 425, 429, 500, 502, 503, 504]);
 const CURRENT_PLAN = productPlan(PRODUCT_EDITION);
 let activePlan = CURRENT_PLAN;
 const DOOD_MEDIA_HOST_RE = /(?:doodcdn|doimg|d000d|dood\.|playmogo|cloudatacdn)\./i;
@@ -423,7 +432,11 @@ async function fetchText(url, referrer, context = defaultDownloadContext) {
       ? `서버(${host}) 연결 실패 (${error?.message || "네트워크 오류"}). 주소가 올바른지, 영상이 재생 중인지 확인해 주세요.`
       : "영상 정보 요청 중 네트워크 오류가 발생했습니다.");
   }
-  if (!loaded.ok) throw new Error(`영상 정보 요청 실패 (${loaded.status}): ${redactUrlForMessage(url)}`);
+  if (!loaded.ok) {
+    const error = new Error(`영상 정보 요청 실패 (${loaded.status}): ${redactUrlForMessage(url)}`);
+    error.httpStatus = loaded.status;
+    throw error;
+  }
   return {
     text: loaded.text,
     url: loaded.url,
@@ -448,7 +461,11 @@ async function fetchArrayBuffer(url, referrer, label, context = defaultDownloadC
       ? `${label} 서버(${host}) 연결 실패 (${error?.message || "네트워크 오류"}).`
       : `${label} 요청 중 네트워크 오류가 발생했습니다.`);
   }
-  if (!loaded.ok) throw new Error(`${label} 요청 실패 (${loaded.status}): ${redactUrlForMessage(url)}`);
+  if (!loaded.ok) {
+    const error = new Error(`${label} 요청 실패 (${loaded.status}): ${redactUrlForMessage(url)}`);
+    error.httpStatus = loaded.status;
+    throw error;
+  }
   let data = loaded.data;
   if (hasRange) {
     if (loaded.status === 206) {
@@ -643,7 +660,7 @@ export async function prepareHlsKeys(media, referrer, videoTabId = null, context
 async function fetchSegment(index, media, referrer, videoTabId = null, context = defaultDownloadContext) {
   const activeKey = activeKeyForSegment(media.keys, index);
   let lastError = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < SEGMENT_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
       let chunk = await fetchArrayBuffer(
         media.segments[index],
@@ -660,15 +677,31 @@ async function fetchSegment(index, media, referrer, videoTabId = null, context =
       return chunk;
     } catch (error) {
       lastError = error;
+      if (context.signal?.aborted) throw error;
+      const permanentStatus = Number.isInteger(error?.httpStatus)
+        && !SEGMENT_RETRY_STATUSES.has(error.httpStatus);
+      if (permanentStatus) throw error;
+    }
+    const delay = SEGMENT_RETRY_DELAYS_MS[attempt];
+    if (delay > 0) {
+      const jittered = delay * (0.75 + Math.random() * 0.5);
+      await new Promise((resolve) => setTimeout(resolve, jittered));
     }
   }
   throw lastError;
 }
 
-export async function* mediaChunks(media, referrer, videoTabId = null, context = defaultDownloadContext) {
-  let totalBytes = 0;
+export async function* mediaChunks(
+  media,
+  referrer,
+  videoTabId = null,
+  context = defaultDownloadContext,
+  { resumeFromSegment = 0, startingBytes = 0 } = {},
+) {
+  let totalBytes = startingBytes;
+  const resumeFrom = Number.isInteger(resumeFromSegment) && resumeFromSegment > 0 ? resumeFromSegment : 0;
 
-  if (media.initUrl) {
+  if (media.initUrl && resumeFrom === 0) {
     let chunk = await fetchArrayBuffer(media.initUrl, referrer, "영상 시작 데이터", context, media.initByterange || null);
     const firstKey = activeKeyForSegment(media.keys, 0);
     if (firstKey) {
@@ -693,8 +726,8 @@ export async function* mediaChunks(media, referrer, videoTabId = null, context =
   const ready = new Map();
   const claimWaiters = new Set();
   const maxBuffered = Math.max(DOWNLOAD_CONCURRENCY * 2, 8);
-  let consumed = 0;
-  let nextFetch = 0;
+  let consumed = resumeFrom;
+  let nextFetch = resumeFrom;
   let failed = null;
   let stopped = false;
 
@@ -744,7 +777,7 @@ export async function* mediaChunks(media, referrer, videoTabId = null, context =
 
   const workers = Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, total) }, () => worker());
   try {
-    for (let index = 0; index < total; index += 1) {
+    for (let index = resumeFrom; index < total; index += 1) {
       await waitForChunk(index);
       const chunk = buffer.get(index);
       buffer.delete(index);
@@ -1103,7 +1136,16 @@ async function saveProgressive(
   }
 }
 
-async function saveHlsToNative(media, filename, referrer, videoTabId = null, context = defaultDownloadContext, dirHandle = null) {
+async function saveHlsToNative(
+  media,
+  filename,
+  referrer,
+  videoTabId = null,
+  context = defaultDownloadContext,
+  dirHandle = null,
+  checkpointKey = null,
+  scope = "main",
+) {
   const saveHandle = dirHandle || await getStoredSaveDirectory();
   if (!saveHandle) {
     throw new Error("분할 형식 영상은 저장 폴더 연결이 필요합니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
@@ -1113,11 +1155,35 @@ async function saveHlsToNative(media, filename, referrer, videoTabId = null, con
     error.code = "save-permission-required";
     throw error;
   }
-  let writable;
-  let allocation = null;
+
+  let fileHandle = null;
+  let allocatedFilename = "";
+  let committedBytes = 0;
+  let resumeFromSegment = 0;
+  let checkpoint = checkpointKey ? await getDownloadCheckpoint(checkpointKey, scope) : null;
+  if (checkpoint) {
+    try {
+      fileHandle = await saveHandle.getFileHandle(checkpoint.filename);
+      committedBytes = checkpoint.bytesWritten;
+      resumeFromSegment = checkpoint.resumeFromSegment;
+      allocatedFilename = checkpoint.filename;
+    } catch {
+      fileHandle = null;
+      checkpoint = null;
+    }
+  }
+
+  let writable = null;
   try {
-    allocation = await createUniqueFile(saveHandle, filename);
-    writable = await allocation.fileHandle.createWritable();
+    if (fileHandle) {
+      writable = await fileHandle.createWritable({ keepExistingData: true });
+      if (committedBytes > 0) await writable.seek(committedBytes);
+    } else {
+      const allocation = await createUniqueFile(saveHandle, filename);
+      fileHandle = allocation.fileHandle;
+      allocatedFilename = allocation.filename;
+      writable = await fileHandle.createWritable();
+    }
   } catch (error) {
     const permissionExpired = error?.name === "NotAllowedError";
     const allocationFailure = new Error(permissionExpired
@@ -1126,21 +1192,64 @@ async function saveHlsToNative(media, filename, referrer, videoTabId = null, con
     if (permissionExpired) allocationFailure.code = "save-permission-required";
     throw allocationFailure;
   }
-  let count = 0;
-  let writtenBytes = 0;
+
+  let writtenBytes = committedBytes;
+  let segmentsWritten = resumeFromSegment;
+  let segmentsSinceCheckpoint = 0;
+  let lastCheckpointBytes = committedBytes;
+  let lastCheckpointSegment = resumeFromSegment;
+  let expectingInit = resumeFromSegment === 0 && Boolean(media.initUrl);
+
+  const commitCheckpoint = async () => {
+    if (!checkpointKey) return;
+    await setDownloadCheckpoint(checkpointKey, scope, {
+      filename: allocatedFilename,
+      bytesWritten: writtenBytes,
+      resumeFromSegment: segmentsWritten,
+    });
+  };
+
   try {
-    for await (const chunk of mediaChunks(media, referrer, videoTabId, context)) {
+    for await (const chunk of mediaChunks(media, referrer, videoTabId, context, {
+      resumeFromSegment,
+      startingBytes: writtenBytes,
+    })) {
       await writeChunk(writable, chunk);
       writtenBytes += chunk.byteLength;
-      count += 1;
+      if (expectingInit) {
+        expectingInit = false;
+      } else {
+        segmentsWritten += 1;
+      }
+      segmentsSinceCheckpoint += 1;
+      if (segmentsSinceCheckpoint >= CHECKPOINT_SEGMENT_INTERVAL
+        || writtenBytes - lastCheckpointBytes >= CHECKPOINT_BYTE_INTERVAL) {
+        await writable.close();
+        lastCheckpointBytes = writtenBytes;
+        lastCheckpointSegment = segmentsWritten;
+        await commitCheckpoint();
+        segmentsSinceCheckpoint = 0;
+        writable = await fileHandle.createWritable({ keepExistingData: true });
+        await writable.seek(writtenBytes);
+      }
     }
     if (writtenBytes === 0) throw new Error("저장된 파일이 비어 있습니다. 주소가 만료되었거나 접근 권한이 필요할 수 있습니다.");
     await writable.close();
-    return { count };
+    if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, scope);
+    return { count: segmentsWritten, resumed: resumeFromSegment > 0 };
   } catch (error) {
-    try { await writable.abort(); } catch { /* already closed */ }
-    if (allocation?.filename && typeof saveHandle.removeEntry === "function") {
-      await saveHandle.removeEntry(allocation.filename).catch(() => {});
+    try { await writable?.abort(); } catch { /* already closed */ }
+    if (checkpointKey && (checkpoint || lastCheckpointBytes > committedBytes)) {
+      await setDownloadCheckpoint(checkpointKey, scope, {
+        filename: allocatedFilename,
+        bytesWritten: lastCheckpointBytes,
+        resumeFromSegment: lastCheckpointSegment,
+      });
+    } else {
+      if (allocatedFilename && typeof saveHandle.removeEntry === "function") {
+        await saveHandle.removeEntry(allocatedFilename).catch(() => {});
+      }
+      if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, scope);
     }
     throw error;
   }
@@ -1263,6 +1372,9 @@ export async function prepareDownloadCandidate(candidate, {
 export async function downloadPreparedCandidate(prepared) {
   if (!prepared?.candidate || !prepared.context) throw new Error("준비된 다운로드 작업이 올바르지 않습니다.");
   const { candidate, context, filename, dirHandle = null } = prepared;
+  const checkpointKey = typeof candidate?.id === "string" && candidate.id
+    ? `media:${candidate.id}`
+    : null;
   if (prepared.type === "progressive") {
     const result = await saveProgressive(
       candidate.resourceUrl,
@@ -1283,7 +1395,16 @@ export async function downloadPreparedCandidate(prepared) {
     for (let index = 0; index < prepared.tracks.length; index += 1) {
       const track = prepared.tracks[index];
       setStatus(`DASH ${track.kind === "audio" ? "오디오" : "비디오"} 저장 중… ${index + 1}/${prepared.tracks.length}`, false, context);
-      await saveHlsToNative(track.media, track.filename, candidate.pageUrl, candidate.tabId, context, dirHandle);
+      await saveHlsToNative(
+        track.media,
+        track.filename,
+        candidate.pageUrl,
+        candidate.tabId,
+        context,
+        dirHandle,
+        checkpointKey,
+        `track-${index}`,
+      );
     }
     return {
       statusText: prepared.tracks.length > 1
@@ -1292,7 +1413,15 @@ export async function downloadPreparedCandidate(prepared) {
     };
   }
   if (prepared.type !== "hls" || !prepared.media) throw new Error("준비된 다운로드 형식을 지원하지 않습니다.");
-  const saved = await saveHlsToNative(prepared.media, filename, candidate.pageUrl, candidate.tabId, context, dirHandle);
+  const saved = await saveHlsToNative(
+    prepared.media,
+    filename,
+    candidate.pageUrl,
+    candidate.tabId,
+    context,
+    dirHandle,
+    checkpointKey,
+  );
   return {
     statusText: "다운로드를 완료했습니다. 저장 폴더에서 확인하세요.",
   };

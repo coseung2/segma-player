@@ -4,6 +4,7 @@ import { createDownloadScheduler } from "./download-scheduler.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { resolvePlan } from "./license.js";
 import { productPlan } from "./product-plan.js";
+import { clearAllDownloadCheckpoints } from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
 import {
   MIN_HEARTBEAT_CADENCE_MS,
@@ -175,6 +176,9 @@ async function run(jobId, candidate) {
   } catch (error) {
     const cancelled = controller.signal.aborted || error?.code === "download-cancelled";
     const message = error instanceof Error ? error.message : "다운로드에 실패했습니다.";
+    if (cancelled && typeof candidate?.id === "string") {
+      await clearAllDownloadCheckpoints(`media:${candidate.id}`).catch(() => {});
+    }
     await report(jobId, {
       status: cancelled ? "cancelled" : "failed",
       statusText: message,

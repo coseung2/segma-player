@@ -45,6 +45,7 @@ $runtimeFiles = @(
   'candidate.js',
   'content.js',
   'dash.js',
+  'download-checkpoint.js',
   'download-errors.js',
   'download-job-view.js',
   'download-jobs.js',

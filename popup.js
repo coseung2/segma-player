@@ -330,13 +330,14 @@ function renderCandidates(candidates) {
     inlineJobs.dataset.candidateId = candidate.id;
     inlineJobs.setAttribute("aria-live", "polite");
     inlineJobs.hidden = true;
-    card.append(
-      createPreview(candidate),
-      inlineJobs,
+    const info = document.createElement("div");
+    info.className = "candidate-info";
+    info.append(
       text("h2", "candidate-title", candidate.pageTitle || "제목 없음"),
       text("p", "candidate-origin", candidate.pageOrigin || ""),
       text("p", "candidate-url", candidate.displayUrl || ""),
     );
+    card.append(createPreview(candidate), inlineJobs, info);
     const meta = document.createElement("div");
     meta.className = "candidate-meta";
     const label = mediaTypeLabel(candidate.mediaType);
@@ -368,7 +369,7 @@ function renderCandidates(candidates) {
       }
     });
     meta.append(button);
-    card.append(meta);
+    info.append(meta);
     candidatesElement.append(card);
   }
   renderJobs(lastJobs);
@@ -480,12 +481,15 @@ function renderJobs(jobs) {
   for (const container of candidatesElement.querySelectorAll(".candidate-job-list")) {
     const matching = detectJobs.filter((job) => job.candidateId
       && job.candidateId === container.dataset.candidateId);
+    const activeJob = matching.some((job) => ["queued", "running", "paused"].includes(job.status));
     container.hidden = matching.length === 0;
     container.replaceChildren();
     for (const job of matching) {
       placedJobIds.add(job.id);
       container.append(buildJobCard(job, { inline: true }));
     }
+    const info = container.closest(".candidate-card")?.querySelector(".candidate-info");
+    if (info) info.hidden = activeJob;
   }
   const bySurface = {
     detect: detectJobs.filter((job) => !placedJobIds.has(job.id)),

@@ -447,6 +447,7 @@
       || (typeof job.updatedAt === "number" && now - job.updatedAt < 15 * 1000));
     for (const job of recent) shownDownloadJobIds.add(job.id);
     const visible = jobs.filter((job) => shownDownloadJobIds.has(job.id));
+    if (!jobs.length) return;
     if (!visible.length) {
       cleanDownloadOverlay();
       return;

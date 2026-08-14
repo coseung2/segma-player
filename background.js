@@ -217,14 +217,21 @@ async function syncDownloadOverlayForActiveTab() {
   if (signature === lastDownloadOverlaySignature) return;
   lastDownloadOverlaySignature = signature;
   if (!signature) return;
-  let tabId = null;
+  const targetTabIds = new Set();
+  for (const [jobId, sourceTabId] of jobSourceTabs) {
+    const job = downloadJobs.get(jobId);
+    if (job && ["queued", "running", "paused"].includes(job.status) && Number.isInteger(sourceTabId)) {
+      targetTabIds.add(sourceTabId);
+    }
+  }
   try {
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    tabId = tabs[0]?.id ?? null;
+    const activeTabId = tabs[0]?.id ?? null;
+    if (Number.isInteger(activeTabId)) targetTabIds.add(activeTabId);
   } catch {
-    return;
+    // Fall through with whatever source tabs were already collected.
   }
-  await syncDownloadOverlayForTab(tabId);
+  for (const tabId of targetTabIds) await syncDownloadOverlayForTab(tabId);
 }
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -812,6 +819,7 @@ async function queueMediaDownload(candidate) {
   }
   await persistDownloadJobs();
   syncWorkerLifecycleAlarm();
+  void syncDownloadOverlayForActiveTab();
   void dispatchMediaDownload(jobId, candidate);
   return { mode, jobId };
 }

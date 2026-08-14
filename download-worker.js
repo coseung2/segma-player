@@ -4,7 +4,7 @@ import { createDownloadScheduler } from "./download-scheduler.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { resolvePlan } from "./license.js";
 import { productPlan } from "./product-plan.js";
-import { createUniqueFile, getStoredSaveDirectory } from "./save-directory.js";
+import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
 import {
   MIN_HEARTBEAT_CADENCE_MS,
   heartbeatPortName,
@@ -202,14 +202,22 @@ async function runParallelSave(message) {
     if (!directoryHandle) {
       throw new Error("저장 폴더 권한이 없습니다. 다운로드 버튼을 다시 눌러 폴더를 선택해 주세요.");
     }
+    if (!(await hasReadWritePermission(directoryHandle))) {
+      const error = new Error("저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 폴더를 선택해 주세요.");
+      error.code = "save-permission-required";
+      throw error;
+    }
     const filename = typeof message.filename === "string" && message.filename ? message.filename : "YouTube 영상.mp4";
     let allocation;
     try {
       allocation = await createUniqueFile(directoryHandle, filename);
     } catch (error) {
-      throw new Error(error?.name === "NotAllowedError"
+      const permissionExpired = error?.name === "NotAllowedError";
+      const allocationFailure = new Error(permissionExpired
         ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 폴더를 선택해 주세요."
         : "저장 폴더에 새 파일을 만들 수 없습니다.");
+      if (permissionExpired) allocationFailure.code = "save-permission-required";
+      throw allocationFailure;
     }
     allocatedFilename = allocation.filename;
     const writable = await allocation.fileHandle.createWritable();

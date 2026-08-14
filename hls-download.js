@@ -19,7 +19,7 @@ import { level5KeyErrorMessage, normalizeLevel5KeyError } from "./level5-key-err
 import { parallelDownload } from "./parallel-download.js";
 import { progressiveDownloadErrorMessage, replayableRecordedHeaders } from "./progressive-redirect.js";
 import { productPlan } from "./product-plan.js";
-import { createUniqueFile, getStoredSaveDirectory } from "./save-directory.js";
+import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
 
 export const MAX_HLS_SEGMENTS = 10_000;
 const SUPPORTED_KEY_METHODS = new Set(["AES-128", "AES-256"]);
@@ -983,7 +983,8 @@ async function saveProgressive(
 ) {
   const session = preparedSession
     || await prepareProgressiveFetch(await progressiveSession(url, pageUrl, videoTabId, context.signal), context);
-  const saveHandle = dirHandle || await getStoredSaveDirectory();
+  let saveHandle = dirHandle || await getStoredSaveDirectory();
+  if (saveHandle && !(await hasReadWritePermission(saveHandle))) saveHandle = null;
   let allocation = null;
   const allocatedFile = async () => {
     if (!saveHandle) throw new Error("no-save-sink");
@@ -1065,9 +1066,12 @@ async function saveProgressive(
       context,
     );
     if (downloaded) return downloaded;
-    throw new Error(sinkError?.name === "NotAllowedError"
+    const permissionExpired = sinkError?.name === "NotAllowedError";
+    const sinkFailure = new Error(permissionExpired
       ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다."
       : "저장 폴더에 쓸 수 없습니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
+    if (permissionExpired) sinkFailure.code = "save-permission-required";
+    throw sinkFailure;
   }
   try {
     const bytes = await streamFetchToWritable(
@@ -1104,15 +1108,23 @@ async function saveHlsToNative(media, filename, referrer, videoTabId = null, con
   if (!saveHandle) {
     throw new Error("분할 형식 영상은 저장 폴더 연결이 필요합니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
   }
+  if (!(await hasReadWritePermission(saveHandle))) {
+    const error = new Error("저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다.");
+    error.code = "save-permission-required";
+    throw error;
+  }
   let writable;
   let allocation = null;
   try {
     allocation = await createUniqueFile(saveHandle, filename);
     writable = await allocation.fileHandle.createWritable();
   } catch (error) {
-    throw new Error(error?.name === "NotAllowedError"
+    const permissionExpired = error?.name === "NotAllowedError";
+    const allocationFailure = new Error(permissionExpired
       ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다."
       : "저장 폴더에 쓸 수 없습니다. 옵션 → 저장 폴더 변경에서 새 빈 폴더를 다시 지정해 주세요.");
+    if (permissionExpired) allocationFailure.code = "save-permission-required";
+    throw allocationFailure;
   }
   let count = 0;
   let writtenBytes = 0;

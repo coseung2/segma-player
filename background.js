@@ -205,7 +205,6 @@ let lastDownloadOverlaySignature = "";
 
 async function syncDownloadOverlayForTab(tabId) {
   if (!Number.isInteger(tabId)) return;
-  if (!activeDownloadJobSignature()) return;
   try {
     await chrome.tabs.sendMessage(tabId, { type: "show-download-overlay" });
   } catch {

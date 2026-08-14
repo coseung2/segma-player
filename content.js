@@ -442,8 +442,10 @@
     } catch {
       // The background may be waking; the timer will retry on the next tick.
     }
-    const active = jobs.filter((job) => ACTIVE_DOWNLOAD_STATUSES.has(job.status));
-    for (const job of active) shownDownloadJobIds.add(job.id);
+    const now = Date.now();
+    const recent = jobs.filter((job) => ACTIVE_DOWNLOAD_STATUSES.has(job.status)
+      || (typeof job.updatedAt === "number" && now - job.updatedAt < 15 * 1000));
+    for (const job of recent) shownDownloadJobIds.add(job.id);
     const visible = jobs.filter((job) => shownDownloadJobIds.has(job.id));
     if (!visible.length) {
       cleanDownloadOverlay();

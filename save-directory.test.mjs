@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createUniqueFile, ensureSaveDirectory } from "./save-directory.js";
+import { createUniqueFile, ensureSaveDirectory, hasReadWritePermission } from "./save-directory.js";
 
 let storedHandle = null;
 globalThis.indexedDB = {
@@ -77,6 +77,14 @@ test("ensureSaveDirectory never returns a handle when permission cannot be confi
 test("ensureSaveDirectory returns null when no folder handle is stored", async () => {
   storedHandle = null;
   assert.equal(await ensureSaveDirectory(), null);
+});
+
+test("hasReadWritePermission reports only granted readwrite permission", async () => {
+  assert.equal(await hasReadWritePermission(fakeHandle({ state: "granted" })), true);
+  assert.equal(await hasReadWritePermission(fakeHandle({ state: "prompt" })), false);
+  assert.equal(await hasReadWritePermission(fakeHandle({ state: "denied" })), false);
+  assert.equal(await hasReadWritePermission(null), false);
+  assert.equal(await hasReadWritePermission({ name: "no-permission-api" }), false);
 });
 
 test("ensureSaveDirectory with pick replaces the stored folder", async () => {

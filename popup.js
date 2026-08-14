@@ -199,15 +199,17 @@ async function verifySaveFolderWritable(handle) {
   }
 }
 
-async function ensureSaveFolder() {
-  let handle = await ensureSaveDirectory();
-  if (handle && await verifySaveFolderWritable(handle)) return handle;
-  try {
-    handle = await ensureSaveDirectory({ pick: true });
-  } catch {
-    handle = null;
+async function ensureSaveFolder({ forcePick = false } = {}) {
+  if (!forcePick) {
+    const stored = await ensureSaveDirectory();
+    if (stored && await verifySaveFolderWritable(stored)) return stored;
   }
-  if (handle && await verifySaveFolderWritable(handle)) return handle;
+  try {
+    const picked = await ensureSaveDirectory({ pick: true });
+    if (picked && await verifySaveFolderWritable(picked)) return picked;
+  } catch {
+    // The user dismissed the picker or it is unavailable here.
+  }
   void refreshSaveStatus();
   return null;
 }
@@ -445,7 +447,7 @@ function buildJobCard(job, { inline = false } = {}) {
         retry.textContent = "재시도 중…";
         feedback.textContent = "";
         try {
-          const folder = await ensureSaveFolder();
+          const folder = await ensureSaveFolder({ forcePick: job.errorCode === "save-permission-required" });
           if (!folder) {
             throw new Error("저장 폴더가 필요합니다. 다시 누르면 폴더 선택 창이 열립니다.");
           }

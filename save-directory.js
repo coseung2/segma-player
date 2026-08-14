@@ -111,6 +111,18 @@ async function confirmReadWritePermission(handle) {
   return null;
 }
 
+// Returns whether the handle can write right now in *this* context. The
+// offscreen download worker uses this before creating files because it cannot
+// request permission on its own; a popup/grant made elsewhere must already be
+// in effect for the stored handle.
+export async function hasReadWritePermission(handle) {
+  try {
+    return await handle?.queryPermission?.({ mode: "readwrite" }) === "granted";
+  } catch {
+    return false;
+  }
+}
+
 export async function ensureSaveDirectory({ pick = false } = {}) {
   if (pick && typeof showDirectoryPicker === "function") {
     let handle = null;

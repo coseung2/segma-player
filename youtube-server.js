@@ -14,6 +14,30 @@ const QUALITIES_TTL_MS = 10 * 60 * 1000;
 const JOB_POLL_MS = 2_000;
 const JOB_TIMEOUT_MS = 5 * 60 * 1000;
 
+function linkedAbortController(signal = null) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener?.("abort", abort, { once: true });
+  return {
+    controller,
+    unlink: () => signal?.removeEventListener?.("abort", abort),
+  };
+}
+
+function waitForPoll(ms, signal = null) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", done);
+      resolve();
+    }
+    signal?.addEventListener?.("abort", done, { once: true });
+  });
+}
+
 export function normalizeServerUrl(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim().replace(/\/+$/, "");
@@ -145,7 +169,7 @@ async function youTubeFetch(url, options = {}, signal = null) {
   return { response, authError: response.status === 401 };
 }
 
-export async function submitYouTubeJob(url, quality = "best", server = null) {
+export async function submitYouTubeJob(url, quality = "best", server = null, { signal = null } = {}) {
   const base = server || (await getYouTubeServerUrl());
   if (!base) return { ok: false, error: "server-not-configured" };
   const body = {
@@ -153,7 +177,7 @@ export async function submitYouTubeJob(url, quality = "best", server = null) {
     quality: String(quality || "best"),
   };
   async function post(forceToken = false) {
-    const controller = new AbortController();
+    const { controller, unlink } = linkedAbortController(signal);
     const timer = setTimeout(() => controller.abort(), 15_000);
     timer?.unref?.();
     try {
@@ -165,6 +189,7 @@ export async function submitYouTubeJob(url, quality = "best", server = null) {
       }, controller.signal);
     } finally {
       clearTimeout(timer);
+      unlink();
     }
   }
   let { response, authError } = await post();
@@ -203,20 +228,25 @@ export async function waitForYouTubeJob(jobId, server = null, {
   pollMs = JOB_POLL_MS,
   timeoutMs = JOB_TIMEOUT_MS,
   onProgress = null,
+  signal = null,
 } = {}) {
   const base = server || (await getYouTubeServerUrl());
   if (!base) return { ok: false, error: "server-not-configured" };
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    if (signal?.aborted) return { ok: false, error: "cancelled" };
     try {
-      const controller = new AbortController();
+      const { controller, unlink } = linkedAbortController(signal);
       const timer = setTimeout(() => controller.abort(), 10_000);
       timer?.unref?.();
       const { response, authError } = await youTubeFetch(
         `${base}/api/jobs/${encodeURIComponent(jobId)}`,
         {},
         controller.signal,
-      ).finally(() => clearTimeout(timer));
+      ).finally(() => {
+        clearTimeout(timer);
+        unlink();
+      });
       if (authError) return { ok: false, error: "server-unauthorized" };
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.status) {
@@ -242,9 +272,10 @@ export async function waitForYouTubeJob(jobId, server = null, {
         }
       }
     } catch {
+      if (signal?.aborted) return { ok: false, error: "cancelled" };
       // Transient network error or poll timeout; keep polling.
     }
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    await waitForPoll(pollMs, signal);
   }
   return { ok: false, error: "job-timeout" };
 }
@@ -269,6 +300,23 @@ function youtubeVideoId(value) {
   }
 }
 
+async function fetchYouTubeTitle(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  timer?.unref?.();
+  try {
+    const endpoint = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    const response = await fetch(endpoint, { cache: "no-store", signal: controller.signal });
+    if (!response.ok) return "";
+    const data = await response.json().catch(() => ({}));
+    return typeof data?.title === "string" ? data.title.trim().slice(0, 200) : "";
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function listYouTubeQualities(url, server = null) {
   const base = server || (await getYouTubeServerUrl());
   if (!base) return { ok: false, error: "server-not-configured" };
@@ -279,7 +327,12 @@ export async function listYouTubeQualities(url, server = null) {
     const cache = stored?.[QUALITIES_STORAGE_KEY] || {};
     const entry = cache[videoId];
     if (entry && Array.isArray(entry.qualities) && Number(entry.at) > Date.now() - QUALITIES_TTL_MS) {
-      return { ok: true, qualities: entry.qualities, cached: true };
+      return {
+        ok: true,
+        qualities: entry.qualities,
+        title: typeof entry.title === "string" ? entry.title : "",
+        cached: true,
+      };
     }
   } catch {
     // Cache is best effort.
@@ -298,13 +351,15 @@ export async function listYouTubeQualities(url, server = null) {
     return { ok: false, error: typeof data?.error === "string" ? data.error : `http-${response.status}` };
   }
   const qualities = data.qualities.map(Number).filter((value) => Number.isFinite(value) && value > 0);
+  let title = typeof data?.title === "string" ? data.title.trim().slice(0, 200) : "";
+  if (!title) title = await fetchYouTubeTitle(url);
   try {
     const stored = await chrome.storage.session.get(QUALITIES_STORAGE_KEY);
     const cache = stored?.[QUALITIES_STORAGE_KEY] || {};
-    cache[videoId] = { qualities, at: Date.now() };
+    cache[videoId] = { qualities, title, at: Date.now() };
     await chrome.storage.session.set({ [QUALITIES_STORAGE_KEY]: cache });
   } catch {
     // Cache is best effort.
   }
-  return { ok: true, qualities };
+  return { ok: true, qualities, title };
 }

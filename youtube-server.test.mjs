@@ -201,12 +201,12 @@ test("listYouTubeQualities accepts shorts URLs", async () => {
     assert.equal(url, "http://server.test:8788/api/youtube-formats");
     const body = JSON.parse(options.body);
     assert.equal(body.url, "https://youtube.com/shorts/AbCdEf12345");
-    return jsonResponse({ ok: true, qualities: [1080, 720, 480] });
+    return jsonResponse({ ok: true, qualities: [1080, 720, 480], title: "Shorts 제목" });
   });
   const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
 
   const result = await mod.listYouTubeQualities("https://youtube.com/shorts/AbCdEf12345", "http://server.test:8788");
-  assert.deepEqual(result, { ok: true, qualities: [1080, 720, 480] });
+  assert.deepEqual(result, { ok: true, qualities: [1080, 720, 480], title: "Shorts 제목" });
 });
 
 test("waitForYouTubeJob polls with the bearer token until ready", async () => {
@@ -232,6 +232,19 @@ test("waitForYouTubeJob polls with the bearer token until ready", async () => {
   assert.deepEqual(failed, { ok: false, error: "video-unavailable" });
 });
 
+test("waitForYouTubeJob exits immediately when the local download is cancelled", async () => {
+  serverEnvironment();
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+  const controller = new AbortController();
+  controller.abort();
+  const result = await mod.waitForYouTubeJob("job-1", "http://server.test:8788", {
+    pollMs: 1000,
+    timeoutMs: 2000,
+    signal: controller.signal,
+  });
+  assert.deepEqual(result, { ok: false, error: "cancelled" });
+});
+
 test("youtubeJobFileUrl appends the capability token", async () => {
   const env = serverEnvironment();
   env.setFetch(() => jsonResponse(TOKEN_BODY));
@@ -250,16 +263,42 @@ test("listYouTubeQualities fetches and caches available heights", async () => {
     formatsCalls += 1;
     const body = JSON.parse(options.body);
     assert.equal(body.url, "https://youtube.com/watch?v=abc");
-    return jsonResponse({ ok: true, qualities: [2160, 1440, 1080, 720, 480] });
+    return jsonResponse({ ok: true, qualities: [2160, 1440, 1080, 720, 480], title: "인식된 영상 제목" });
   });
   const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
 
   const first = await mod.listYouTubeQualities("https://youtube.com/watch?v=abc", "http://server.test:8788");
-  assert.deepEqual(first, { ok: true, qualities: [2160, 1440, 1080, 720, 480] });
+  assert.deepEqual(first, {
+    ok: true,
+    qualities: [2160, 1440, 1080, 720, 480],
+    title: "인식된 영상 제목",
+  });
   const second = await mod.listYouTubeQualities("https://youtube.com/watch?v=abc", "http://server.test:8788");
   assert.equal(second.cached, true);
   assert.deepEqual(second.qualities, [2160, 1440, 1080, 720, 480]);
+  assert.equal(second.title, "인식된 영상 제목");
   assert.equal(formatsCalls, 1);
+});
+
+test("listYouTubeQualities fills the title from YouTube metadata for older servers", async () => {
+  const env = serverEnvironment();
+  env.setFetch((url) => {
+    if (url === "https://aura.mdownloader.workers.dev/api/youtube-token") return jsonResponse(TOKEN_BODY);
+    if (url === "http://server.test:8788/api/youtube-formats") {
+      return jsonResponse({ ok: true, qualities: [1080, 720] });
+    }
+    if (url.startsWith("https://www.youtube.com/oembed?")) {
+      return jsonResponse({ title: "oEmbed 인식 제목" });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  const mod = await import(`./youtube-server.js?test=${++moduleCounter}`);
+
+  const result = await mod.listYouTubeQualities(
+    "https://youtube.com/watch?v=older-server",
+    "http://server.test:8788",
+  );
+  assert.deepEqual(result, { ok: true, qualities: [1080, 720], title: "oEmbed 인식 제목" });
 });
 
 test("listYouTubeQualities falls back when the server cannot list formats", async () => {

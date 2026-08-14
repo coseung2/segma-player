@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Aura Media Downloader",
-  "version": "0.2.87",
+  "version": "0.3.12",
   "description": "Detect and save compatible video and audio streams you are authorized to download.",
   "permissions": [
     "activeTab",
+    "alarms",
     "contextMenus",
     "declarativeNetRequest",
     "downloads",
@@ -28,6 +29,7 @@
         "https://*/*"
       ],
       "js": [
+        "page-media-observer.js",
         "level5-page-bridge.js"
       ],
       "run_at": "document_start",
@@ -59,9 +61,5 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  },
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": false
   }
 }

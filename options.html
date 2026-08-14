@@ -6,62 +6,86 @@
     <title>Aura Media 설정</title>
     <style>
       :root { color-scheme: dark; font-family: "Segoe UI", "Malgun Gothic", sans-serif; background: #10141c; color: #f4f7fb; }
-      body { width: 380px; margin: 0; padding: 18px; box-sizing: border-box; background: #10141c; }
+      body { width: 100%; margin: 0; padding: 18px; box-sizing: border-box; background: #10141c; }
       h1 { margin: 0 0 4px; font-size: 18px; }
       .sub { margin: 0 0 16px; color: #8f9db0; font-size: 11px; line-height: 1.5; }
-      section { padding-top: 14px; border-top: 1px solid #2a3444; }
+      section + section { padding-top: 10px; border-top: 1px solid #2a3444; }
       .label { margin: 0 0 6px; font-size: 12px; font-weight: 700; }
       .desc { margin: 0 0 10px; color: #9eacc0; font-size: 11px; line-height: 1.5; }
-      .buttons { display: flex; gap: 8px; margin-top: 10px; }
-      button { flex: 1; min-height: 32px; border: 0; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700; }
+      .buttons { display: flex; gap: 8px; margin-top: 8px; }
+      button { flex: 1; min-height: 32px; padding: 0 11px; border: 0; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700; text-align: left; }
       .primary { background: #4d84e8; color: #fff; }
       .primary:hover { background: #6195f2; }
       .ghost { background: #202c3d; color: #dce6f4; }
       .ghost:hover { background: #2c3d55; }
-      .status { min-height: 16px; margin: 8px 0 0; color: #8f9db0; font-size: 10px; }
+      .status { min-height: 16px; margin: 8px 0 0; color: #8f9db0; font-size: 11px; }
+      .status:empty { display: none; }
+      .license-device-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+      .license-device-row .status { margin: 0; }
+      .auth-status { flex: 0 0 auto; color: #8f9db0; font-size: 11px; font-weight: 700; }
+      .auth-status.authenticated { color: #78d99a; }
+      .license-key-field { position: relative; }
+      .license-key-field input { width: 100%; box-sizing: border-box; min-height: 36px; padding: 8px 40px 8px 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
+      select, .purchase-field input { width: 100%; box-sizing: border-box; min-height: 36px; padding: 0 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
+      .purchase-field input { padding: 8px 10px; }
+      .address-value { word-break: break-all; }
+      .input-icon-button { position: absolute; top: 0; right: 0; width: 36px; height: 36px; flex: none; min-height: 0; padding: 0; border: 0; border-radius: 0 8px 8px 0; background: transparent; color: #8f9db0; cursor: pointer; font-size: 0; }
+      .input-icon-button:hover, .input-icon-button:focus-visible { background: rgba(255, 255, 255, .06); color: #fff; }
+      .input-icon-button:focus-visible { outline: 2px solid #73a5ff; outline-offset: -2px; }
+      .input-icon-button svg { width: 15px; height: 15px; }
     </style>
   </head>
   <body>
-    <h1>확장 설정</h1>
-    <p class="sub">다운로드한 미디어는 기본적으로 Downloads\Aura Media 폴더에 저장됩니다.</p>
     <section id="license-section">
       <p class="label">Pro 라이선스</p>
-      <p class="desc">결제 후 받은 라이선스 키를 입력하면 재설치 없이 Pro가 활성화되고 YouTube 서버도 Pro로 인증됩니다. 결제 확인 후 승인되면 자동으로 적용됩니다.</p>
-      <input id="license-key" type="text" placeholder="AM-XXXX…" autocomplete="off" style="width:100%; box-sizing:border-box; min-height:36px; padding:8px 10px; border:1px solid #2e3b52; border-radius:8px; background:#0d1219; color:#f4f7fb;" />
+      <div class="license-device-row">
+        <span id="license-device-status" class="status" role="status" aria-live="polite">키당 기기 3개 제한</span>
+        <span id="license-auth-status" class="auth-status" role="status" aria-live="polite"></span>
+      </div>
+      <div class="license-key-field">
+        <input id="license-key" type="text" placeholder="AM-XXXX…" autocomplete="off" />
+        <button id="license-copy" class="input-icon-button" type="button" aria-label="키 복사" title="키 복사">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+        </button>
+      </div>
       <p id="license-status" class="status" role="status" aria-live="polite">확인 중…</p>
       <div class="buttons">
         <button id="license-activate" class="primary" type="button">키 등록</button>
-        <button id="license-refresh" class="ghost" type="button">다시 확인</button>
       </div>
     </section>
-    <section>
-      <p class="label">Aura YouTube 서버</p>
-      <p class="desc">노트북의 yt-dlp 서버 주소입니다. 서버가 켜져 있으면 유튜브 다운로드가 서버를 통해 처리되고, 꺼져 있으면 컴패니언으로 자동 전환됩니다.</p>
-      <input id="yt-server-url" type="text" placeholder="https://desktop-8n966j0.tail4cbe57.ts.net" autocomplete="off" style="width:100%; box-sizing:border-box; min-height:36px; padding:8px 10px; border:1px solid #2e3b52; border-radius:8px; background:#0d1219; color:#f4f7fb;" />
-      <p id="yt-server-status" class="status" role="status" aria-live="polite">확인 중…</p>
+    <section id="purchase-section">
+      <p class="label">Pro 구매 · USDT</p>
+      <p class="desc">USDT-TRC20으로 결제하면 즉시 라이선스 키가 발급됩니다. 네트워크와 금액을 정확히 확인하세요.</p>
+      <label class="label" for="purchase-period">기간</label>
+      <select id="purchase-period">
+        <option value="month">1개월 · $5.99 USDT</option>
+        <option value="year">1년 · $49 USDT</option>
+      </select>
       <div class="buttons">
-        <button id="yt-server-save" class="primary" type="button">저장</button>
-        <button id="yt-server-check" class="ghost" type="button">연결 확인</button>
+        <button id="purchase-create" class="primary" type="button">주문 생성</button>
       </div>
+      <div id="purchase-order" hidden>
+        <p id="purchase-address" class="status address-value"></p>
+        <p id="purchase-amount" class="status"></p>
+        <div class="purchase-field">
+          <input id="purchase-tx" type="text" placeholder="송금 후 트랜잭션 해시(TxID) 입력" autocomplete="off" />
+        </div>
+        <div class="buttons">
+          <button id="purchase-verify" class="primary" type="button">결제 확인</button>
+        </div>
+      </div>
+      <p id="purchase-status" class="status" role="status" aria-live="polite"></p>
     </section>
     <section>
-      <p class="label">병렬 수신</p>
-      <p class="desc">확장 단독으로 동작합니다. 영상을 6개 연결로 동시에 받아 더 빠르게 저장합니다. 저장 폴더를 한 번만 선택하면 그 다음부터 자동으로 병렬 저장됩니다 — Downloads 안에 새 폴더를 만들어 선택하세요. 폴더가 없으면 다운로드할 때 선택 창이 자동으로 열립니다.</p>
+      <p class="label">저장 폴더</p>
+      <p class="desc">새 폴더를 만들어 선택해 주세요. 선택한 폴더에 자동으로 저장됩니다.</p>
       <p id="parallel-status" class="status" role="status" aria-live="polite">확인 중…</p>
       <div class="buttons">
-        <button id="parallel-folder" class="ghost" type="button">저장 폴더 선택</button>
+        <button id="parallel-folder" class="ghost" type="button">저장 폴더 변경</button>
       </div>
-    </section>
-    <section>
-      <p class="desc">페이지·미디어 주소·다운로드 상태는 이 기기 안에서만 사용되며 외부로 전송되지 않습니다.</p>
-      <p class="label">PC 앱 · Aura Media Companion</p>
-      <p class="desc">이전 버전에서 사용하던 PC 앱입니다. 현재 버전은 설치하지 않아도 병렬 저장을 포함한 모든 기능이 확장 단독으로 동작합니다.</p>
-      <p id="companion-status" class="status" role="status" aria-live="polite">확인 중…</p>
-      <div class="buttons">
-        <button id="companion-install" class="primary" type="button">설치 안내 열기</button>
-        <button id="companion-check" class="ghost" type="button">다시 확인</button>
-      </div>
-      <p id="version" class="status" role="status" aria-live="polite"></p>
     </section>
     <script type="module" src="options.js"></script>
   </body>

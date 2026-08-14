@@ -18,7 +18,8 @@ export const MEDIA_TYPES = Object.freeze({
 });
 
 export function isDownloadableMediaType(value) {
-  return value === MEDIA_TYPES.PROGRESSIVE || value === MEDIA_TYPES.HLS_MASTER || value === MEDIA_TYPES.HLS_MEDIA;
+  return value === MEDIA_TYPES.PROGRESSIVE || value === MEDIA_TYPES.HLS_MASTER
+    || value === MEDIA_TYPES.HLS_MEDIA || value === MEDIA_TYPES.DASH;
 }
 
 function publicIpLiteral(hostname) {

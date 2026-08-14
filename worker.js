@@ -26,6 +26,15 @@ function isValidLicenseKey(value) {
   return typeof value === "string" && /^AM-[0-9A-F]{36}$/.test(value);
 }
 
+const MAX_LICENSE_DEVICES = 3;
+
+const PLAN_PERIODS = Object.freeze({
+  month: { amountUsdt: 5.99, durationMs: 30 * 24 * 60 * 60 * 1000 },
+  year: { amountUsdt: 49, durationMs: 365 * 24 * 60 * 60 * 1000 },
+});
+
+const USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
+
 function issueLicenseKey() {
   const bytes = new Uint8Array(18);
   crypto.getRandomValues(bytes);
@@ -71,6 +80,42 @@ async function writeRecord(env, key, record) {
   await env.LICENSES.put(key, JSON.stringify(record));
 }
 
+function licenseExpired(record) {
+  return typeof record?.expiresAt === "number"
+    && record.expiresAt > 0
+    && Date.now() > record.expiresAt;
+}
+
+async function verifyTrc20(txHash, walletAddress, expectedAmount, apiKey) {
+  try {
+    const headers = apiKey ? { "TRON-PRO-API-KEY": apiKey } : {};
+    const response = await fetch(
+      `https://api.trongrid.io/v1/transactions/${encodeURIComponent(txHash)}/events`,
+      { headers },
+    );
+    if (!response.ok) return { verified: false, error: `trongrid-http-${response.status}` };
+    const data = await response.json();
+    const events = Array.isArray(data?.data) ? data.data : [];
+    if (!events.length) return { verified: false, error: "transaction-not-confirmed" };
+    const wallet = walletAddress.toLowerCase();
+    for (const event of events) {
+      if (event.event_name !== "Transfer") continue;
+      const contract = String(event.contract_address || "").toLowerCase();
+      if (contract !== USDT_TRC20_CONTRACT.toLowerCase()) continue;
+      const to = String(event.result?.to || "").toLowerCase();
+      if (to !== wallet) continue;
+      const value = String(event.result?.value || "0");
+      const amount = Number(value) / 1e6;
+      if (Number.isFinite(amount) && amount >= expectedAmount * 0.99) {
+        return { verified: true };
+      }
+    }
+    return { verified: false, error: "usdt-transfer-not-found" };
+  } catch (error) {
+    return { verified: false, error: error?.message || "verification-failed" };
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -79,14 +124,36 @@ export default {
     if (path === "/api/license" && request.method === "GET") {
       const key = (url.searchParams.get("key") || "").trim().toUpperCase();
       if (!isValidLicenseKey(key)) return json({ ok: false, error: "invalid-key" }, 400);
+      const deviceId = (url.searchParams.get("deviceId") || "").trim();
       const record = await readRecord(env, key);
       if (!record) return json({ ok: false, error: "invalid-key" }, 404);
+      if (licenseExpired(record)) {
+        return json({ ok: true, edition: "free", status: "expired", expiresAt: record.expiresAt });
+      }
       if (record.status === "approved") {
+        const devices = Array.isArray(record.devices)
+          ? record.devices.filter((item) => typeof item === "string")
+          : [];
+        if (isValidDeviceId(deviceId) && !devices.includes(deviceId)) {
+          if (devices.length >= MAX_LICENSE_DEVICES) {
+            return json({
+              ok: false,
+              error: "device-limit-reached",
+              devices: devices.length,
+              limit: MAX_LICENSE_DEVICES,
+            }, 403);
+          }
+          devices.push(deviceId);
+          await writeRecord(env, key, { ...record, devices });
+        }
         return json({
           ok: true,
           edition: "pro",
           status: "approved",
           approvedAt: typeof record.approvedAt === "string" ? record.approvedAt : null,
+          expiresAt: typeof record.expiresAt === "number" ? record.expiresAt : null,
+          devices: devices.length,
+          limit: MAX_LICENSE_DEVICES,
         });
       }
       return json({ ok: true, edition: "free", status: "pending" });
@@ -105,7 +172,7 @@ export default {
       if (key) {
         if (!isValidLicenseKey(key)) return json({ ok: false, error: "invalid-key" }, 400);
         const record = await readRecord(env, key);
-        if (!record || record.status !== "approved") {
+        if (!record || record.status !== "approved" || licenseExpired(record)) {
           return json({ ok: false, error: "license-not-approved" }, 403);
         }
         plan = "pro";
@@ -115,6 +182,70 @@ export default {
       const exp = Date.now() + TOKEN_TTL_MS;
       const token = await signToken(env.YT_SERVER_SECRET, { deviceId, plan, keyId, exp });
       return json({ ok: true, token, exp, plan });
+    }
+
+    if (path === "/api/pay/order" && request.method === "POST") {
+      const wallet = (env.USDT_TRC20_ADDRESS || "").trim();
+      if (!wallet) return json({ ok: false, error: "payment-not-configured" }, 503);
+      const body = await request.json().catch(() => null);
+      const period = body?.period === "year" ? "year" : "month";
+      const plan = PLAN_PERIODS[period];
+      const orderId = crypto.randomUUID();
+      const key = issueLicenseKey();
+      await writeRecord(env, key, {
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        orderId,
+        period,
+      });
+      await writeRecord(env, `order:${orderId}`, {
+        key,
+        period,
+        amountUsdt: plan.amountUsdt,
+        status: "pending",
+        createdAt: Date.now(),
+      });
+      return json({
+        ok: true,
+        orderId,
+        licenseKey: key,
+        walletAddress: wallet,
+        network: "trc20",
+        amountUsdt: plan.amountUsdt,
+        durationMs: plan.durationMs,
+      }, 201);
+    }
+
+    if (path === "/api/pay/verify" && request.method === "POST") {
+      const wallet = (env.USDT_TRC20_ADDRESS || "").trim();
+      if (!wallet) return json({ ok: false, error: "payment-not-configured" }, 503);
+      const body = await request.json().catch(() => null);
+      const orderId = typeof body?.orderId === "string" ? body.orderId : "";
+      const txHash = typeof body?.txHash === "string" ? body.txHash.trim() : "";
+      if (!orderId || !txHash) return json({ ok: false, error: "invalid-request" }, 400);
+      const order = await readRecord(env, `order:${orderId}`);
+      if (!order) return json({ ok: false, error: "order-not-found" }, 404);
+      if (order.status === "confirmed") return json({ ok: false, error: "already-confirmed" }, 409);
+      const plan = PLAN_PERIODS[order.period] || PLAN_PERIODS.month;
+      const result = await verifyTrc20(txHash, wallet, plan.amountUsdt, env.TRONGRID_API_KEY || "");
+      if (!result.verified) return json({ ok: false, error: result.error || "verification-failed" }, 400);
+      const expiresAt = Date.now() + plan.durationMs;
+      const record = await readRecord(env, order.key);
+      if (record) {
+        await writeRecord(env, order.key, {
+          ...record,
+          status: "approved",
+          approvedAt: new Date().toISOString(),
+          expiresAt,
+        });
+      }
+      await writeRecord(env, `order:${orderId}`, {
+        ...order,
+        status: "confirmed",
+        confirmedAt: Date.now(),
+        expiresAt,
+      });
+      return json({ ok: true, key: order.key, period: order.period, expiresAt });
     }
 
     if (path.startsWith("/api/admin/")) {

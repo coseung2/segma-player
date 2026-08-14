@@ -7,13 +7,19 @@ import {
   ivForSegment,
   parseHlsPlaylist,
 } from "./hls.js";
+import { DashParseError, parseDashManifest } from "./dash.js";
 import { filenameForDownload } from "./download.js";
+import {
+  DEFAULT_FILENAME_TEMPLATE,
+  FILENAME_TEMPLATE_STORAGE_KEY,
+  formatFilenameTemplate,
+} from "./filename-template.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { level5KeyErrorMessage, normalizeLevel5KeyError } from "./level5-key-error.js";
 import { parallelDownload } from "./parallel-download.js";
 import { progressiveDownloadErrorMessage, replayableRecordedHeaders } from "./progressive-redirect.js";
 import { productPlan } from "./product-plan.js";
-import { getStoredSaveDirectory } from "./save-directory.js";
+import { createUniqueFile, getStoredSaveDirectory } from "./save-directory.js";
 
 export const MAX_HLS_SEGMENTS = 10_000;
 const SUPPORTED_KEY_METHODS = new Set(["AES-128", "AES-256"]);
@@ -23,17 +29,79 @@ let activePlan = CURRENT_PLAN;
 const DOOD_MEDIA_HOST_RE = /(?:doodcdn|doimg|d000d|dood\.|playmogo|cloudatacdn)\./i;
 const keyMaterialCache = new Map();
 
+function dashRepresentationScore(representation) {
+  const pixels = Number(representation?.width || 0) * Number(representation?.height || 0);
+  return pixels * 1_000_000 + Number(representation?.bandwidth || 0);
+}
+
+export function chooseDashRepresentation(representations, kind) {
+  return [...(Array.isArray(representations) ? representations : [])]
+    .filter((representation) => representation?.kind === kind)
+    .sort((left, right) => dashRepresentationScore(right) - dashRepresentationScore(left))[0] || null;
+}
+
+function dashMediaForRepresentation(representation) {
+  if (!representation || !Array.isArray(representation.segments) || !representation.segments.length) {
+    throw new Error(representation?.index
+      ? "이 DASH 영상은 SegmentBase 인덱스 분석이 필요해 아직 저장할 수 없습니다."
+      : "DASH 영상 구간을 찾지 못했습니다.");
+  }
+  return {
+    initUrl: representation.initialization?.url || null,
+    initByterange: representation.initialization?.range || null,
+    segments: representation.segments.map((segment) => segment.url),
+    byteranges: representation.segments.map((segment) => segment.range || null),
+    keys: [],
+    mediaSequence: 0,
+  };
+}
+
+export function dashTracksForPlan(plan, title = "DASH 영상") {
+  const tracks = [];
+  const periods = Array.isArray(plan?.periods) ? plan.periods : [];
+  for (let periodIndex = 0; periodIndex < periods.length; periodIndex += 1) {
+    const representations = periods[periodIndex].adaptationSets
+      .flatMap((adaptation) => adaptation.representations || []);
+    for (const kind of ["video", "audio"]) {
+      const representation = chooseDashRepresentation(representations, kind);
+      if (!representation) continue;
+      const suffix = `${periods.length > 1 ? `-p${periodIndex + 1}` : ""}-${kind}`;
+      tracks.push({
+        kind,
+        periodIndex,
+        representation,
+        media: dashMediaForRepresentation(representation),
+        title: `${title}${suffix}`,
+        extension: kind === "audio" ? "m4a" : "mp4",
+        filename: filenameFor(`${title}${suffix}`, kind === "audio" ? "m4a" : "mp4"),
+      });
+    }
+  }
+  if (!tracks.length) throw new Error("DASH 비디오·오디오 트랙을 찾지 못했습니다.");
+  return tracks;
+}
+
 export function setRuntimePlan(plan) {
   if (plan && typeof plan === "object") activePlan = plan;
 }
 
-export function createDownloadContext({ onStatus = null, frameId = null, pauseGate = null, paceBytes = null, totalBytes = null } = {}) {
+export function createDownloadContext({
+  onStatus = null,
+  frameId = null,
+  tabId = null,
+  pauseGate = null,
+  paceBytes = null,
+  totalBytes = null,
+  signal = null,
+} = {}) {
   return {
     onStatus: typeof onStatus === "function" ? onStatus : null,
     pauseGate: typeof pauseGate === "function" ? pauseGate : null,
     paceBytes: typeof paceBytes === "function" ? paceBytes : null,
     totalBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : null,
+    signal: signal && typeof signal === "object" ? signal : null,
     frameId: Number.isInteger(frameId) ? frameId : null,
+    tabId: Number.isInteger(tabId) ? tabId : null,
     recordedHeadersByUrl: new Map(),
   };
 }
@@ -69,6 +137,24 @@ export function assertDownloadWithinPlan(totalBytes, nextBytes, plan = activePla
 }
 
 const defaultDownloadContext = createDownloadContext();
+
+async function configuredFilenameTemplate() {
+  try {
+    const stored = await chrome.storage.local.get({ [FILENAME_TEMPLATE_STORAGE_KEY]: DEFAULT_FILENAME_TEMPLATE });
+    return stored?.[FILENAME_TEMPLATE_STORAGE_KEY] || DEFAULT_FILENAME_TEMPLATE;
+  } catch {
+    return DEFAULT_FILENAME_TEMPLATE;
+  }
+}
+
+function filenameFromTemplate(template, candidate, title, extension, fallbackFilename = "") {
+  return formatFilenameTemplate(template, {
+    title,
+    filename: fallbackFilename,
+    ext: extension,
+    url: candidate?.resourceUrl || "",
+  });
+}
 
 class MediaRoutePreparationError extends Error {
   constructor(detail = "media-route-failed") {
@@ -124,7 +210,10 @@ async function probeDownloadTotalBytes(url, referrer, context = defaultDownloadC
   let rangeSupported = false;
   await withMediaFetchLease(url, referrer, async (response) => {
     contentType = response.headers?.get?.("content-type") || "";
-    if (!response.ok && response.status !== 206) return;
+    if (!response.ok && response.status !== 206) {
+      await response.body?.cancel?.().catch(() => {});
+      throw new Error(`영상 요청 실패 (${response.status}): ${redactUrlForMessage(url)}`);
+    }
     rangeSupported = response.status === 206;
     const contentRange = response.headers?.get?.("content-range") || "";
     const match = /\/\s*(\d+)\s*$/.exec(contentRange);
@@ -136,6 +225,9 @@ async function probeDownloadTotalBytes(url, referrer, context = defaultDownloadC
     }
     await response.body?.cancel?.().catch(() => {});
   }, { Range: "bytes=0-0" }, context);
+  if (total === 0) {
+    throw new Error("영상 서버가 빈 파일을 반환했습니다. 영상 페이지를 새로고침하고 재생한 뒤 다시 시도해 주세요.");
+  }
   return {
     total: Number.isFinite(total) && total >= 0 ? total : null,
     contentType,
@@ -150,7 +242,7 @@ export async function tryBrowserDownloadFallback(
   referrer = "",
   context = defaultDownloadContext,
 ) {
-  if (typeof chrome?.downloads?.download !== "function") return null;
+  if (typeof chrome?.runtime?.sendMessage !== "function") return null;
   if (!/^https?:/i.test(String(url || ""))) return null;
   const safeName = browserDownloadFilename(filename);
   const probed = await probeDownloadTotalBytes(url, referrer, context);
@@ -163,35 +255,30 @@ export async function tryBrowserDownloadFallback(
     && probed?.total !== null && probed?.total !== undefined) {
     assertDownloadWithinPlan(0, probed.total, plan);
   }
-  let downloadId = null;
-  if (typeof chrome?.downloads?.download === "function") {
-    try {
-      downloadId = await chrome.downloads.download({
-        url,
-        filename: safeName,
-        conflictAction: "uniquify",
-        saveAs: false,
-      });
-    } catch (error) {
-      throw new Error(
-        `브라우저 다운로드로 저장하지 못했습니다 (${error instanceof Error ? error.message : "download-failed"}). 컴패니언 설치 후 다시 시도해 주세요.`,
-      );
+  const requestId = globalThis.crypto?.randomUUID?.() || `download-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const cancel = () => {
+    void chrome.runtime.sendMessage({ type: "cancel-browser-download", requestId }).catch(() => {});
+  };
+  context.signal?.addEventListener?.("abort", cancel, { once: true });
+  try {
+    const response = await raceWithAbort(chrome.runtime.sendMessage({
+      type: "browser-download",
+      requestId,
+      url,
+      filename: safeName,
+    }), context.signal);
+    if (!response?.ok || !Number.isInteger(response.downloadId) || !Number.isFinite(response.bytes) || response.bytes <= 0) {
+      if (response?.error === "empty-download") {
+        throw new Error("영상 서버가 빈 파일을 반환했습니다. 영상 페이지를 새로고침하고 재생한 뒤 다시 시도해 주세요.");
+      }
+      const detail = response?.message || response?.error || "download-failed";
+      throw new Error(`브라우저 다운로드로 저장하지 못했습니다 (${detail}).`);
     }
-  } else {
-    // Offscreen documents cannot call chrome.downloads directly; route the
-    // browser download through the service worker.
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: "browser-download",
-        url,
-        filename: safeName,
-      });
-      if (response?.ok && Number.isInteger(response.downloadId)) downloadId = response.downloadId;
-    } catch {
-      downloadId = null;
-    }
+    assertDownloadWithinPlan(0, response.bytes, plan);
+    return { fallback: true, completed: true, bytes: response.bytes };
+  } finally {
+    context.signal?.removeEventListener?.("abort", cancel);
   }
-  return Number.isInteger(downloadId) ? { fallback: true, bytes: 0 } : null;
 }
 
 function redactUrlForMessage(url) {
@@ -293,6 +380,7 @@ async function withMediaFetchLease(url, referrer, consume, requestHeaders = {}, 
     type: "prepare-media-fetch",
     url,
     referrer,
+    sourceContext: { tabId: context.tabId, frameId: context.frameId, initiator: referrer },
   });
   const leaseId = prepared?.leaseId;
   if (!prepared?.ok || leaseId == null) {
@@ -309,6 +397,7 @@ async function withMediaFetchLease(url, referrer, consume, requestHeaders = {}, 
       referrer,
       referrerPolicy: "unsafe-url",
       headers,
+      signal: context.signal,
     });
     return await consume(response);
   } finally {
@@ -377,17 +466,60 @@ async function fetchArrayBuffer(url, referrer, label, context = defaultDownloadC
   return data;
 }
 
-async function requestPageDecodedKey(url, videoTabId, videoFrameId = null) {
+function abortError() {
+  const error = new Error("사용자가 다운로드를 취소했습니다.");
+  error.name = "AbortError";
+  error.code = "download-cancelled";
+  return error;
+}
+
+function level5KeyFailure(code) {
+  const normalized = normalizeLevel5KeyError(code);
+  const error = new Error(level5KeyErrorMessage(normalized));
+  error.code = normalized;
+  return error;
+}
+
+function raceWithAbort(promise, signal = null) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(abortError());
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+function abortableDelay(ms, signal = null) {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      reject(abortError());
+    };
+    function done() {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function requestPageDecodedKey(url, videoTabId, videoFrameId = null, signal = null) {
   if (!Number.isInteger(videoTabId) || videoTabId <= 0) {
-    throw new Error(level5KeyErrorMessage("level5-key-unavailable"));
+    throw level5KeyFailure("level5-key-unavailable");
   }
   async function ask() {
-    const response = await chrome.runtime.sendMessage({
+    if (signal?.aborted) throw abortError();
+    const response = await raceWithAbort(chrome.runtime.sendMessage({
       type: "decode-hls-key",
       url,
       tabId: videoTabId,
       frameId: videoFrameId,
-    });
+    }), signal);
     const bytes = response?.ok ? toBytes(response.key) : null;
     if (bytes && (bytes.byteLength === 16 || bytes.byteLength === 32)) return bytes;
     return { code: normalizeLevel5KeyError(response?.error) };
@@ -406,15 +538,16 @@ async function requestPageDecodedKey(url, videoTabId, videoFrameId = null) {
       "runtime-import-failed",
     ]);
     if (transient.has(first.code)) {
-      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      await abortableDelay(1_200, signal);
       const retried = await ask();
       if (retried instanceof Uint8Array) return retried;
-      throw new Error(level5KeyErrorMessage(retried.code || first.code));
+      throw level5KeyFailure(retried.code || first.code);
     }
-    throw new Error(level5KeyErrorMessage(first.code));
+    throw level5KeyFailure(first.code);
   } catch (error) {
+    if (signal?.aborted || error?.name === "AbortError") throw error;
     if (typeof error?.message === "string" && error.message.startsWith("보호된 영상 키 확인 실패:")) throw error;
-    throw new Error(level5KeyErrorMessage("level5-key-unavailable"));
+    throw level5KeyFailure("level5-key-unavailable");
   }
 }
 
@@ -424,6 +557,7 @@ async function withParallelMediaFetchLease(url, referrer, context, run) {
     type: "prepare-media-fetch",
     url,
     referrer,
+    sourceContext: { tabId: context.tabId, frameId: context.frameId, initiator: referrer },
   });
   const leaseId = prepared?.leaseId;
   if (!prepared?.ok || leaseId == null) {
@@ -446,7 +580,7 @@ async function keyMaterial(key, referrer, videoTabId = null, context = defaultDo
   if (cached) return cached;
   let keyBytes = await fetchArrayBuffer(key.uri, referrer, "보호 키", context);
   if (keyBytes.byteLength !== 16 && keyBytes.byteLength !== 32) {
-    keyBytes = await requestPageDecodedKey(key.uri, videoTabId, context.frameId);
+    keyBytes = await requestPageDecodedKey(key.uri, videoTabId, context.frameId, context.signal);
   }
   if (keyBytes.byteLength !== 16 && keyBytes.byteLength !== 32) {
     throw new Error("영상 보호 키를 확인하지 못했습니다. 원본 영상 탭에서 영상을 재생한 뒤 다시 시도해 주세요.");
@@ -673,17 +807,24 @@ async function writeChunk(writable, value) {
   await writable.write({ type: "write", data: bytes });
 }
 
-function progressiveSession(url, pageUrl, videoTabId) {
+function progressiveSession(url, pageUrl, videoTabId, signal = null) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
     const port = chrome.runtime.connect({ name: "media-stream" });
     let settled = false;
+    const abort = () => finish(null, abortError());
     const finish = (value, error) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener?.("abort", abort);
       try { port.disconnect(); } catch { /* already closed */ }
       if (error) reject(error);
       else resolve(value);
     };
+    signal?.addEventListener?.("abort", abort, { once: true });
     port.onDisconnect.addListener(() => finish(null, new Error("다운로드 연결이 끊겼습니다.")));
     port.onMessage.addListener((message) => {
       if (!message) return;
@@ -760,19 +901,37 @@ async function prepareProgressiveFetch(session, context = defaultDownloadContext
   return { ...session, url: finalUrl, authenticatedProbeRequired: false };
 }
 
-async function requestSourceFrameDownload(url, filename, videoTabId, videoFrameId = null) {
+async function requestSourceFrameDownload(url, filename, videoTabId, videoFrameId = null, signal = null) {
   if (!Number.isInteger(videoTabId) || videoTabId <= 0 || !isDoodLikeHost(url)) return null;
+  const requestId = globalThis.crypto?.randomUUID?.() || `source-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const cancel = () => {
+    void chrome.runtime.sendMessage({ type: "cancel-browser-download", requestId }).catch(() => {});
+  };
+  signal?.addEventListener?.("abort", cancel, { once: true });
   try {
-    const response = await chrome.runtime.sendMessage({
+    const response = await raceWithAbort(chrome.runtime.sendMessage({
       type: "download-in-source-frame",
+      requestId,
       url,
       filename,
       tabId: videoTabId,
       frameId: Number.isInteger(videoFrameId) && videoFrameId >= 0 ? videoFrameId : null,
-    });
-    return response?.ok ? { fallback: true } : null;
-  } catch {
+    }), signal);
+    if (response?.ok && Number.isInteger(response.downloadId)
+      && Number.isFinite(response.bytes) && response.bytes > 0) {
+      return { fallback: true, completed: true, bytes: response.bytes };
+    }
+    if (response?.error === "empty-download") {
+      const error = new Error("영상 서버가 빈 파일을 반환했습니다. 영상 페이지를 새로고침하고 재생한 뒤 다시 시도해 주세요.");
+      error.code = "empty-download";
+      throw error;
+    }
     return null;
+  } catch (error) {
+    if (signal?.aborted || error?.name === "AbortError" || error?.code === "empty-download") throw error;
+    return null;
+  } finally {
+    signal?.removeEventListener?.("abort", cancel);
   }
 }
 
@@ -823,8 +982,19 @@ async function saveProgressive(
   dirHandle = null,
 ) {
   const session = preparedSession
-    || await prepareProgressiveFetch(await progressiveSession(url, pageUrl, videoTabId), context);
+    || await prepareProgressiveFetch(await progressiveSession(url, pageUrl, videoTabId, context.signal), context);
   const saveHandle = dirHandle || await getStoredSaveDirectory();
+  let allocation = null;
+  const allocatedFile = async () => {
+    if (!saveHandle) throw new Error("no-save-sink");
+    if (!allocation) allocation = await createUniqueFile(saveHandle, filename);
+    return allocation;
+  };
+  const removeAllocatedFile = async () => {
+    if (!saveHandle || !allocation?.filename || typeof saveHandle.removeEntry !== "function") return;
+    await saveHandle.removeEntry(allocation.filename).catch(() => {});
+    allocation = null;
+  };
 
   if (session.sourceFrameFallbackPreferred) {
     const fallback = await requestSourceFrameDownload(
@@ -832,6 +1002,7 @@ async function saveProgressive(
       filename,
       videoTabId,
       context.frameId,
+      context.signal,
     );
     if (fallback) return fallback;
   }
@@ -851,9 +1022,8 @@ async function saveProgressive(
       });
     };
     try {
-      if (!saveHandle) throw new Error("no-save-sink");
-      const fileHandle = await saveHandle.getFileHandle(filename, { create: true });
-      const writable = await fileHandle.createWritable({ keepExistingData: true });
+      const output = await allocatedFile();
+      const writable = await output.fileHandle.createWritable();
       const sink = {
         write: (data) => writable.write(data),
         close: () => writable.close(),
@@ -861,13 +1031,15 @@ async function saveProgressive(
       };
       const result = await withParallelMediaFetchLease(session.url, referrer, context, () => parallelDownload({
         url: session.url,
-        filename,
+        filename: output.filename,
         createSink: async () => sink,
         fetchImpl,
+        signal: context.signal,
         onProgress: (written, total) => setStatus(saveProgressText(written, total), false, context),
       }));
       return { bytes: result.bytes };
-    } catch {
+    } catch (error) {
+      if (context.signal?.aborted) throw error;
       // Fall through to the single-stream path.
     }
   }
@@ -876,14 +1048,15 @@ async function saveProgressive(
   let sinkError = null;
   if (saveHandle) {
     try {
-      const fileHandle = await saveHandle.getFileHandle(filename, { create: true });
-      writable = await fileHandle.createWritable({ keepExistingData: true });
+      const output = await allocatedFile();
+      writable = await output.fileHandle.createWritable();
     } catch (error) {
       writable = null;
       sinkError = error;
     }
   }
   if (!writable) {
+    await removeAllocatedFile();
     const downloaded = await tryBrowserDownloadFallback(
       session.url,
       filename,
@@ -914,9 +1087,14 @@ async function saveProgressive(
         filename,
         videoTabId,
         context.frameId,
+        context.signal,
       );
-      if (fallback) return fallback;
+      if (fallback) {
+        await removeAllocatedFile();
+        return fallback;
+      }
     }
+    await removeAllocatedFile();
     throw error;
   }
 }
@@ -927,13 +1105,14 @@ async function saveHlsToNative(media, filename, referrer, videoTabId = null, con
     throw new Error("분할 형식 영상은 저장 폴더 연결이 필요합니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
   }
   let writable;
+  let allocation = null;
   try {
-    const fileHandle = await saveHandle.getFileHandle(filename, { create: true });
-    writable = await fileHandle.createWritable({ keepExistingData: true });
+    allocation = await createUniqueFile(saveHandle, filename);
+    writable = await allocation.fileHandle.createWritable();
   } catch (error) {
     throw new Error(error?.name === "NotAllowedError"
       ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다."
-      : "저장 폴더에 쓸 수 없습니다. 옵션 → 저장 폴더 선택에서 새 빈 폴더를 다시 지정해 주세요.");
+      : "저장 폴더에 쓸 수 없습니다. 옵션 → 저장 폴더 변경에서 새 빈 폴더를 다시 지정해 주세요.");
   }
   let count = 0;
   let writtenBytes = 0;
@@ -948,6 +1127,9 @@ async function saveHlsToNative(media, filename, referrer, videoTabId = null, con
     return { count };
   } catch (error) {
     try { await writable.abort(); } catch { /* already closed */ }
+    if (allocation?.filename && typeof saveHandle.removeEntry === "function") {
+      await saveHandle.removeEntry(allocation.filename).catch(() => {});
+    }
     throw error;
   }
 }
@@ -956,6 +1138,7 @@ export {
   ensureCurrentBackground,
   loadRecordedHeaders,
   prepareProgressiveFetch,
+  progressiveSession,
   requestSourceFrameDownload,
   requestPageDecodedKey,
   streamFetchToWritable,
@@ -964,22 +1147,37 @@ export {
   writeChunk,
 };
 
-export async function prepareDownloadCandidate(candidate, { onStatus = null, pauseGate = null, paceBytes = null } = {}) {
+export async function prepareDownloadCandidate(candidate, {
+  onStatus = null,
+  pauseGate = null,
+  paceBytes = null,
+  signal = null,
+} = {}) {
   if (!candidate || typeof candidate.resourceUrl !== "string") throw new Error("다운로드 후보가 올바르지 않습니다.");
 
   const context = createDownloadContext({
     onStatus,
     pauseGate,
     paceBytes: paceBytes || createSpeedGate(activePlan.downloadSpeedLimitBytesPerSecond),
+    signal,
     frameId: candidate.frameId,
+    tabId: candidate.tabId,
   });
   await loadRecordedHeaders(context);
   const progressive = candidate.mediaType === "PROGRESSIVE";
   if (progressive) {
-    const filename = progressiveFilenameFor(candidate);
+    const fallbackFilename = progressiveFilenameFor(candidate);
+    const extension = /\.([a-z0-9]{2,5})$/i.exec(fallbackFilename)?.[1] || "mp4";
+    const filename = filenameFromTemplate(
+      await configuredFilenameTemplate(),
+      candidate,
+      candidate.pageTitle && candidate.pageTitle !== "직접 입력한 주소" ? candidate.pageTitle : fallbackFilename.replace(/\.[^.]+$/, ""),
+      extension,
+      fallbackFilename,
+    );
     setStatus("영상을 확인하는 중…", false, context);
     const session = await prepareProgressiveFetch(
-      await progressiveSession(candidate.resourceUrl, candidate.pageUrl, candidate.tabId),
+      await progressiveSession(candidate.resourceUrl, candidate.pageUrl, candidate.tabId, context.signal),
       context,
     );
     setStatus(activePlan.backgroundDownloads
@@ -1004,13 +1202,47 @@ export async function prepareDownloadCandidate(candidate, { onStatus = null, pau
     };
   }
 
+  if (candidate.mediaType === "DASH") {
+    setStatus("DASH 영상 정보를 확인하는 중…", false, context);
+    const loaded = await fetchText(candidate.resourceUrl, candidate.pageUrl, context);
+    let plan;
+    try {
+      plan = parseDashManifest(loaded.text, loaded.url);
+    } catch (error) {
+      if (error instanceof DashParseError) {
+        const wrapped = new Error(`DASH 정보를 분석하지 못했습니다 (${error.code}).`);
+        wrapped.code = `dash-${error.code}`;
+        throw wrapped;
+      }
+      throw error;
+    }
+    const filenameTemplate = await configuredFilenameTemplate();
+    const tracks = dashTracksForPlan(plan, candidate.pageTitle || "DASH 영상").map((track) => ({
+      ...track,
+      filename: filenameFromTemplate(filenameTemplate, candidate, track.title, track.extension, track.filename),
+    }));
+    await ensureMediaRoutes(tracks.flatMap((track) => [
+      track.media.initUrl,
+      ...track.media.segments,
+    ]));
+    const segments = tracks.reduce((sum, track) => sum + track.media.segments.length, 0);
+    setStatus(`DASH 정보 확인 완료 · ${tracks.length}개 트랙 · ${segments}개 구간.`, false, context);
+    return { type: "dash", candidate, context, plan, tracks };
+  }
+
   if (candidate.mediaType !== "HLS_MASTER" && candidate.mediaType !== "HLS_MEDIA") {
     throw new Error("unsupported-media");
   }
   setStatus("영상 정보를 확인하는 중…", false, context);
   const media = await loadMediaPlaylist(candidate.resourceUrl, 0, candidate.pageUrl, context);
   const extension = hlsFileExtension(media.initUrl, media.segments);
-  const filename = filenameFor(candidate.pageTitle, extension);
+  const filename = filenameFromTemplate(
+    await configuredFilenameTemplate(),
+    candidate,
+    candidate.pageTitle,
+    extension,
+    filenameFor(candidate.pageTitle, extension),
+  );
   setStatus(`영상 정보 확인 완료 (${media.segments.length}개 구간).`, false, context);
   await prepareHlsKeys(media, candidate.pageUrl, candidate.tabId, context);
   return { type: "hls", candidate, context, filename, media };
@@ -1031,8 +1263,20 @@ export async function downloadPreparedCandidate(prepared) {
     );
     return {
       statusText: result.fallback
-        ? "브라우저 기본 다운로드 폴더로 저장을 시작했습니다."
+        ? `브라우저 기본 다운로드 폴더에 저장을 완료했습니다 (${Math.round(result.bytes / 1048576)} MB).`
         : `다운로드를 완료했습니다 (${Math.round(result.bytes / 1048576)} MB).`,
+    };
+  }
+  if (prepared.type === "dash" && Array.isArray(prepared.tracks)) {
+    for (let index = 0; index < prepared.tracks.length; index += 1) {
+      const track = prepared.tracks[index];
+      setStatus(`DASH ${track.kind === "audio" ? "오디오" : "비디오"} 저장 중… ${index + 1}/${prepared.tracks.length}`, false, context);
+      await saveHlsToNative(track.media, track.filename, candidate.pageUrl, candidate.tabId, context, dirHandle);
+    }
+    return {
+      statusText: prepared.tracks.length > 1
+        ? `DASH 다운로드를 완료했습니다. 비디오·오디오 ${prepared.tracks.length}개 파일로 저장했습니다.`
+        : "DASH 다운로드를 완료했습니다.",
     };
   }
   if (prepared.type !== "hls" || !prepared.media) throw new Error("준비된 다운로드 형식을 지원하지 않습니다.");

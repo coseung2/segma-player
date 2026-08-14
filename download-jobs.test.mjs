@@ -5,12 +5,25 @@ import {
   persistedDownloadJobs,
   publicDownloadJobs,
   retryPayloadForJob,
+  terminalDownloadJob,
   updateDownloadJob,
 } from "./download-jobs.js";
 
 test("download jobs progress to a terminal state", () => {
-  const queued = createDownloadJob({ id: "job-1", title: "영상", mediaType: "HLS", now: 10 });
-  const running = updateDownloadJob(queued, { status: "running", statusText: "저장 중…" }, 20);
+  const queued = createDownloadJob({
+    id: "job-1",
+    title: "영상",
+    mediaType: "HLS",
+    candidateId: "candidate-1",
+    now: 10,
+  });
+  const running = updateDownloadJob(queued, {
+    title: "인식된 영상 제목",
+    status: "running",
+    statusText: "저장 중…",
+  }, 20);
+  assert.equal(running.title, "인식된 영상 제목");
+  assert.equal(running.candidateId, "candidate-1");
   const paused = updateDownloadJob(running, { status: "paused", statusText: "일시정지 — 원래 페이지로 돌아가주세요." }, 25);
   assert.equal(paused.status, "paused");
   assert.equal(paused.statusText, "일시정지 — 원래 페이지로 돌아가주세요.");
@@ -26,8 +39,8 @@ test("download job list is newest first and contains popup-safe fields", () => {
   const older = createDownloadJob({ id: "old", title: "old", mediaType: "MP4", now: 1 });
   const newer = createDownloadJob({ id: "new", title: "new", mediaType: "YOUTUBE", source: "youtube", now: 2 });
   assert.deepEqual(publicDownloadJobs([older, newer], 1), [{
-    id: "new", title: "new", mediaType: "YOUTUBE", status: "queued",
-    statusText: "다운로드 대기 중…", error: "", folderName: "", createdAt: 2, updatedAt: 2, source: "youtube",
+    id: "new", title: "new", mediaType: "YOUTUBE", candidateId: "", status: "queued",
+    statusText: "다운로드 대기 중…", error: "", errorCode: "", folderName: "", createdAt: 2, updatedAt: 2, source: "youtube",
     retryable: false,
   }]);
 });
@@ -50,4 +63,10 @@ test("failed jobs expose retry capability without exposing the private payload",
   assert.equal("retryPayload" in persistedDownloadJobs([failed])[0], false);
   const completed = updateDownloadJob(queued, { status: "completed" }, 3);
   assert.equal(completed.retryPayload, null);
+
+  const cancelled = updateDownloadJob(queued, { status: "cancelled", statusText: "사용자가 취소했습니다." }, 4);
+  assert.equal(publicDownloadJobs([cancelled])[0].retryable, true);
+  assert.equal(retryPayloadForJob(cancelled), retryPayload);
+  assert.equal(terminalDownloadJob(cancelled), true);
+  assert.equal(terminalDownloadJob(queued), false);
 });

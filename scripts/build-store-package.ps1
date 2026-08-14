@@ -41,8 +41,10 @@ if ($UpgradeUrl) {
 $runtimeFiles = @(
   'aes-cbc.js',
   'background.js',
+  'browser-download-monitor.js',
   'candidate.js',
   'content.js',
+  'dash.js',
   'download-errors.js',
   'download-job-view.js',
   'download-jobs.js',
@@ -50,6 +52,7 @@ $runtimeFiles = @(
   'download-worker.html',
   'download-worker.js',
   'download.js',
+  'filename-template.js',
   'hls-download.js',
   'hls.js',
   'level5-key-error.js',
@@ -60,16 +63,20 @@ $runtimeFiles = @(
   'icons/icon48.png',
   'icons/icon128.png',
   'media-fetch-lease.js',
+  'mobile-user-agent.js',
   'options.html',
   'options.js',
   'parallel-download.js',
+  'page-media-observer.js',
   'player-page-resolver.js',
   'popup.css',
   'popup.html',
   'popup.js',
   'progressive-redirect.js',
   'product-plan.js',
+  'request-header-store.js',
   'save-directory.js',
+  'worker-lifecycle.js',
   'youtube-server.js',
   'edition.js',
   'manifest.json'
@@ -148,7 +155,7 @@ function Replace-StoreOnlyPrivateBridge([string]$RelativePath) {
 
 function Write-AuditedManifest {
   $requiredPermissions = @(
-    'activeTab', 'contextMenus', 'declarativeNetRequest',
+    'activeTab', 'alarms', 'contextMenus', 'declarativeNetRequest',
     'downloads', 'offscreen', 'scripting', 'storage', 'webRequest'
   )
   if ($auditedManifest.manifest_version -ne 3) { throw 'Store manifest must be Manifest V3.' }
@@ -176,7 +183,7 @@ function Write-AuditedManifest {
   $isolatedProperties = (@($isolatedContent.PSObject.Properties.Name) | Sort-Object) -join ','
   $validMainBridge = $mainProperties -eq 'all_frames,js,matches,run_at,world' -and
     (@($mainBridge.matches) -join ',') -eq 'http://*/*,https://*/*' -and
-    (@($mainBridge.js) -join ',') -eq 'level5-page-bridge.js' -and
+    (@($mainBridge.js) -join ',') -eq 'page-media-observer.js,level5-page-bridge.js' -and
     $mainBridge.run_at -eq 'document_start' -and
     $mainBridge.all_frames -eq $true -and
     $mainBridge.world -eq 'MAIN'
@@ -251,7 +258,7 @@ function Invoke-StoreAudit([string[]]$ExpectedFiles) {
   if ($manifest.PSObject.Properties.Name -contains 'declarative_net_request') { throw 'Store audit found a static DNR rule.' }
   $contentScripts = @($manifest.content_scripts)
   $validContentScripts = $contentScripts.Count -eq 2 -and
-    (@($contentScripts[0].js) -join ',') -eq 'level5-page-bridge.js' -and
+    (@($contentScripts[0].js) -join ',') -eq 'page-media-observer.js,level5-page-bridge.js' -and
     $contentScripts[0].run_at -eq 'document_start' -and
     $contentScripts[0].world -eq 'MAIN' -and
     (@($contentScripts[1].js) -join ',') -eq 'content.js' -and

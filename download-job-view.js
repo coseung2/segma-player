@@ -4,6 +4,7 @@ const STATUS_LABELS = Object.freeze({
   paused: "일시정지",
   completed: "완료",
   failed: "실패",
+  cancelled: "취소됨",
 });
 
 function boundedPercent(value) {
@@ -31,6 +32,7 @@ function stageFor(status, message) {
   if (status === "paused") return "일시정지";
   if (status === "completed") return "저장 완료";
   if (status === "failed") return "중단됨";
+  if (status === "cancelled") return "취소됨";
   if (/영상 정보|구간\s+\d+개/.test(message)) return "영상 확인";
   if (/저장 중…\s+\d+\s*\//.test(message)) return "저장 중";
   if (/저장 중|영상을 저장/.test(message)) return "파일 저장";
@@ -47,7 +49,7 @@ export function downloadJobView(job = {}) {
   const segments = status === "running" ? segmentProgress(message) : null;
   let progress = { mode: "indeterminate", value: null };
   if (status === "completed") progress = { mode: "determinate", value: 100 };
-  else if (status === "failed") progress = { mode: "failed", value: null };
+  else if (status === "failed" || status === "cancelled") progress = { mode: "failed", value: null };
   else if (segments) progress = { mode: "determinate", value: segments.percent };
   else if (status === "running") {
     const percent = percentProgress(message);
@@ -72,5 +74,5 @@ export function downloadJobView(job = {}) {
 }
 
 export function retryableDownloadJob(job) {
-  return job?.status === "failed" && job.retryable === true;
+  return (job?.status === "failed" || job?.status === "cancelled") && job.retryable === true;
 }

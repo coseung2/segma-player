@@ -171,6 +171,35 @@ export function parseDoodResponse(body) {
   return null;
 }
 
+const DOOD_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+function doodNonce(length = 10) {
+  const values = new Uint32Array(length);
+  try {
+    globalThis.crypto.getRandomValues(values);
+  } catch {
+    for (let index = 0; index < values.length; index += 1) values[index] = Math.floor(Math.random() * 0x100000000);
+  }
+  return [...values].map((value) => DOOD_NONCE_ALPHABET[value % DOOD_NONCE_ALPHABET.length]).join("");
+}
+
+export function completeDoodDirectUrl(value, pageSource, { nonce = null, now = Date.now } = {}) {
+  let direct;
+  try {
+    direct = new URL(String(value || "").trim());
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/.test(direct.protocol) || direct.searchParams.has("token")) return direct.href;
+  const token = /[?&]token=([^&"'\s+]+)/i.exec(String(pageSource || ""))?.[1] || "";
+  const leaf = direct.pathname.split("/").pop() || "";
+  if (!token || /\.[a-z0-9]{2,5}$/i.test(leaf)) return direct.href;
+  direct.pathname += typeof nonce === "string" && nonce ? nonce : doodNonce();
+  direct.searchParams.set("token", token);
+  direct.searchParams.set("expiry", String(now()));
+  return direct.href;
+}
+
 // Local mirror of candidate.js's public-URL security contract. candidate.js
 // imports isStreamtapePlayerPage from this module, so importing it back here
 // would create a cycle; this validator keeps the same properties: public
@@ -538,7 +567,7 @@ async function doodPassResult(text, pageUrl, {
     if (!loaded) return null;
     const body = await boundedResponseText(loaded.response, maxBodyBytes);
     if (body === null) return null;
-    const direct = parseDoodResponse(body);
+    const direct = completeDoodDirectUrl(parseDoodResponse(body), text);
     if (!direct) return null;
     const canonical = canonicalPublicHttpUrl(direct);
     if (!canonical || isRejectedMediaUrl(canonical)) return null;

@@ -6,6 +6,7 @@ $taskName = 'Aura YouTube Service'
 Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 Copy-Item -LiteralPath (Join-Path $package 'app.js') -Destination (Join-Path $service 'app.js') -Force
+Copy-Item -LiteralPath (Join-Path $package 'youtube-quality.cjs') -Destination (Join-Path $service 'youtube-quality.cjs') -Force
 Start-ScheduledTask -TaskName $taskName
 
 $deadline = (Get-Date).AddSeconds(15)

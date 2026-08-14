@@ -7,6 +7,12 @@ const { pathToFileURL } = require("url");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const {
+  qualityAllowedForPlan,
+  qualityFormat,
+  qualitySort,
+  qualityTiersFromFormats,
+} = require("./youtube-quality.cjs");
 
 const PORT = Number(process.env.AURA_YT_PORT || 8788);
 const PROFILE = process.env.USERPROFILE || "C:\\Users\\coseung2";
@@ -147,15 +153,6 @@ function refundQuota(deviceId) {
   }
 }
 
-function qualityFormat(quality) {
-  if (quality === "best") return "bv*+ba/b";
-  const height = Number(quality);
-  if (Number.isFinite(height) && height > 0) {
-    return `b[height<=${height}]/bv*[height<=${height}]+ba/b[height<=${height}]`;
-  }
-  return "b/bv*+ba";
-}
-
 function canonicalYouTubeUrl(value) {
   try {
     const url = new URL(String(value || ""));
@@ -207,15 +204,9 @@ function runFormatsProbe(url) {
       clearTimeout(timer);
       try {
         const data = JSON.parse(stdout);
-        const heights = new Set();
-        for (const format of data?.formats || []) {
-          const height = Number(format?.height);
-          if (Number.isFinite(height) && height > 0) heights.add(height);
-        }
-        const sorted = [...heights].sort((a, b) => b - a);
-        const maxHeight = sorted[0] || 0;
-        const qualities = sorted.filter((height) => height >= 360 || height === maxHeight);
-        resolve(qualities.length ? qualities : null);
+        const qualities = qualityTiersFromFormats(data?.formats);
+        const title = typeof data?.title === "string" ? data.title.trim().slice(0, 200) : "";
+        resolve(qualities.length ? { qualities, title } : null);
       } catch {
         resolve(null);
       }
@@ -223,12 +214,12 @@ function runFormatsProbe(url) {
   });
 }
 
-function rememberFormats(videoId, qualities) {
+function rememberFormats(videoId, metadata) {
   if (formatsCache.size >= FORMATS_CACHE_MAX) {
     const oldest = [...formatsCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
     if (oldest) formatsCache.delete(oldest[0]);
   }
-  formatsCache.set(videoId, { qualities, at: Date.now() });
+  formatsCache.set(videoId, { ...metadata, at: Date.now() });
 }
 
 function finishJob(job, filePath, error) {
@@ -282,6 +273,8 @@ function runJob(job) {
     "-o", `${outputBase}.%(ext)s`,
     job.url,
   ];
+  const sort = qualitySort(job.quality);
+  if (sort) args.splice(args.length - 3, 0, "-S", sort);
   if (COOKIES_FILE && fs.existsSync(COOKIES_FILE)) {
     args.splice(args.length - 1, 0, "--cookies", COOKIES_FILE);
   }
@@ -499,6 +492,11 @@ const server = http.createServer(async (req, res) => {
         logRequest(req, 400, `device=${deviceId} quality=${quality}`);
         return;
       }
+      if (!qualityAllowedForPlan(String(quality), isPro)) {
+        json(res, 403, { error: "pro-feature-required" });
+        logRequest(req, 403, `device=${deviceId} quality=${quality}`);
+        return;
+      }
       const status = isPro ? { ok: true, pro: true, used: 0, limit: null } : quotaStatus(deviceId, "");
       if (!status.ok) {
         json(res, 429, { error: "monthly-limit-reached", used: status.used, limit: status.limit });
@@ -574,18 +572,18 @@ const server = http.createServer(async (req, res) => {
       }
       const cached = formatsCache.get(videoId);
       if (cached && Date.now() - cached.at < FORMATS_TTL_MS) {
-        json(res, 200, { ok: true, qualities: cached.qualities, cached: true });
+        json(res, 200, { ok: true, qualities: cached.qualities, title: cached.title || "", cached: true });
         return;
       }
-      const qualities = await runFormatsProbe(canonical);
-      if (!qualities) {
+      const metadata = await runFormatsProbe(canonical);
+      if (!metadata) {
         json(res, 502, { error: "formats-unavailable" });
         logRequest(req, 502, `device=${payload.deviceId} video=${videoId}`);
         return;
       }
-      rememberFormats(videoId, qualities);
-      json(res, 200, { ok: true, qualities });
-      logRequest(req, 200, `device=${payload.deviceId} video=${videoId} q=${qualities.join(",")}`);
+      rememberFormats(videoId, metadata);
+      json(res, 200, { ok: true, qualities: metadata.qualities, title: metadata.title });
+      logRequest(req, 200, `device=${payload.deviceId} video=${videoId} q=${metadata.qualities.join(",")}`);
       return;
     }
     json(res, 404, { error: "not-found" });

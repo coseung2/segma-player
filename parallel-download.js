@@ -93,7 +93,7 @@ export async function parallelDownload({
     );
     await Promise.all(workers);
     await flush();
-    if (written !== total) throw new Error(`수신 크기 불일치 (${written}/${total})`);
+    if (written !== total) throw new Error(`저장 크기 불일치 (${written}/${total})`);
     await sink.close();
   } catch (error) {
     try {

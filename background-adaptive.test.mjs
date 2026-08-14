@@ -15,6 +15,9 @@ const webRequestListeners = { onBeforeRedirect: [] };
 const sessionStorage = new Map();
 const localStorage = new Map();
 const runtimeMessages = [];
+const cancelledDownloadIds = [];
+const downloadListeners = { created: [], changed: [] };
+const downloadItems = new Map();
 let lastCandidatesSnapshot = null;
 let tabsSendResponse = null;
 let fetchHandler = null;
@@ -87,8 +90,25 @@ globalThis.chrome = {
   },
   windows: { onFocusChanged: { addListener: () => {} }, WINDOW_ID_NONE: -1 },
   downloads: {
-    download: async () => 1,
-    onChanged: { addListener: () => {} },
+    download: async (options) => {
+      downloadItems.set(1, { id: 1, url: options.url, state: "in_progress", fileSize: 0, totalBytes: -1 });
+      return 1;
+    },
+    search: async ({ id }) => downloadItems.has(id) ? [{ ...downloadItems.get(id) }] : [],
+    removeFile: async () => {},
+    cancel: async (downloadId) => { cancelledDownloadIds.push(downloadId); },
+    onCreated: {
+      addListener: (listener) => downloadListeners.created.push(listener),
+      removeListener: (listener) => {
+        downloadListeners.created = downloadListeners.created.filter((item) => item !== listener);
+      },
+    },
+    onChanged: {
+      addListener: (listener) => downloadListeners.changed.push(listener),
+      removeListener: (listener) => {
+        downloadListeners.changed = downloadListeners.changed.filter((item) => item !== listener);
+      },
+    },
   },
   contextMenus: {
     removeAll: (callback) => callback?.(),
@@ -314,6 +334,28 @@ test("media-stream keeps in-frame dood priority above the static graph fallback"
   assert.equal(graphFetches, 0, "cached doodDirectByTab must also win over the static graph fallback");
 });
 
+test("source-frame Dood handoff waits for a non-empty Chrome download", async () => {
+  const url = "https://asw188q.cloudatacdn.com/getfile/video?token=fresh&expiry=1";
+  tabsSendResponse = { ok: true };
+  const pending = runtimeMessage({
+    type: "download-in-source-frame",
+    requestId: "source-request-0001",
+    url,
+    filename: "video.mp4",
+    tabId: 7,
+    frameId: 3,
+  }, { id: runtimeId, url: workerUrl });
+  await settle();
+  const item = { id: 77, url, state: "in_progress", fileSize: 0, totalBytes: -1 };
+  downloadItems.set(item.id, item);
+  for (const listener of downloadListeners.created) listener({ ...item });
+  await settle();
+  downloadItems.set(item.id, { ...item, state: "complete", fileSize: 8192, totalBytes: 8192 });
+  for (const listener of downloadListeners.changed) listener({ id: item.id, state: { current: "complete" } });
+  assert.deepEqual((await pending).response, { ok: true, downloadId: 77, bytes: 8192 });
+  tabsSendResponse = null;
+});
+
 test("port disconnect aborts in-flight graph resolution and suppresses port output", async () => {
   fetchCalls.length = 0;
   const pageUrl = "https://player.example/d/abort";
@@ -442,6 +484,39 @@ test("resource messages use the canonical current frame URL and reject invalid f
     "a canonical message frameUrl must be accepted when sender.url is absent");
 });
 
+test("YouTube transport resources stay out of media detection candidates", async () => {
+  const handler = runtimeListeners.onMessage[0];
+  handler({ type: "clear-tab", tabId: 1 }, {}, () => {});
+
+  handler({
+    type: "resource",
+    resourceUrl: "https://rr1---sn.example.googlevideo.com/videoplayback?id=video",
+    contentType: "video/mp4",
+    frameUrl: "https://www.youtube.com/watch?v=abc123",
+  }, {
+    id: runtimeId,
+    tab: { id: 1, url: "https://www.youtube.com/watch?v=abc123", title: "YouTube title" },
+    url: "https://www.youtube.com/watch?v=abc123",
+    frameId: 0,
+  }, () => {});
+
+  handler({
+    type: "resource",
+    resourceUrl: "https://cdn.example/normal-video.mp4",
+    contentType: "video/mp4",
+    frameUrl: "https://outer.example/watch",
+  }, {
+    id: runtimeId,
+    tab: { id: 1, url: "https://outer.example/watch", title: "Normal video" },
+    url: "https://outer.example/watch",
+    frameId: 0,
+  }, () => {});
+
+  const listed = await runtimeMessage({ type: "list-candidates" }, {});
+  assert.equal(listed.response.candidates.some((candidate) => candidate.previewUrl?.includes("googlevideo.com")), false);
+  assert.equal(listed.response.candidates.some((candidate) => candidate.previewUrl === "https://cdn.example/normal-video.mp4"), true);
+});
+
 test("license activation flips the background plan without reinstalling", async () => {
   fetchCalls.length = 0;
   runtimeMessages.length = 0;
@@ -513,8 +588,15 @@ test("youtube downloads route through the remote server when configured", async 
         pro: false,
       }), { status: 202, headers: { "content-type": "application/json" } });
     }
+    if (call.url === "https://server.test/api/youtube-formats") {
+      return new Response(JSON.stringify({
+        ok: true,
+        qualities: [1080, 720],
+        title: "Recognized Video",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     if (call.url === "https://server.test/api/jobs/job-1") {
-      return new Response(JSON.stringify({ id: "job-1", status: "ready", title: "Server Video" }), {
+      return new Response(JSON.stringify({ id: "job-1", status: "ready" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -532,8 +614,19 @@ test("youtube downloads route through the remote server when configured", async 
   assert.equal(result.response.mode, "youtube-browser");
   await delay(400);
   const stored = sessionStorage.get("downloadJobs") || [];
-  assert.ok(Array.isArray(stored) && stored.some((job) => job.source === "youtube"
-    && job.status === "running" && job.title === "YouTube 영상"));
+  const storedJob = stored.find((job) => job.source === "youtube"
+    && job.status === "running" && job.title === "Recognized Video");
+  assert.ok(storedJob);
+
+  const cancelled = await runtimeMessage({ type: "cancel-download-job", jobId: storedJob.id }, { id: runtimeId });
+  assert.equal(cancelled.response.ok, true);
+  assert.deepEqual(cancelledDownloadIds, [1]);
+  assert.equal((sessionStorage.get("downloadJobs") || []).find((job) => job.id === storedJob.id)?.status, "cancelled");
+
+  const cleared = await runtimeMessage({ type: "clear-download-jobs", surface: "link" }, {});
+  assert.equal(cleared.response.ok, true);
+  assert.equal(cleared.response.cleared >= 1, true);
+  assert.equal((sessionStorage.get("downloadJobs") || []).some((job) => job.id === storedJob.id), false);
 });
 
 test("youtube downloads fail with a server error when the server is unreachable", async () => {

@@ -9,6 +9,8 @@
   const DOOD_RETRY_MAX_MS = 60_000;
   const DOOD_RETRY_MAX_ATTEMPTS = 4;
   const DOOD_FETCH_TIMEOUT_MS = 12_000;
+  const DOOD_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const PAGE_MEDIA_EVENT_TYPE = "aura-media-observer-event-v1";
   const seen = new Set();
   let scanTimer = null;
   let scanScheduled = false;
@@ -188,8 +190,8 @@
             direct = object.f || object.url || object.src || object.file || direct;
           } catch { /* not JSON */ }
         }
-        direct = String(direct).replace(/^["']|["']$/g, "").trim();
-        if (!/^https?:\/\//i.test(direct) || direct.length > MAX_URL_BYTES) {
+        direct = completeDoodDirectUrl(String(direct).replace(/^["']|["']$/g, "").trim(), text);
+        if (!direct) {
           doodDirty = true;
           backoffDoodRetry();
           return null;
@@ -255,6 +257,40 @@
     });
   }
 
+  function doodNonce(length = 10) {
+    const values = new Uint32Array(length);
+    try {
+      crypto.getRandomValues(values);
+    } catch {
+      for (let index = 0; index < values.length; index += 1) values[index] = Math.floor(Math.random() * 0x100000000);
+    }
+    return [...values].map((value) => DOOD_NONCE_ALPHABET[value % DOOD_NONCE_ALPHABET.length]).join("");
+  }
+
+  function completeDoodDirectUrl(value, pageSource) {
+    let direct;
+    try {
+      direct = new URL(String(value || "").trim());
+    } catch {
+      return null;
+    }
+    if (!/^https?:$/.test(direct.protocol) || direct.href.length > MAX_URL_BYTES) return null;
+    if (direct.searchParams.has("token")) return direct.href;
+    const token = /[?&]token=([^&"'\s+]+)/i.exec(String(pageSource || ""))?.[1] || "";
+    const leaf = direct.pathname.split("/").pop() || "";
+    if (!token || /\.[a-z0-9]{2,5}$/i.test(leaf)) return direct.href;
+    direct.pathname += doodNonce();
+    direct.searchParams.set("token", token);
+    direct.searchParams.set("expiry", String(Date.now()));
+    return direct.href;
+  }
+
+  function handlePageMediaEvent(event) {
+    if (event.source !== window || event.data?.type !== PAGE_MEDIA_EVENT_TYPE) return;
+    const data = event.data;
+    if (data.kind === "manifest") report(data.url, data.contentType || "", false, false);
+  }
+
   function handleLevel5KeyRequest(message, sendResponse) {
     if (message?.type !== "decode-level5-key" || typeof message.url !== "string") return false;
     void requestLevel5Key(message.url).then(sendResponse);
@@ -300,6 +336,10 @@
   }
 
   function handleMessage(message, sendResponse) {
+    if (message?.type === "show-download-overlay") {
+      showDownloadOverlay();
+      return false;
+    }
     if (message?.type === "rescan") {
       scheduleScan(true);
       return false;
@@ -307,6 +347,134 @@
     if (handleLevel5KeyRequest(message, sendResponse)) return true;
     if (handleDoodRequest(message, sendResponse)) return true;
     return handleDirectDownload(message, sendResponse);
+  }
+
+  let downloadOverlayTimer = null;
+  const shownDownloadJobIds = new Set();
+  const ACTIVE_DOWNLOAD_STATUSES = new Set(["queued", "running", "paused"]);
+
+  function cleanDownloadOverlay() {
+    if (downloadOverlayTimer !== null) {
+      clearInterval(downloadOverlayTimer);
+      downloadOverlayTimer = null;
+    }
+    shownDownloadJobIds.clear();
+    document.getElementById("aura-download-overlay-host")?.remove();
+  }
+
+  function downloadOverlayHost() {
+    let host = document.getElementById("aura-download-overlay-host");
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "aura-download-overlay-host";
+      host.setAttribute("style", "position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;max-width:calc(100vw - 24px);font-family:system-ui,-apple-system,'Segoe UI',sans-serif;");
+      document.documentElement.append(host);
+    }
+    return host;
+  }
+
+  const DOWNLOAD_STATUS_LABELS = {
+    queued: "대기",
+    running: "진행 중",
+    paused: "일시정지",
+    completed: "완료",
+    failed: "실패",
+    cancelled: "취소됨",
+  };
+
+  function downloadOverlayPercent(job) {
+    const message = String(job?.statusText || "");
+    const segments = /저장 중…\s+(\d+)\s*\/\s*(\d+)/.exec(message);
+    if (segments) {
+      const current = Number(segments[1]);
+      const total = Number(segments[2]);
+      if (Number.isFinite(current) && Number.isFinite(total) && total > 0) {
+        return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+      }
+    }
+    const percent = /(?:저장 중|서버 처리 중|내 기기로 전송 중|수신 중)…\s+(\d{1,3})%/.exec(message);
+    if (percent) {
+      const value = Number(percent[1]);
+      if (Number.isFinite(value)) return Math.max(0, Math.min(100, value));
+    }
+    return null;
+  }
+
+  function buildDownloadOverlayRow(job) {
+    const row = document.createElement("div");
+    row.setAttribute("style", "display:flex;align-items:center;gap:8px;padding:9px 10px;border-top:1px solid #222c3a;");
+    const info = document.createElement("div");
+    info.setAttribute("style", "flex:1;min-width:0;");
+    const title = document.createElement("div");
+    title.textContent = typeof job.title === "string" && job.title ? job.title : "다운로드";
+    title.setAttribute("style", "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#f4f7fb;font-size:11px;font-weight:700;");
+    const status = document.createElement("div");
+    const label = DOWNLOAD_STATUS_LABELS[job.status] || "진행 중";
+    const percent = job.status === "running" ? downloadOverlayPercent(job) : null;
+    const message = String(job.status === "failed" ? (job.error || job.statusText || label) : (job.statusText || label));
+    status.textContent = percent !== null ? `${label} · ${percent}%` : `${label} · ${message}`;
+    status.setAttribute("style", "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8f9eb2;font-size:10px;margin-top:2px;");
+    if (job.status === "completed") status.style.color = "#78d99a";
+    else if (job.status === "failed" || job.status === "cancelled") status.style.color = "#ff8f8f";
+    info.append(title, status);
+    row.append(info);
+    if (ACTIVE_DOWNLOAD_STATUSES.has(job.status)) {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "취소";
+      cancel.setAttribute("style", "border:0;border-radius:6px;background:transparent;color:#d09a97;cursor:pointer;font-size:10px;font-weight:700;padding:4px 6px;");
+      cancel.addEventListener("click", async () => {
+        cancel.disabled = true;
+        cancel.textContent = "취소 중";
+        await chrome.runtime.sendMessage({ type: "cancel-download-job", jobId: job.id }).catch(() => null);
+        void refreshDownloadOverlay();
+      });
+      row.append(cancel);
+    }
+    return row;
+  }
+
+  async function refreshDownloadOverlay() {
+    let jobs = [];
+    try {
+      const response = await chrome.runtime.sendMessage({ type: "list-download-jobs" });
+      jobs = Array.isArray(response?.jobs) ? response.jobs : [];
+    } catch {
+      // The background may be waking; the timer will retry on the next tick.
+    }
+    const active = jobs.filter((job) => ACTIVE_DOWNLOAD_STATUSES.has(job.status));
+    for (const job of active) shownDownloadJobIds.add(job.id);
+    const visible = jobs.filter((job) => shownDownloadJobIds.has(job.id));
+    if (!visible.length) {
+      cleanDownloadOverlay();
+      return;
+    }
+    const host = downloadOverlayHost();
+    host.replaceChildren();
+    const panel = document.createElement("div");
+    panel.setAttribute("style", "overflow:hidden;background:#10141c;border:1px solid #2a3444;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.45);");
+    const head = document.createElement("div");
+    head.setAttribute("style", "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;");
+    const heading = document.createElement("div");
+    heading.textContent = "다운로드";
+    heading.setAttribute("style", "color:#f4f7fb;font-size:12px;font-weight:800;");
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "다운로드 창 닫기");
+    close.setAttribute("style", "border:0;background:transparent;color:#8b9ab0;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;");
+    close.addEventListener("click", cleanDownloadOverlay);
+    head.append(heading, close);
+    panel.append(head);
+    for (const job of visible.slice(0, 3)) panel.append(buildDownloadOverlayRow(job));
+    host.append(panel);
+  }
+
+  function showDownloadOverlay() {
+    if (window !== window.top) return;
+    void refreshDownloadOverlay();
+    if (downloadOverlayTimer !== null) clearInterval(downloadOverlayTimer);
+    downloadOverlayTimer = setInterval(() => void refreshDownloadOverlay(), 1000);
   }
 
   function scan() {
@@ -421,5 +589,6 @@
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => handleMessage(message, sendResponse));
+  window.addEventListener("message", handlePageMediaEvent);
   scan();
 })();

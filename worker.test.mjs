@@ -81,6 +81,35 @@ test("issues a pro token only for an approved key", async () => {
   assert.equal(payload.keyId, key);
 });
 
+test("license endpoint enforces three devices per key", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"A".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  const licenseUrl = (deviceId) => `https://aura.mdownloader.workers.dev/api/license?key=${key}&deviceId=${deviceId}`;
+
+  const first = await (await worker.fetch(new Request(licenseUrl("device-0001")), environment(kv))).json();
+  assert.equal(first.ok, true);
+  assert.equal(first.devices, 1);
+  assert.equal(first.limit, 3);
+
+  const same = await (await worker.fetch(new Request(licenseUrl("device-0001")), environment(kv))).json();
+  assert.equal(same.devices, 1);
+
+  const second = await (await worker.fetch(new Request(licenseUrl("device-0002")), environment(kv))).json();
+  assert.equal(second.devices, 2);
+
+  const third = await (await worker.fetch(new Request(licenseUrl("device-0003")), environment(kv))).json();
+  assert.equal(third.devices, 3);
+
+  const fourth = await worker.fetch(new Request(licenseUrl("device-0004")), environment(kv));
+  assert.equal(fourth.status, 403);
+  const fourthBody = await fourth.json();
+  assert.equal(fourthBody.error, "device-limit-reached");
+  assert.equal(fourthBody.devices, 3);
+  assert.equal(fourthBody.limit, 3);
+});
+
 test("rejects pending keys, unknown keys, and malformed keys", async () => {
   const worker = await loadWorker();
   const kv = memoryKv();

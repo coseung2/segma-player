@@ -10,6 +10,7 @@ New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
 # 1) Copy service files (app.js, cookies.txt) next to this script into serviceDir.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Copy-Item (Join-Path $scriptDir "app.js") (Join-Path $serviceDir "app.js") -Force
+Copy-Item (Join-Path $scriptDir "youtube-quality.cjs") (Join-Path $serviceDir "youtube-quality.cjs") -Force
 if (Test-Path (Join-Path $scriptDir "cookies.txt")) {
   Copy-Item (Join-Path $scriptDir "cookies.txt") (Join-Path $serviceDir "cookies.txt") -Force
 }

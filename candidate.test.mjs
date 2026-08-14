@@ -198,9 +198,9 @@ test("does not send playlists to the direct download path", () => {
   assert.equal(downloadableMediaUrl("https://media.example/master.m3u8"), null);
 });
 
-test("only progressive and HLS candidates are exposed as directly downloadable", () => {
+test("progressive, HLS, and static DASH candidates are exposed as directly downloadable", () => {
   assert.equal(isDownloadableMediaType(MEDIA_TYPES.PROGRESSIVE), true);
   assert.equal(isDownloadableMediaType(MEDIA_TYPES.HLS_MEDIA), true);
   assert.equal(isDownloadableMediaType(MEDIA_TYPES.UNKNOWN), false);
-  assert.equal(isDownloadableMediaType(MEDIA_TYPES.DASH), false);
+  assert.equal(isDownloadableMediaType(MEDIA_TYPES.DASH), true);
 });

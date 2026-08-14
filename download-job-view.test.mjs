@@ -31,6 +31,11 @@ test("uses errors for failed jobs and terminal progress for completed jobs", () 
 
   const completed = downloadJobView({ status: "completed", statusText: "다운로드 완료" });
   assert.deepEqual(completed.progress, { mode: "determinate", value: 100 });
+
+  const cancelled = downloadJobView({ status: "cancelled", statusText: "사용자가 다운로드를 취소했습니다." });
+  assert.equal(cancelled.statusLabel, "취소됨");
+  assert.equal(cancelled.stage, "취소됨");
+  assert.deepEqual(cancelled.progress, { mode: "failed", value: null });
 });
 
 test("paused jobs show the return-to-page notice", () => {
@@ -44,8 +49,9 @@ test("paused jobs show the return-to-page notice", () => {
   assert.deepEqual(paused.progress, { mode: "indeterminate", value: null });
 });
 
-test("offers retry only for failed jobs explicitly marked retryable", () => {
+test("offers retry only for failed or cancelled jobs explicitly marked retryable", () => {
   assert.equal(retryableDownloadJob({ status: "failed", retryable: true }), true);
+  assert.equal(retryableDownloadJob({ status: "cancelled", retryable: true }), true);
   assert.equal(retryableDownloadJob({ status: "failed", retryable: false }), false);
   assert.equal(retryableDownloadJob({ status: "running", retryable: true }), false);
 });

@@ -14,8 +14,10 @@ const powershell = process.env.PWSH || "powershell.exe";
 const expectedFiles = [
   "aes-cbc.js",
   "background.js",
+  "browser-download-monitor.js",
   "candidate.js",
   "content.js",
+  "dash.js",
   "download-errors.js",
   "download-job-view.js",
   "download-jobs.js",
@@ -24,6 +26,7 @@ const expectedFiles = [
   "download-worker.js",
   "download.js",
   "edition.js",
+  "filename-template.js",
   "hls-download.js",
   "hls.js",
   "level5-key-error.js",
@@ -35,16 +38,20 @@ const expectedFiles = [
   "icons/icon128.png",
   "manifest.json",
   "media-fetch-lease.js",
+  "mobile-user-agent.js",
   "options.html",
   "options.js",
   "parallel-download.js",
+  "page-media-observer.js",
   "player-page-resolver.js",
   "popup.css",
   "popup.html",
   "popup.js",
   "product-plan.js",
   "progressive-redirect.js",
+  "request-header-store.js",
   "save-directory.js",
+  "worker-lifecycle.js",
   "youtube-server.js",
 ].sort();
 
@@ -117,6 +124,7 @@ test("store packager builds and audits the exact free-edition ZIP", async () => 
     assert.equal(manifest.action.default_icon["32"], "icons/icon32.png");
     assert.deepEqual(manifest.permissions, [
       "activeTab",
+      "alarms",
       "contextMenus",
       "declarativeNetRequest",
       "downloads",
@@ -127,7 +135,7 @@ test("store packager builds and audits the exact free-edition ZIP", async () => 
     ]);
     assert.deepEqual(manifest.content_scripts, [{
       matches: ["http://*/*", "https://*/*"],
-      js: ["level5-page-bridge.js"],
+      js: ["page-media-observer.js", "level5-page-bridge.js"],
       run_at: "document_start",
       all_frames: true,
       world: "MAIN",
@@ -179,6 +187,10 @@ test("store packager builds and audits the exact free-edition ZIP", async () => 
     const bridge = textFiles.find(([file]) => file === "level5-page-bridge.js")[1];
     assert.match(bridge, /cachedKey\(hls, url\.href\)/);
     assert.match(bridge, /loadKey\(hls, url\.href\)/);
+    assert.match(bridge, /keyLoadPolicy\?\.default/);
+    assert.match(bridge, /loadPolicy:\s*\{\s*maxTimeToFirstByteMs,\s*maxLoadTimeMs\s*\}/);
+    assert.match(bridge, /observedHlsSessions/);
+    assert.match(bridge, /observeLevel5Player\(\)/);
     assert.doesNotMatch(bridge, /\bimport\s*\(/);
     assert.doesNotMatch(bridge, /\bWebAssembly\b|\bwasm\b|\/assets\//i);
     assert.doesNotMatch(bridge, /inlineAssetUrl|level5Decoder|decodeRuntimeKey|document\.scripts/);

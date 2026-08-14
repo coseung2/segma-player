@@ -29,13 +29,20 @@ function iframeElement(src) {
   });
 }
 
-function baseEnvironment({ locationHref = "https://page.example/watch", doodHtml = "", withPerformanceObserver = false } = {}) {
+function baseEnvironment({
+  locationHref = "https://page.example/watch",
+  doodHtml = "",
+  withPerformanceObserver = false,
+  runtimeHandler = null,
+} = {}) {
   const sent = [];
+  const posted = [];
   const resourceEntries = [];
   const videos = [];
   const scripts = [];
   const iframes = [];
   const eventHandlers = {};
+  const windowEventHandlers = {};
   const mutationObservers = [];
   const performanceObservers = [];
   const documentHtml = { text: doodHtml, reads: 0 };
@@ -47,6 +54,15 @@ function baseEnvironment({ locationHref = "https://page.example/watch", doodHtml
   globalThis.Element = class MockElement {};
   globalThis.window = globalThis;
   globalThis.top = globalThis;
+  globalThis.addEventListener = (name, handler) => {
+    const handlers = windowEventHandlers[name] || [];
+    handlers.push(handler);
+    windowEventHandlers[name] = handlers;
+  };
+  globalThis.removeEventListener = (name, handler) => {
+    windowEventHandlers[name] = (windowEventHandlers[name] || []).filter((item) => item !== handler);
+  };
+  globalThis.postMessage = (message) => { posted.push(message); };
   globalThis.location = new URL(locationHref);
   globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible", opacity: "1" });
   globalThis.performance = {
@@ -98,7 +114,7 @@ function baseEnvironment({ locationHref = "https://page.example/watch", doodHtml
     runtime: {
       sendMessage(message) {
         sent.push(message);
-        return Promise.resolve();
+        return Promise.resolve(typeof runtimeHandler === "function" ? runtimeHandler(message) : undefined);
       },
       onMessage: {
         addListener(handler) {
@@ -110,11 +126,13 @@ function baseEnvironment({ locationHref = "https://page.example/watch", doodHtml
 
   return {
     sent,
+    posted,
     resourceEntries,
     videos,
     scripts,
     iframes,
     eventHandlers,
+    windowEventHandlers,
     mutationObservers,
     performanceObservers,
     documentHtml,
@@ -125,6 +143,11 @@ function baseEnvironment({ locationHref = "https://page.example/watch", doodHtml
       return onMessage;
     },
   };
+}
+
+async function importFreshContent() {
+  moduleCounter += 1;
+  await import(`./content.js?test=${moduleCounter}`);
 }
 
 test("scans a visible playing media element without a runtime error", async () => {
@@ -465,4 +488,34 @@ test("PerformanceObserver reports resource entries without DOM scan iteration", 
   env.mutationObservers[0].callback([{ type: "childList", addedNodes: [{ tagName: "DIV" }], removedNodes: [] }]);
   await delay(180);
   assert.equal(env.countScans, 0, "DOM scans must not reread performance history");
+});
+
+test("Dood pass_md5 base response is completed with the player token handshake", async () => {
+  const env = baseEnvironment({
+    locationHref: "https://playmogo.com/e/lm4az4bcghg8",
+    doodHtml: '<script>fetch("/pass_md5/secret").then(data => data + makePlay() + "?token=fresh123&expiry=" + Date.now())</script>',
+  });
+  globalThis.fetch = async () => ({ ok: true, text: async () => "https://srv123.doodcdn.io/getfile/abc/" });
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(0);
+
+  const dood = env.sent.find((message) => message.type === "dood-direct");
+  assert.match(dood?.url || "", /^https:\/\/srv123\.doodcdn\.io\/getfile\/abc\/[A-Za-z0-9]{10}\?token=fresh123&expiry=\d+$/);
+  assert.equal(dood?.frameUrl, "https://playmogo.com/e/lm4az4bcghg8");
+});
+
+test("MAIN-world observations bridge detected manifests", async () => {
+  const env = baseEnvironment({ runtimeHandler: () => ({ ok: true }) });
+  await importFreshContent();
+  const dispatch = (data) => {
+    for (const handler of env.windowEventHandlers.message || []) handler({ source: globalThis, data });
+  };
+  dispatch({
+    type: "aura-media-observer-event-v1",
+    kind: "manifest",
+    url: "https://media.example/hidden.mpd",
+    contentType: "application/dash+xml",
+  });
+  assert.equal(countResource(env.sent, "https://media.example/hidden.mpd"), 1);
+  assert.equal(env.sent.some((message) => /^mse-capture-/.test(message.type || "")), false);
 });

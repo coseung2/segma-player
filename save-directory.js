@@ -1,11 +1,32 @@
 // Persisted save-directory handle for silent folder writes without the
 // companion native host. The picker stays in this module so the popup only
-// imports a helper; the handle is granted once and then reused.
+// imports a helper; callers pass `pick: true` when they want the user to
+// choose a new folder, and the stored handle is then reused silently.
 
 const DB_NAME = "aura-media-save-directory";
 const DB_VERSION = 1;
 const STORE = "handles";
 const KEY = "downloadDirectory";
+let fileAllocationTail = Promise.resolve();
+
+function numberedFilename(filename, index) {
+  if (index === 0) return filename;
+  const dot = filename.lastIndexOf(".");
+  const hasExtension = dot > 0;
+  const stem = hasExtension ? filename.slice(0, dot) : filename;
+  const extension = hasExtension ? filename.slice(dot) : "";
+  return `${stem} (${index})${extension}`;
+}
+
+async function fileExists(directoryHandle, filename) {
+  try {
+    await directoryHandle.getFileHandle(filename);
+    return true;
+  } catch (error) {
+    if (error?.name === "NotFoundError") return false;
+    throw error;
+  }
+}
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -50,18 +71,32 @@ export async function storeSaveDirectory(handle) {
   }
 }
 
-export async function ensureSaveDirectory({ pick = false } = {}) {
-  let handle = await getStoredSaveDirectory();
-  if (!handle && pick && typeof showDirectoryPicker === "function") {
-    try {
-      handle = await showDirectoryPicker({ id: "aura-media-save", mode: "readwrite", startIn: "downloads" });
-      if (handle) await storeSaveDirectory(handle);
-    } catch (error) {
-      if (error?.name === "AbortError") return null;
-      throw error;
-    }
+// The File System Access API has no exclusive-create flag. Serialize name
+// allocation in this extension context, check existing entries, then create a
+// numbered sibling so an existing download is never opened for replacement.
+export async function createUniqueFile(directoryHandle, filename) {
+  if (!directoryHandle || typeof directoryHandle.getFileHandle !== "function") {
+    throw new Error("invalid-save-directory");
   }
-  if (!handle) return null;
+  const requested = String(filename || "미디어.mp4").trim() || "미디어.mp4";
+  const previous = fileAllocationTail;
+  let release;
+  fileAllocationTail = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    for (let index = 0; index < 10_000; index += 1) {
+      const candidate = numberedFilename(requested, index);
+      if (await fileExists(directoryHandle, candidate)) continue;
+      const fileHandle = await directoryHandle.getFileHandle(candidate, { create: true });
+      return { fileHandle, filename: candidate };
+    }
+    throw new Error("available-filename-not-found");
+  } finally {
+    release();
+  }
+}
+
+async function confirmReadWritePermission(handle) {
   try {
     const state = await handle.queryPermission?.({ mode: "readwrite" });
     if (state === "granted") return handle;
@@ -74,4 +109,25 @@ export async function ensureSaveDirectory({ pick = false } = {}) {
     // whether to open the picker again.
   }
   return null;
+}
+
+export async function ensureSaveDirectory({ pick = false } = {}) {
+  if (pick && typeof showDirectoryPicker === "function") {
+    let handle = null;
+    try {
+      handle = await showDirectoryPicker({ id: "aura-media-save", mode: "readwrite", startIn: "downloads" });
+    } catch (error) {
+      if (error?.name === "AbortError") return null;
+      throw error;
+    }
+    if (!handle) return null;
+    await storeSaveDirectory(handle);
+    return confirmReadWritePermission(handle);
+  }
+
+  const handle = await getStoredSaveDirectory();
+  if (!handle) return null;
+  const granted = await confirmReadWritePermission(handle);
+  if (granted) await storeSaveDirectory(granted);
+  return granted;
 }

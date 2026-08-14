@@ -2,12 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   canonicalPublicHttpUrl,
+  completeDoodDirectUrl,
   createPlayerGraphResolver,
   looksLikePlayerPage,
   parseDoodResponse,
   parseStreamtapeNorobotlink,
   resolvePlayerPage,
 } from "./player-page-resolver.js";
+
+test("completes Dood pass_md5 base URLs with nonce, token, and expiry", () => {
+  assert.equal(
+    completeDoodDirectUrl(
+      "https://srv123.doodcdn.io/getfile/abc/",
+      'const file = data + makePlay() + "?token=fresh123&expiry=" + Date.now();',
+      { nonce: "AbC123xYz9", now: () => 1_786_692_000_000 },
+    ),
+    "https://srv123.doodcdn.io/getfile/abc/AbC123xYz9?token=fresh123&expiry=1786692000000",
+  );
+  assert.equal(
+    completeDoodDirectUrl("https://cdn.example/video.mp4", "?token=unrelated&expiry="),
+    "https://cdn.example/video.mp4",
+  );
+});
 
 test("recognizes doodstream-style player paths", () => {
   assert.equal(looksLikePlayerPage("https://playmogo.com/d/1cp8ukd06ifc"), true);

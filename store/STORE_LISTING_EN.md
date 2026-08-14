@@ -22,7 +22,7 @@ Features:
 
 The free edition includes one concurrent media job and a 1 GiB limit per download. Pro adds three concurrent media jobs, no artificial byte cap, and the highest available quality for supported media.
 
-Use this extension only for media that you own or are authorized to download. It does not bypass DRM, login restrictions, paywalls, private-video controls, or access controls. Compatibility depends on the page, media format, browser, and companion tools; no universal compatibility is promised.
+Use this extension only for media that you own or are authorized to download. It does not bypass DRM, login restrictions, paywalls, private-video controls, or access controls. Compatibility depends on the page, media format, and browser; no universal compatibility is promised.
 
 Support: [OWNER INPUT: SUPPORT_EMAIL]
 

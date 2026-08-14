@@ -1,7 +1,9 @@
 (() => {
   const REQUEST = "aura-level5-key-request-v1";
   const RESPONSE = "aura-level5-key-response-v1";
+  const WRAPPED_PLAYER = Symbol("aura-level5-player-wrapped");
   let decoderPromise = null;
+  const observedHlsSessions = new Set();
 
   function errorCode(error, fallback) {
     const code = typeof error?.message === "string" ? error.message : "";
@@ -21,11 +23,51 @@
   }
 
   function activeHlsSessions() {
-    const sessions = [];
+    const sessions = [...observedHlsSessions];
     for (const video of document.querySelectorAll("video")) {
-      if (video?._l5?.hls?.config?.loader) sessions.push(video._l5.hls);
+      if (video?._l5?.hls?.config?.loader && !sessions.includes(video._l5.hls)) sessions.push(video._l5.hls);
     }
     return sessions;
+  }
+
+  function rememberSession(session) {
+    if (session?.hls?.config?.loader) observedHlsSessions.add(session.hls);
+    return session;
+  }
+
+  function wrapLevel5Player(player) {
+    if (!player || typeof player.play !== "function" || player.play[WRAPPED_PLAYER]) return player;
+    const original = player.play;
+    const wrapped = function auraObservedLevel5Play(...args) {
+      const result = original.apply(this, args);
+      if (result && typeof result.then === "function") {
+        result.then(rememberSession, () => {});
+      } else {
+        rememberSession(result);
+      }
+      return result;
+    };
+    try { Object.defineProperty(wrapped, WRAPPED_PLAYER, { value: true }); } catch { /* best effort */ }
+    try { player.play = wrapped; } catch { /* a frozen player falls back to video._l5 discovery */ }
+    return player;
+  }
+
+  function observeLevel5Player() {
+    let descriptor;
+    try { descriptor = Object.getOwnPropertyDescriptor(window, "Level5Player"); } catch { return; }
+    if (descriptor?.value) wrapLevel5Player(descriptor.value);
+    if (descriptor && !descriptor.configurable) return;
+    let current = descriptor?.value;
+    try {
+      Object.defineProperty(window, "Level5Player", {
+        configurable: true,
+        enumerable: descriptor?.enumerable ?? true,
+        get() { return current; },
+        set(value) { current = wrapLevel5Player(value); },
+      });
+    } catch {
+      // The player remains discoverable through video._l5 when the page owns a locked property.
+    }
   }
 
   function sameUrl(left, right) {
@@ -184,16 +226,28 @@
       try {
         const Loader = hls.config.loader;
         loader = new Loader(hls.config);
+        // hls.js 1.5+ XhrLoader.load() dereferences config.loadPolicy in
+        // openAndSendXhr; a bare retry object crashes with a TypeError before
+        // any key request is made. Mirror hls.js's own key-load contract
+        // (loadKeyHTTP) with the player's keyLoadPolicy when present.
+        const policy = hls.config?.keyLoadPolicy?.default;
+        const maxTimeToFirstByteMs = Number.isFinite(policy?.maxTimeToFirstByteMs)
+          ? policy.maxTimeToFirstByteMs
+          : 8_000;
+        const maxLoadTimeMs = Number.isFinite(policy?.maxLoadTimeMs)
+          ? policy.maxLoadTimeMs
+          : 20_000;
         loader.load({
           url,
           type: "key",
           responseType: "arraybuffer",
           keyInfo: { uri: url, method: "AES-128", keyFormat: "identity" },
         }, {
-          timeout: 15_000,
-          maxRetry: 1,
-          retryDelay: 250,
-          maxRetryDelay: 1_000,
+          loadPolicy: { maxTimeToFirstByteMs, maxLoadTimeMs },
+          timeout: maxLoadTimeMs,
+          maxRetry: 0,
+          retryDelay: 0,
+          maxRetryDelay: 0,
         }, {
           onSuccess(response) {
             const bytes = bytesFor(response?.data);
@@ -213,6 +267,8 @@
       }
     });
   }
+
+  observeLevel5Player();
 
   window.addEventListener("message", async (event) => {
     if (event.source !== window || event.data?.type !== REQUEST) return;

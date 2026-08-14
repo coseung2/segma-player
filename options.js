@@ -1,111 +1,90 @@
-const COMPANION_HOST = "com.aura.media_companion";
-const COMPANION_PAGE = "https://aura.mdownloader.workers.dev/download.html";
-import {
-  checkYouTubeServer,
-  getYouTubeServerUrl,
-  setYouTubeServerUrl,
-} from "./youtube-server.js";
 import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
-const companionStatusElement = document.querySelector("#companion-status");
-const installButton = document.querySelector("#companion-install");
-const checkButton = document.querySelector("#companion-check");
-const versionElement = document.querySelector("#version");
+import { LICENSE_API_URL } from "./license.js";
+const PURCHASE_API_ORIGIN = LICENSE_API_URL.replace(/\/api\/license$/, "");
 const licenseStatusElement = document.querySelector("#license-status");
+const licenseDeviceStatusElement = document.querySelector("#license-device-status");
+const licenseAuthStatusElement = document.querySelector("#license-auth-status");
 const licenseKeyInput = document.querySelector("#license-key");
 const licenseActivateButton = document.querySelector("#license-activate");
-const licenseRefreshButton = document.querySelector("#license-refresh");
+const licenseCopyButton = document.querySelector("#license-copy");
 const licenseSection = document.querySelector("#license-section");
-const ytServerUrlInput = document.querySelector("#yt-server-url");
-const ytServerStatusElement = document.querySelector("#yt-server-status");
-const ytServerSaveButton = document.querySelector("#yt-server-save");
-const ytServerCheckButton = document.querySelector("#yt-server-check");
 const parallelFolderButton = document.querySelector("#parallel-folder");
 const parallelStatusElement = document.querySelector("#parallel-status");
+const purchasePeriodSelect = document.querySelector("#purchase-period");
+const purchaseCreateButton = document.querySelector("#purchase-create");
+const purchaseOrderBox = document.querySelector("#purchase-order");
+const purchaseAddress = document.querySelector("#purchase-address");
+const purchaseAmount = document.querySelector("#purchase-amount");
+const purchaseTxInput = document.querySelector("#purchase-tx");
+const purchaseVerifyButton = document.querySelector("#purchase-verify");
+const purchaseStatus = document.querySelector("#purchase-status");
+let purchaseOrderId = null;
 
 async function refreshParallelStatus() {
   const handle = await getStoredSaveDirectory();
   parallelStatusElement.textContent = handle
-    ? `저장 폴더 연결됨: ${handle.name} · 병렬 수신 사용 중`
-    : "저장 폴더가 아직 없습니다. 아래 버튼으로 Downloads 안에 새 폴더를 만들어 선택하세요.";
+    ? `저장 경로: ${handle.name}`
+    : "저장 폴더가 아직 없습니다. 아래 버튼으로 새 폴더를 만들어 선택해 주세요.";
 }
 
 parallelFolderButton.addEventListener("click", async () => {
   try {
     const handle = await ensureSaveDirectory({ pick: true });
     parallelStatusElement.textContent = handle
-      ? `저장 폴더 연결됨: ${handle.name}`
+      ? `저장 경로: ${handle.name}`
       : "폴더 선택이 취소되었습니다.";
   } catch {
-    parallelStatusElement.textContent = "폴더 선택이 차단됐어요. Downloads 루트 대신 새로 만든 빈 폴더를 선택해 주세요.";
+    parallelStatusElement.textContent = "폴더 선택이 차단됐어요. Downloads 루트 대신 새 폴더를 만들어 선택해 주세요.";
   }
 });
 
 void refreshParallelStatus();
 
 
-try {
-  versionElement.textContent = `Aura Media Downloader v${chrome.runtime.getManifest().version} · 확장 ID ${chrome.runtime.id}`;
-} catch {
-  versionElement.textContent = "Aura Media Downloader";
-}
-
-function probeCompanion() {
-  return new Promise((resolve) => {
-    let settled = false;
-    let port = null;
-    const finish = (installed, detail) => {
-      if (settled) return;
-      settled = true;
-      try { port?.disconnect(); } catch { /* already closed */ }
-      resolve({ installed, detail });
-    };
-    try {
-      port = chrome.runtime.connectNative(COMPANION_HOST);
-    } catch {
-      finish(false, "host-not-found");
-      return;
-    }
-    port.onDisconnect.addListener(() => finish(false, chrome.runtime.lastError?.message || "host-not-found"));
-    setTimeout(() => finish(true, ""), 700);
-  });
-}
-
-async function refreshCompanionStatus() {
-  companionStatusElement.textContent = "확인 중…";
-  const result = await probeCompanion();
-  companionStatusElement.textContent = result.installed
-    ? "설치됨 — 유튜브 저장과 폴더 저장이 활성화됩니다."
-    : "설치 안 됨 — 기본 다운로드는 계속 사용할 수 있습니다.";
-}
-
-installButton.addEventListener("click", () => {
-  void chrome.tabs.create({ url: COMPANION_PAGE });
-});
-checkButton.addEventListener("click", () => void refreshCompanionStatus());
-
-void refreshCompanionStatus();
-
 async function refreshLicenseStatus() {
   licenseStatusElement.textContent = "확인 중…";
   try {
     const response = await chrome.runtime.sendMessage({ type: "license-status" });
-    const hasKey = typeof response?.key === "string" && response.key.length > 0;
-    if (response?.ok && response.edition === "pro" && hasKey) {
-      // The Pro build is unlocked client-side and has a stored key, so the
-      // YouTube server can issue Pro capability tokens.
-      licenseSection.hidden = true;
-      return;
-    }
+    const key = typeof response?.key === "string" ? response.key : "";
     licenseSection.hidden = false;
     licenseKeyInput.disabled = false;
     licenseActivateButton.disabled = false;
-    licenseStatusElement.textContent = response?.ok && response.edition === "pro"
-      ? "Pro 빌드 사용 중 — YouTube 서버 인증용 라이선스 키를 등록하세요."
-      : "일반 버전 사용 중 — 키가 있으면 입력 후 등록하세요.";
+    licenseCopyButton.disabled = !key;
+    if (key) licenseKeyInput.value = key;
+    const devices = typeof response?.devices === "number" ? response.devices : null;
+    const limit = typeof response?.limit === "number" ? response.limit : 3;
+    licenseDeviceStatusElement.textContent = devices === null
+      ? `키당 기기 ${limit}개 제한`
+      : `키당 기기 ${limit}개 제한 · 현재 ${devices}/${limit}`;
+    const authenticated = Boolean(response?.ok && response.edition === "pro" && key);
+    licenseAuthStatusElement.textContent = authenticated ? "인증됨" : "미인증";
+    licenseAuthStatusElement.classList.toggle("authenticated", authenticated);
+    licenseStatusElement.textContent = "";
   } catch {
     licenseStatusElement.textContent = "상태를 확인할 수 없습니다.";
   }
 }
+
+licenseCopyButton.addEventListener("click", async () => {
+  const key = licenseKeyInput.value.trim();
+  if (!key) {
+    licenseStatusElement.textContent = "복사할 키가 없습니다.";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(key);
+    licenseStatusElement.textContent = "키를 복사했습니다.";
+  } catch {
+    licenseKeyInput.focus();
+    licenseKeyInput.select();
+    try {
+      document.execCommand("copy");
+      licenseStatusElement.textContent = "키를 복사했습니다.";
+    } catch {
+      licenseStatusElement.textContent = "키를 직접 선택해 복사해 주세요.";
+    }
+  }
+});
 
 licenseActivateButton.addEventListener("click", async () => {
   const key = licenseKeyInput.value.trim();
@@ -116,7 +95,6 @@ licenseActivateButton.addEventListener("click", async () => {
   licenseStatusElement.textContent = "확인 중…";
   const response = await chrome.runtime.sendMessage({ type: "license-activate", key });
   if (response?.ok) {
-    licenseStatusElement.textContent = "Pro가 활성화되었습니다!";
     await refreshLicenseStatus();
   } else if (response?.error === "license-pending") {
     licenseStatusElement.textContent = "키가 등록되었습니다. 개발자 승인 후 자동으로 Pro가 적용됩니다.";
@@ -124,42 +102,71 @@ licenseActivateButton.addEventListener("click", async () => {
     licenseStatusElement.textContent = "키 형식이 올바르지 않습니다.";
   } else if (response?.error === "license-server-unreachable") {
     licenseStatusElement.textContent = "라이선스 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.";
+  } else if (response?.error === "device-limit-reached") {
+    licenseStatusElement.textContent = "기기 3개 제한에 도달했습니다.";
   } else {
     licenseStatusElement.textContent = "아직 승인되지 않은 키입니다.";
   }
 });
 
-licenseRefreshButton.addEventListener("click", async () => {
-  licenseStatusElement.textContent = "확인 중…";
+void refreshLicenseStatus();
+
+purchaseCreateButton.addEventListener("click", async () => {
+  purchaseCreateButton.disabled = true;
+  purchaseStatus.textContent = "주문 생성 중…";
   try {
-    const response = await chrome.runtime.sendMessage({ type: "license-refresh" });
-    licenseStatusElement.textContent = response?.ok && response.edition === "pro"
-      ? "Pro 활성화됨 — 동시 제한 없음, 용량 제한 없음, 백그라운드 다운로드 지원."
-      : "아직 Pro가 아닙니다. 키 등록 여부를 확인해 주세요.";
+    const response = await fetch(`${PURCHASE_API_ORIGIN}/api/pay/order`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ period: purchasePeriodSelect.value }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      purchaseStatus.textContent = data?.error === "payment-not-configured"
+        ? "결제가 아직 설정되지 않았습니다."
+        : "주문을 생성하지 못했습니다.";
+      return;
+    }
+    purchaseOrderId = data.orderId;
+    purchaseAddress.textContent = `${String(data.network).toUpperCase()} 주소: ${data.walletAddress}`;
+    purchaseAmount.textContent = `결제 금액: ${data.amountUsdt} USDT`;
+    purchaseOrderBox.hidden = false;
+    purchaseStatus.textContent = "위 주소로 정확한 금액을 보낸 뒤 TxID를 입력해 주세요.";
   } catch {
-    licenseStatusElement.textContent = "상태를 확인할 수 없습니다.";
+    purchaseStatus.textContent = "주문을 생성하지 못했습니다.";
+  } finally {
+    purchaseCreateButton.disabled = false;
   }
 });
 
-void refreshLicenseStatus();
-
-async function refreshYtServerStatus() {
-  const current = await getYouTubeServerUrl();
-  if (ytServerUrlInput.value.trim() === "" && current) ytServerUrlInput.value = current;
-  ytServerStatusElement.textContent = "연결 확인 중…";
-  const result = await checkYouTubeServer(current);
-  ytServerStatusElement.textContent = result.ok
-    ? `연결됨 — ${result.service} (처리 중 ${result.active} · 대기 ${result.queued})`
-    : `연결 안 됨 (${result.error || "unknown"}) — 컴패니언으로 자동 전환됩니다.`;
-}
-
-ytServerSaveButton.addEventListener("click", async () => {
-  const result = await setYouTubeServerUrl(ytServerUrlInput.value);
-  ytServerStatusElement.textContent = result.ok
-    ? `저장됨 — ${result.url || "기본값으로 복귀"}`
-    : "주소 형식이 올바르지 않습니다. http:// 또는 https://로 시작해야 합니다.";
+purchaseVerifyButton.addEventListener("click", async () => {
+  const txHash = purchaseTxInput.value.trim();
+  if (!txHash || !purchaseOrderId) {
+    purchaseStatus.textContent = "TxID를 입력해 주세요.";
+    return;
+  }
+  purchaseVerifyButton.disabled = true;
+  purchaseStatus.textContent = "결제 확인 중…";
+  try {
+    const response = await fetch(`${PURCHASE_API_ORIGIN}/api/pay/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ orderId: purchaseOrderId, txHash }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      purchaseStatus.textContent = data?.error === "transaction-not-confirmed"
+        ? "아직 블록체인에 확정되지 않았습니다. 잠시 후 다시 시도하세요."
+        : (data?.error || "결제 확인에 실패했습니다.");
+      return;
+    }
+    licenseKeyInput.value = data.key;
+    purchaseStatus.textContent = "결제가 확인되었습니다. 라이선스 키가 자동 입력됐습니다.";
+    purchaseOrderBox.hidden = true;
+    licenseActivateButton.click();
+  } catch {
+    purchaseStatus.textContent = "결제 확인에 실패했습니다.";
+  } finally {
+    purchaseVerifyButton.disabled = false;
+  }
 });
-
-ytServerCheckButton.addEventListener("click", () => void refreshYtServerStatus());
-
-void refreshYtServerStatus();

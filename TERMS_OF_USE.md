@@ -12,17 +12,17 @@ You are responsible for having the rights, permission, or other lawful authoriza
 
 ## Product boundaries
 
-Aura Media Downloader is intended for compatible media resources. The Chrome Web Store General edition does not include a YouTube download feature. It does not bypass DRM, authentication, paywalls, private-video controls, or other access restrictions. Compatibility is not universal and may change when a site, browser, or media format changes.
+Aura Media Downloader is intended for compatible media resources. The General edition includes YouTube downloads capped at 1080p. It does not bypass DRM, authentication, paywalls, private-video controls, or other access restrictions. Compatibility is not universal and may change when a site, browser, or media format changes.
 
 The free edition provides one concurrent media job and a 1 GiB limit per download. Pro provides three concurrent jobs, no artificial byte cap, and the highest available quality for supported media. Plan features are subject to the published product configuration and applicable purchase terms.
 
-## Native companion and third-party services
+## Third-party services
 
-The optional `com.aura.media_companion` is installed separately. You are responsible for obtaining it from the publisher’s official installer URL, keeping it updated, and using any bundled third-party tools according to their licenses. Third-party sites and services remain responsible for their own availability and terms.
+YouTube downloads are processed through a configured Aura YouTube server. Third-party sites and services remain responsible for their own availability and terms.
 
 ## Disclaimers and liability
 
-The extension and companion are provided subject to applicable law and without a promise of universal availability, uninterrupted operation, or compatibility with every site or format. To the extent permitted by law, the publisher is not responsible for content, site changes, loss of data, or a user’s unauthorized use of downloaded media. Nothing in these terms limits rights that cannot legally be limited.
+The extension is provided subject to applicable law and without a promise of universal availability, uninterrupted operation, or compatibility with every site or format. To the extent permitted by law, the publisher is not responsible for content, site changes, loss of data, or a user’s unauthorized use of downloaded media. Nothing in these terms limits rights that cannot legally be limited.
 
 ## Contact and changes
 

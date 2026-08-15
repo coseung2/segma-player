@@ -9,7 +9,11 @@ function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-function createEnvironment({ manifestText = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n", contentType = "application/vnd.apple.mpegurl" } = {}) {
+function createEnvironment({
+  manifestText = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n",
+  contentType = "application/vnd.apple.mpegurl",
+  responseUrl = null,
+} = {}) {
   const messages = [];
   const listeners = new Map();
   const fetchCalls = [];
@@ -66,7 +70,9 @@ function createEnvironment({ manifestText = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"
 
   function originalFetch(input, init) {
     fetchCalls.push({ input, init });
-    const result = Promise.resolve(new FakeResponse(manifestText, contentType));
+    const inputUrl = typeof input === "string" ? input : input?.url;
+    const resolvedUrl = responseUrl || new URL(inputUrl, location.href).href;
+    const result = Promise.resolve(new FakeResponse(manifestText, contentType, resolvedUrl));
     fetchPromises.push(result);
     return result;
   }
@@ -235,8 +241,18 @@ test("binary fetch responses expose media URLs without consuming their bodies", 
   await flush();
   const [media] = eventMessages(env, env.protocol.events.media);
   assert.ok(media);
-  assert.equal(media.url, "https://cdn.example/playlist.m3u8");
+  assert.equal(media.url, "https://cdn.example/media/segment");
   assert.equal(media.contentType, "video/mp4");
+});
+
+test("manifest URLs are reported when the player hides the response type and body", async () => {
+  const env = createEnvironment({ manifestText: "", contentType: "" });
+  env.windowObject.fetch("https://surrit.example/stream/playlist.m3u8?token=short-lived");
+  await flush();
+  const [manifest] = eventMessages(env, env.protocol.events.manifest);
+  assert.ok(manifest);
+  assert.equal(manifest.url, "https://surrit.example/stream/playlist.m3u8?token=short-lived");
+  assert.equal(manifest.contentType, "");
 });
 
 test("manifest observations stay bounded and non-manifest text is ignored", async () => {

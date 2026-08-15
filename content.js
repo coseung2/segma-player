@@ -373,7 +373,10 @@
       host.setAttribute("style", "position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;max-width:calc(100vw - 24px);font-family:system-ui,-apple-system,'Segoe UI',sans-serif;");
       document.documentElement.append(host);
     }
-    return host;
+    if (!host.shadowRoot) {
+      try { host.attachShadow({ mode: "open" }); } catch { /* keep the light DOM fallback */ }
+    }
+    return host.shadowRoot || host;
   }
 
   // The content script is a classic script and cannot import i18n.js, so the
@@ -478,7 +481,7 @@
       const cancel = document.createElement("button");
       cancel.type = "button";
       cancel.textContent = overlayText("cancel");
-      cancel.setAttribute("style", "border:0;border-radius:6px;background:transparent;color:#d09a97;cursor:pointer;font-size:10px;font-weight:700;padding:4px 6px;");
+      cancel.setAttribute("style", "appearance:none;-webkit-appearance:none;border:0;border-radius:6px;background:transparent;color:#d09a97;cursor:pointer;font-size:10px;font-weight:700;padding:4px 6px;");
       cancel.addEventListener("click", async () => {
         cancel.disabled = true;
         cancel.textContent = overlayText("cancelling");
@@ -521,7 +524,7 @@
     close.type = "button";
     close.textContent = "×";
     close.setAttribute("aria-label", overlayText("close"));
-    close.setAttribute("style", "border:0;background:transparent;color:#8b9ab0;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;");
+    close.setAttribute("style", "appearance:none;-webkit-appearance:none;border:0;background:transparent;color:#8b9ab0;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;");
     close.addEventListener("click", cleanDownloadOverlay);
     head.append(heading, close);
     panel.append(head);

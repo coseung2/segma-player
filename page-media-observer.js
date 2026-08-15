@@ -98,6 +98,15 @@
     return /#EXTM3U|#EXT-X-[A-Z0-9-]+|<MPD(?:\s|>)|<SmoothStreamingMedia(?:\s|>)/i.test(text);
   }
 
+  function manifestUrlLike(url) {
+    try {
+      const pathname = new URL(url).pathname.toLowerCase();
+      return pathname.endsWith(".m3u8") || pathname.endsWith(".mpd");
+    } catch {
+      return false;
+    }
+  }
+
   function mediaLike(contentType) {
     return /^(?:video|audio)\//i.test(contentType)
       || /(?:octet-stream|mp4|webm|quicktime)/i.test(contentType);
@@ -131,7 +140,8 @@
     const boundedText = typeof text === "string"
       ? text.slice(0, LIMITS.maxManifestTextBytes)
       : "";
-    if (!boundedResourceUrl || !manifestLike(boundedContentType, boundedText)) return;
+    if (!boundedResourceUrl || (!manifestUrlLike(boundedResourceUrl)
+      && !manifestLike(boundedContentType, boundedText))) return;
     const key = `${boundedResourceUrl}\u0000${boundedContentType}`;
     if (!rememberManifest(key)) return;
     postEvent({

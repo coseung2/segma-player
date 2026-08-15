@@ -279,6 +279,8 @@ test("the in-page download overlay follows the stored UI locale", async () => {
   assert.match(content, /syncOverlayLocale/);
   // Progress is still parsed from the canonical Korean pipeline text.
   assert.match(content, /저장 중…/);
+  assert.match(content, /attachShadow\(\{ mode: "open" \}\)/);
+  assert.match(content, /appearance:none;-webkit-appearance:none/);
 });
 
 async function launchPopupLayoutBrowser() {

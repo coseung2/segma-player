@@ -4,6 +4,8 @@
 // When the bookmarks API is unavailable (no permission), entries fall back
 // to local storage so the UI still works.
 
+import { resolveEdition } from "./license.js";
+
 const STORAGE_KEY = "auraCollection";
 export const COLLECTION_CAP = 500;
 export const COLLECTION_FOLDER_TITLE = "Aura Media";
@@ -128,6 +130,7 @@ function storageFallback() {
 }
 
 export async function getCollection() {
+  if ((await resolveEdition()) !== "pro") return null;
   if (globalThis.chrome?.bookmarks) {
     return createBookmarkCollection(globalThis.chrome.bookmarks);
   }
@@ -136,16 +139,19 @@ export async function getCollection() {
 
 export async function listCollection() {
   const collection = await getCollection();
+  if (!collection) return [];
   const entries = await collection.list();
   return entries || [];
 }
 
 export async function addToCollection(entry) {
   const collection = await getCollection();
+  if (!collection) return null;
   return collection.add(entry);
 }
 
 export async function removeFromCollection(url) {
   const collection = await getCollection();
+  if (!collection) return false;
   return collection.remove(url);
 }

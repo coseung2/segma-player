@@ -6,6 +6,7 @@ const params = new URLSearchParams(location.search);
 const mediaUrl = params.get("url") || "";
 const title = params.get("title") || "";
 const subtitleSession = params.get("sub") || "";
+const proActive = params.get("pro") === "1";
 
 const video = document.getElementById("video");
 const titleElement = document.getElementById("title");
@@ -13,6 +14,7 @@ const subtitleElement = document.getElementById("subtitle");
 const subtitleTag = document.getElementById("subtitle-tag");
 const message = document.getElementById("message");
 const saveButton = document.getElementById("save");
+if (!proActive) saveButton.hidden = true;
 
 function fail(text) {
   message.hidden = false;

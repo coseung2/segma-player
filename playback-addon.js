@@ -1,6 +1,7 @@
 import { decodeSubtitleBytes, findSubtitleFile } from "./player-subtitle.js";
 import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
 import { addToCollection, listCollection, removeFromCollection } from "./collection.js";
+import { resolveEdition } from "./license.js";
 import { loadLocale, translator } from "./i18n.js";
 
 const MESSAGES = {
@@ -14,6 +15,7 @@ const MESSAGES = {
     collectionEmpty: "저장한 항목이 없습니다. 재생 중 '컬렉션에 저장' 버튼으로 추가하세요.",
     collectionNote: "브라우저 즐겨찾기 'Aura Media' 폴더와 연동됩니다.",
     collectionRemove: "삭제",
+    collectionLocked: "컬렉션은 Pro 전용 기능입니다.",
   },
   en: {
     playBrowser: "Play",
@@ -25,6 +27,7 @@ const MESSAGES = {
     collectionEmpty: "Nothing saved yet. Use the Save button in the player to add an entry.",
     collectionNote: "Synced with the 'Aura Media' browser bookmarks folder.",
     collectionRemove: "Remove",
+    collectionLocked: "The collection is a Pro feature.",
   },
   ja: {
     playBrowser: "再生",
@@ -36,6 +39,7 @@ const MESSAGES = {
     collectionEmpty: "保存された項目はありません。再生中に「保存」ボタンで追加できます。",
     collectionNote: "ブラウザーのブックマーク「Aura Media」フォルダーと同期されます。",
     collectionRemove: "削除",
+    collectionLocked: "コレクションは Pro 専用機能です。",
   },
   zh: {
     playBrowser: "播放",
@@ -47,11 +51,13 @@ const MESSAGES = {
     collectionEmpty: "还没有保存的项目。播放时点击“保存”按钮添加。",
     collectionNote: "与浏览器书签“Aura Media”文件夹同步。",
     collectionRemove: "删除",
+    collectionLocked: "收藏是 Pro 专属功能。",
   },
 };
 
 const candidates = document.getElementById("candidates");
 let t = translator();
+let proActive = false;
 
 function byId(id) {
   return document.getElementById(id);
@@ -103,6 +109,7 @@ async function playInBrowser(mediaUrl, title, button) {
   const params = new URLSearchParams({ url: mediaUrl });
   if (title) params.set("title", title.slice(0, 240));
   params.set("sub", sessionId);
+  if (proActive) params.set("pro", "1");
   chrome.tabs.create({ url: chrome.runtime.getURL(`player.html?${params.toString()}`) });
   button.textContent = t("browserOpening");
   setTimeout(() => {
@@ -116,6 +123,15 @@ async function renderCollection() {
   const heading = document.querySelector(".collection-header h2");
   if (!listElement) return;
   if (heading) heading.textContent = t("collection");
+  if (!proActive) {
+    countElement.hidden = true;
+    listElement.replaceChildren();
+    const locked = document.createElement("p");
+    locked.className = "collection-empty";
+    locked.textContent = t("collectionLocked");
+    listElement.append(locked);
+    return;
+  }
   const entries = await listCollection();
   const note = byId("collection-note");
   if (note) note.textContent = t("collectionNote");
@@ -154,6 +170,11 @@ async function renderCollection() {
   }
 }
 
+async function refreshPlanGate() {
+  proActive = (await resolveEdition()) === "pro";
+  renderCollection();
+}
+
 function watchBookmarkChanges() {
   if (!globalThis.chrome?.bookmarks) return;
   let refreshTimer = null;
@@ -165,6 +186,15 @@ function watchBookmarkChanges() {
   chrome.bookmarks.onRemoved.addListener(schedule);
   chrome.bookmarks.onMoved.addListener(schedule);
   chrome.bookmarks.onChanged.addListener(schedule);
+}
+
+function watchLicenseChanges() {
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === "license-changed") refreshPlanGate();
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.auraLicense) refreshPlanGate();
+  });
 }
 
 function enhanceCandidateCard(card) {
@@ -203,8 +233,9 @@ async function init() {
     observer.observe(candidates, { childList: true, subtree: true });
     enhanceCandidates();
   }
-  await renderCollection();
+  await refreshPlanGate();
   watchBookmarkChanges();
+  watchLicenseChanges();
 }
 
 init();

@@ -208,6 +208,7 @@ async function playInBrowser(mediaUrl, title, button, sourceUrl = "") {
 
 async function refreshPlanGate() {
   proActive = (await resolveEdition()) === "pro";
+  await refreshSubtitleFolderSettings();
 }
 
 function watchLicenseChanges() {
@@ -257,7 +258,6 @@ async function init() {
     enhanceCandidates();
   }
   await refreshPlanGate();
-  await refreshSubtitleFolderSettings();
   watchLicenseChanges();
 }
 

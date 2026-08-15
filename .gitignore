@@ -5,6 +5,8 @@ node_modules/
 native-host/target/
 artifacts/
 dist/
+.playwright-cli/
+scripts/laptop-package/*-report.txt
 
 # wrangler files
 .wrangler

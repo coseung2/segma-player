@@ -29,12 +29,6 @@ function isValidLicenseKey(value) {
 
 const MAX_LICENSE_DEVICES = 3;
 
-function isValidProbeToken(value) {
-  return typeof value === "string" && /^[a-f0-9]{32,64}$/.test(value);
-}
-
-const PROBE_TTL_SECONDS = 120;
-
 const PLAN_PERIODS = Object.freeze({
   month: { amountUsdt: 5.99, durationMs: 30 * 24 * 60 * 60 * 1000 },
   year: { amountUsdt: 49, durationMs: 365 * 24 * 60 * 60 * 1000 },
@@ -186,25 +180,6 @@ export default {
       return json({ ok: true, token, exp, plan });
     }
 
-    if (path === "/api/potplayer-probe" && request.method === "POST") {
-      const body = await request.json().catch(() => null);
-      const token = typeof body?.token === "string" ? body.token.trim().toLowerCase() : "";
-      if (!isValidProbeToken(token)) return json({ ok: false, error: "invalid-token" }, 400);
-      await env.LICENSES.put(
-        `potplayer-probe:${token}`,
-        JSON.stringify({ at: Date.now() }),
-        { expirationTtl: PROBE_TTL_SECONDS },
-      );
-      return json({ ok: true });
-    }
-
-    if (path === "/api/potplayer-probe/status" && request.method === "GET") {
-      const token = (url.searchParams.get("token") || "").trim().toLowerCase();
-      if (!isValidProbeToken(token)) return json({ ok: false, error: "invalid-token" }, 400);
-      const record = await readRecord(env, `potplayer-probe:${token}`);
-      return json({ ok: true, seen: Boolean(record) });
-    }
-
     if (path === "/api/pay/order" && request.method === "POST") {
       const wallet = (env.USDT_TRC20_ADDRESS || "").trim();
       if (!wallet) return json({ ok: false, error: "payment-not-configured" }, 503);
@@ -315,20 +290,6 @@ export default {
       const headers = new Headers();
       headers.set("content-type", "application/x-msdownload");
       headers.set("content-disposition", 'attachment; filename="AuraMediaCompanionSetup.exe"');
-      headers.set("content-length", String(object.size));
-      headers.set("cache-control", "public, max-age=3600");
-      headers.set("accept-ranges", "bytes");
-      if (request.method === "HEAD") return new Response(null, { status: 200, headers });
-      return new Response(object.body, { status: 200, headers });
-    }
-
-    if (path === "/downloads/AuraPotPlayerSetup.exe"
-      && (request.method === "GET" || request.method === "HEAD")) {
-      const object = await env.COMPANION_BUCKET.get("AuraPotPlayerSetup.exe");
-      if (!object) return json({ ok: false, error: "not-found" }, 404);
-      const headers = new Headers();
-      headers.set("content-type", "application/x-msdownload");
-      headers.set("content-disposition", 'attachment; filename="AuraPotPlayerSetup.exe"');
       headers.set("content-length", String(object.size));
       headers.set("cache-control", "public, max-age=3600");
       headers.set("accept-ranges", "bytes");

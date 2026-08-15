@@ -27,7 +27,7 @@ try {
     -OutputDirectory $storeOut -Edition $Edition -Version $repoVersion | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Store package build failed.' }
 
-  # 2) Unpack and add the PotPlayer dev-only popup surface.
+  # 2) Unpack and add the dev-only playback popup surface.
   $storeZip = Join-Path $storeOut $archiveName
   if (-not (Test-Path -LiteralPath $storeZip -PathType Leaf)) {
     throw "Store package not found: $storeZip"
@@ -36,9 +36,8 @@ try {
   Expand-Archive -LiteralPath $storeZip -DestinationPath $stage
 
   foreach ($relative in @(
-    'popup-potplayer.html',
-    'potplayer-popup-addon.js',
-    'potplayer-protocol.js',
+    'popup-play.html',
+    'playback-addon.js',
     'collection.js',
     'player.html',
     'player.js',
@@ -58,7 +57,7 @@ try {
 
   $manifestPath = Join-Path $stage 'manifest.json'
   $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-  $manifest.action.default_popup = 'popup-potplayer.html'
+  $manifest.action.default_popup = 'popup-play.html'
   $permissions = @($manifest.permissions)
   if ($permissions -notcontains 'bookmarks') {
     $manifest.permissions = @($permissions + 'bookmarks' | Sort-Object)

@@ -6,46 +6,7 @@
     <title data-i18n="app.title">Aura Media Downloader</title>
     <link rel="stylesheet" href="popup.css" />
     <style>
-      .potplayer-install-card {
-        position: relative;
-        margin-top: 12px;
-        padding: 12px;
-        border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
-        border-radius: 10px;
-        background: var(--surface-2, rgba(255, 255, 255, 0.05));
-      }
-      .potplayer-install-card h3 {
-        margin: 0 0 6px;
-        font-size: 13px;
-        font-weight: 700;
-      }
-      .potplayer-install-card p {
-        margin: 0 0 10px;
-        font-size: 12px;
-        line-height: 1.5;
-        opacity: 0.85;
-      }
-      .potplayer-install-card .primary-button {
-        width: 100%;
-      }
-      .potplayer-install-close {
-        position: absolute;
-        top: 6px;
-        right: 8px;
-        border: 0;
-        background: transparent;
-        color: inherit;
-        font-size: 16px;
-        line-height: 1;
-        cursor: pointer;
-        opacity: 0.7;
-      }
-      .potplayer-install-status {
-        margin-top: 8px !important;
-        margin-bottom: 0 !important;
-        font-size: 11px !important;
-      }
-      .potplayer-toast {
+      .playback-toast {
         position: fixed;
         left: 12px;
         right: 12px;
@@ -61,28 +22,8 @@
         line-height: 1.4;
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
       }
-      .candidate-player-actions {
-        display: flex;
-        gap: 8px;
-        margin-top: 10px;
-      }
-      .candidate-player-actions .browser-play-button {
-        flex: 1;
-      }
-      .candidate-player-actions .potplayer-button {
-        flex: none;
-        padding: 8px 12px;
-        border: 1px solid rgba(255, 255, 255, 0.18);
-        border-radius: 8px;
-        background: transparent;
-        color: inherit;
-        font-size: 12px;
-        font-weight: 600;
-        cursor: pointer;
-      }
-      .candidate-player-actions .potplayer-button:disabled {
-        opacity: 0.6;
-        cursor: default;
+      .browser-play-button {
+        margin-top: 8px;
       }
       .collection-panel {
         margin-top: 14px;
@@ -233,6 +174,6 @@
     </section>
 
     <script type="module" src="popup.js"></script>
-    <script type="module" src="potplayer-popup-addon.js"></script>
+    <script type="module" src="playback-addon.js"></script>
   </body>
 </html>

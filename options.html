@@ -33,6 +33,11 @@
       #purchase-order { margin-top: 10px; padding: 10px; border: 1px solid #2a3444; border-radius: 8px; background: #131a25; }
       #purchase-order[hidden] { display: none; }
       .pay-line { margin: 0 0 6px; color: #c3cede; font-size: 11px; line-height: 1.5; word-break: break-all; }
+      .pay-qr-wrap { display: flex; align-items: center; gap: 10px; margin: 8px 0 10px; }
+      .pay-qr { display: grid; place-items: center; padding: 6px; border-radius: 8px; background: #fff; }
+      .pay-qr canvas { display: block; width: 140px; height: 140px; image-rendering: pixelated; }
+      .pay-qr-copy { flex: 1 1 auto; min-width: 0; }
+      .pay-qr-copy .pay-line { margin: 0 0 4px; }
       .input-icon-button { position: absolute; top: 0; right: 0; width: 36px; height: 36px; flex: none; min-height: 0; padding: 0; border: 0; border-radius: 0 8px 8px 0; background: transparent; color: #8f9db0; cursor: pointer; font-size: 0; }
       .input-icon-button:hover, .input-icon-button:focus-visible { background: rgba(255, 255, 255, .06); color: #fff; }
       .input-icon-button:focus-visible { outline: 2px solid #73a5ff; outline-offset: -2px; }
@@ -69,8 +74,13 @@
           <button id="purchase-create" class="primary" type="button" data-i18n="settings.createOrder">Order</button>
         </div>
         <div id="purchase-order" hidden>
-          <p id="purchase-address" class="pay-line"></p>
-          <p id="purchase-amount" class="pay-line"></p>
+          <div class="pay-qr-wrap">
+            <div class="pay-qr" aria-hidden="true"><canvas id="purchase-qr" width="220" height="220"></canvas></div>
+            <div class="pay-qr-copy">
+              <p id="purchase-address" class="pay-line"></p>
+              <p id="purchase-amount" class="pay-line"></p>
+            </div>
+          </div>
           <input id="purchase-tx" type="text" data-i18n-placeholder="settings.txPlaceholder" placeholder="Transaction hash (TxID)" autocomplete="off" />
           <div class="row">
             <button id="purchase-verify" class="primary block" type="button" data-i18n="settings.verifyPayment">Verify payment</button>

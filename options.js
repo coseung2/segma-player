@@ -7,6 +7,7 @@ import {
   normalizeLocale,
   translator,
 } from "./i18n.js";
+import { encodeQr } from "./qr-code.js";
 
 const PURCHASE_API_ORIGIN = LICENSE_API_URL.replace(/\/api\/license$/, "");
 let t = translator();
@@ -29,7 +30,32 @@ const purchaseAmount = document.querySelector("#purchase-amount");
 const purchaseTxInput = document.querySelector("#purchase-tx");
 const purchaseVerifyButton = document.querySelector("#purchase-verify");
 const purchaseStatus = document.querySelector("#purchase-status");
+const purchaseQr = document.querySelector("#purchase-qr");
 let purchaseOrderId = null;
+
+function renderPurchaseQr(walletAddress, amountUsdt) {
+  if (!purchaseQr) return;
+  try {
+    // Scan the payment with a phone wallet: the TRON URI carries the address
+    // and the expected amount in one scan.
+    const uri = `tron:${String(walletAddress)}?amount=${Number(amountUsdt)}`;
+    const encoded = encodeQr(uri);
+    const context = purchaseQr.getContext("2d");
+    const quiet = 4;
+    const scale = Math.floor(purchaseQr.width / (encoded.size + quiet * 2));
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, purchaseQr.width, purchaseQr.height);
+    context.fillStyle = "#000000";
+    for (let row = 0; row < encoded.size; row += 1) {
+      for (let column = 0; column < encoded.size; column += 1) {
+        if (!encoded.modules[row][column]) continue;
+        context.fillRect((column + quiet) * scale, (row + quiet) * scale, scale, scale);
+      }
+    }
+  } catch {
+    // The QR is a convenience; the address line below remains the source of truth.
+  }
+}
 
 purchaseToggleButton.addEventListener("click", () => {
   const opening = purchasePanel.hidden;
@@ -147,6 +173,7 @@ purchaseCreateButton.addEventListener("click", async () => {
       address: data.walletAddress,
     });
     purchaseAmount.textContent = t("settings.payAmount", { amount: data.amountUsdt });
+    renderPurchaseQr(data.walletAddress, data.amountUsdt);
     purchaseOrderBox.hidden = false;
     purchaseStatus.textContent = t("settings.sendThenVerify");
   } catch {
@@ -217,3 +244,25 @@ async function start() {
 }
 
 void start();
+
+// The settings page lives inside a popup iframe whose height the popup adjusts
+// from outside. Tell the parent whenever the document height changes so the
+// payment QR panel never gets clipped.
+if (window.parent !== window) {
+  const reportHeight = () => {
+    try {
+      window.parent.postMessage({
+        source: "aura-media-settings",
+        height: document.documentElement.scrollHeight || document.body.scrollHeight || 0,
+      }, "*");
+    } catch {
+      // The parent may be unavailable while the overlay is closed.
+    }
+  };
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(reportHeight);
+    observer.observe(document.body);
+  }
+  window.addEventListener("load", reportHeight);
+  setInterval(reportHeight, 1200);
+}

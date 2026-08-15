@@ -50,6 +50,7 @@ const expectedFiles = [
   "popup.html",
   "popup.js",
   "product-plan.js",
+  "qr-code.js",
   "progressive-redirect.js",
   "request-header-store.js",
   "save-directory.js",

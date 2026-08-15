@@ -296,6 +296,13 @@ document.addEventListener("click", (event) => {
 byId("settings-frame")?.addEventListener("load", () => {
   setTimeout(syncSettingsFrameHeight, 120);
 });
+window.addEventListener("message", (event) => {
+  const message = event.data;
+  if (message?.source !== "aura-media-settings") return;
+  const frame = byId("settings-frame");
+  const height = Number(message.height);
+  if (frame && Number.isFinite(height) && height > 0) frame.style.height = `${height}px`;
+});
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!byId("locale-menu")?.hidden) { closeLocaleMenu(); return; }

@@ -76,6 +76,7 @@ $runtimeFiles = @(
   'popup.js',
   'progressive-redirect.js',
   'product-plan.js',
+  'qr-code.js',
   'request-header-store.js',
   'save-directory.js',
   'worker-lifecycle.js',

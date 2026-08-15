@@ -172,9 +172,18 @@ purchaseVerifyButton.addEventListener("click", async () => {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      purchaseStatus.textContent = data?.error === "transaction-not-confirmed"
-        ? t("settings.txUnconfirmed")
-        : (data?.error || t("settings.verifyFailed"));
+      // Raw server codes are not user-facing; map the known ones and fall back
+      // to a generic failure so a code like `trongrid-http-429` never surfaces.
+      const messages = {
+        "transaction-not-confirmed": "settings.txUnconfirmed",
+        "usdt-transfer-not-found": "settings.txNotFound",
+        "order-not-found": "settings.orderExpired",
+        "already-confirmed": "settings.alreadyConfirmed",
+        "payment-not-configured": "settings.paymentNotConfigured",
+        "invalid-request": "settings.txRequired",
+      };
+      const key = messages[data?.error];
+      purchaseStatus.textContent = key ? t(key) : t("settings.verifyFailed");
       return;
     }
     licenseKeyInput.value = data.key;

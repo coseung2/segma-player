@@ -1,4 +1,5 @@
 import { signToken, isValidDeviceId, TOKEN_TTL_MS } from "./youtube-token.js";
+import { coversExpectedAmount, sameTronAddress } from "./tron-address.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -97,18 +98,13 @@ async function verifyTrc20(txHash, walletAddress, expectedAmount, apiKey) {
     const data = await response.json();
     const events = Array.isArray(data?.data) ? data.data : [];
     if (!events.length) return { verified: false, error: "transaction-not-confirmed" };
-    const wallet = walletAddress.toLowerCase();
     for (const event of events) {
       if (event.event_name !== "Transfer") continue;
-      const contract = String(event.contract_address || "").toLowerCase();
-      if (contract !== USDT_TRC20_CONTRACT.toLowerCase()) continue;
-      const to = String(event.result?.to || "").toLowerCase();
-      if (to !== wallet) continue;
-      const value = String(event.result?.value || "0");
-      const amount = Number(value) / 1e6;
-      if (Number.isFinite(amount) && amount >= expectedAmount * 0.99) {
-        return { verified: true };
-      }
+      // TronGrid reports addresses as 41-prefixed hex while the configured
+      // wallet is base58, so both sides are normalized before comparison.
+      if (!sameTronAddress(event.contract_address, USDT_TRC20_CONTRACT)) continue;
+      if (!sameTronAddress(event.result?.to, walletAddress)) continue;
+      if (coversExpectedAmount(event.result?.value, expectedAmount)) return { verified: true };
     }
     return { verified: false, error: "usdt-transfer-not-found" };
   } catch (error) {

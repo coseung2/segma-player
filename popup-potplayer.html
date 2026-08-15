@@ -5,6 +5,63 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title data-i18n="app.title">Aura Media Downloader</title>
     <link rel="stylesheet" href="popup.css" />
+    <style>
+      .potplayer-install-card {
+        position: relative;
+        margin-top: 12px;
+        padding: 12px;
+        border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+        border-radius: 10px;
+        background: var(--surface-2, rgba(255, 255, 255, 0.05));
+      }
+      .potplayer-install-card h3 {
+        margin: 0 0 6px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .potplayer-install-card p {
+        margin: 0 0 10px;
+        font-size: 12px;
+        line-height: 1.5;
+        opacity: 0.85;
+      }
+      .potplayer-install-card .primary-button {
+        width: 100%;
+      }
+      .potplayer-install-close {
+        position: absolute;
+        top: 6px;
+        right: 8px;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        opacity: 0.7;
+      }
+      .potplayer-install-status {
+        margin-top: 8px !important;
+        margin-bottom: 0 !important;
+        font-size: 11px !important;
+      }
+      .potplayer-toast {
+        position: fixed;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        z-index: 10;
+        margin: 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: rgba(20, 28, 40, 0.95);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        color: #fff;
+        font-size: 12px;
+        line-height: 1.4;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+      }
+    </style>
   </head>
   <body>
     <main class="popup-shell">

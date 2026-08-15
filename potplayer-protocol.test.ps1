@@ -42,6 +42,27 @@ try {
   $id = Normalize-MediaIdentifier "ABC-123 sample"
   if ($id -ne "ABC-123") { throw "Identifier mismatch: $id" }
   Write-Output "OK Normalize-MediaIdentifier"
+
+  # 5) Companion config drives the subtitle roots and wins over Downloads
+  $configDir = Join-Path $tempRoot "config"
+  New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+  $configPath = Join-Path $configDir "config.json"
+  [System.IO.File]::WriteAllText(
+    $configPath,
+    '{"subtitleDir": "' + ($configDir.Replace('\', '\\')) + '"}',
+    (New-Object System.Text.UTF8Encoding($false)))
+  $oldConfig = $env:AURA_COMPANION_CONFIG
+  $env:AURA_COMPANION_CONFIG = $configPath
+  try {
+    $subtitleFile = Join-Path $configDir "ABC-123.srt"
+    [System.IO.File]::WriteAllText($subtitleFile, $subtitleText, (New-Object System.Text.UTF8Encoding($false)))
+    $found = Find-Subtitle "ABC-123 sample" ""
+    if ($found -ne $subtitleFile) { throw "Config subtitle root was not used: $found" }
+    Write-Output "OK config subtitle root"
+  } finally {
+    if ($null -eq $oldConfig) { Remove-Item Env:AURA_COMPANION_CONFIG -ErrorAction SilentlyContinue }
+    else { $env:AURA_COMPANION_CONFIG = $oldConfig }
+  }
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

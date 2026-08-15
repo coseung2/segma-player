@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\artifacts\chrome-web-store'),
+  [string]$OutputDirectory = '',
   [string]$UpgradeUrl = '',
   [string]$Version = '',
   [ValidateSet('free', 'pro')]
@@ -12,7 +12,12 @@ Set-StrictMode -Version Latest
 
 $RepositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $StoreRoot = Join-Path $RepositoryRoot 'store'
-$OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
+$resolvedOutput = if ($OutputDirectory) {
+  $OutputDirectory
+} else {
+  Join-Path $RepositoryRoot 'artifacts\chrome-web-store'
+}
+$OutputDirectory = [System.IO.Path]::GetFullPath($resolvedOutput)
 $StageDirectory = Join-Path $OutputDirectory $(if ($Edition -eq 'pro') { 'staging-pro' } else { 'staging' })
 
 if ($OutputDirectory.Equals($RepositoryRoot, [System.StringComparison]::OrdinalIgnoreCase)) {

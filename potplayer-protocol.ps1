@@ -20,6 +20,32 @@ function Get-QueryValue {
   return $null
 }
 
+function Get-CompanionConfig {
+  $configPath = if ($env:AURA_COMPANION_CONFIG) {
+    $env:AURA_COMPANION_CONFIG
+  } else {
+    Join-Path $env:LOCALAPPDATA 'Aura Media\PotPlayer\config.json'
+  }
+  if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return $null }
+  try {
+    return Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+function Get-SubtitleRoots {
+  $roots = @()
+  $config = Get-CompanionConfig
+  if ($config -and $config.subtitleDir) { $roots += [string]$config.subtitleDir }
+  if ($env:AURA_SUBTITLE_DIR) { $roots += $env:AURA_SUBTITLE_DIR }
+  $downloadsSubtitles = Join-Path $env:USERPROFILE 'Downloads\Subtitles'
+  New-Item -ItemType Directory -Path $downloadsSubtitles -Force -ErrorAction SilentlyContinue | Out-Null
+  $roots += $downloadsSubtitles
+  $roots += (Join-Path $env:USERPROFILE 'Downloads')
+  return @($roots | Where-Object { $_ } | Select-Object -Unique)
+}
+
 function Find-PotPlayer {
   $candidates = @(
     (Join-Path ${env:ProgramFiles} 'DAUM\PotPlayer\PotPlayerMini64.exe'),
@@ -47,15 +73,10 @@ function Normalize-MediaIdentifier {
 
 function Find-Subtitle {
   param([string]$Title, [string]$MediaUrl)
-  $roots = @()
-  if ($env:AURA_SUBTITLE_DIR) { $roots += $env:AURA_SUBTITLE_DIR }
-  $roots += (Join-Path $env:USERPROFILE 'Downloads\Subtitles')
-  $roots += (Join-Path $env:USERPROFILE 'Downloads')
-
   $identifier = Normalize-MediaIdentifier $Title
   if (-not $identifier) { $identifier = Normalize-MediaIdentifier $MediaUrl }
 
-  foreach ($root in ($roots | Select-Object -Unique)) {
+  foreach ($root in (Get-SubtitleRoots)) {
     if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { continue }
     if ($identifier) {
       $pattern = $identifier -replace '-', '[-_ ]?'
@@ -67,6 +88,18 @@ function Find-Subtitle {
     }
   }
   return $null
+}
+
+function Send-CompanionProbe {
+  param([string]$Token)
+  if (-not $Token -or $Token -notmatch '^[a-f0-9]{32,64}$') { return }
+  try {
+    $body = @{ token = $Token } | ConvertTo-Json -Compress
+    Invoke-RestMethod -Method Post -Uri 'https://aura.mdownloader.workers.dev/api/potplayer-probe' `
+      -ContentType 'application/json' -Body $body -TimeoutSec 3 -ErrorAction Stop | Out-Null
+  } catch {
+    # Probing is best-effort; playback must never be blocked by it.
+  }
 }
 
 # The registry handler runs under Windows PowerShell 5.1, but the helpers are
@@ -153,9 +186,17 @@ if ($SelfTest) {
 
 if (-not $ProtocolUri) { throw '재생할 요청 URI가 없습니다.' }
 $uri = [System.Uri]$ProtocolUri
-if ($uri.Scheme -ne 'aura-player' -or $uri.Host -ne 'play') {
-  throw '지원하지 않는 Aura Player 요청입니다.'
+if ($uri.Scheme -ne 'aura-player') { throw '지원하지 않는 Aura Player 요청입니다.' }
+
+$probeToken = Get-QueryValue $uri 'probe'
+if (-not $probeToken -and $uri.Host -eq 'probe') { $probeToken = Get-QueryValue $uri 'token' }
+if ($probeToken) { Send-CompanionProbe $probeToken }
+
+if ($uri.Host -eq 'probe') {
+  # Companion reachability probe: report to the site and exit without media.
+  exit 0
 }
+if ($uri.Host -ne 'play') { throw '지원하지 않는 Aura Player 요청입니다.' }
 
 $mediaUrl = Get-QueryValue $uri 'url'
 $title = Get-QueryValue $uri 'title'

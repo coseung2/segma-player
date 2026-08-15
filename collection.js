@@ -15,11 +15,13 @@ export function mergeCollection(list, entry, cap = COLLECTION_CAP) {
   const normalized = Array.isArray(list) ? list : [];
   const url = typeof entry?.url === "string" ? entry.url : "";
   if (!url) return normalized;
+  const sourceUrl = typeof entry?.sourceUrl === "string" ? entry.sourceUrl : "";
   const rest = normalized.filter((item) => item?.url !== url);
   const next = [
     {
       url,
       title: typeof entry.title === "string" ? entry.title.slice(0, 240) : "",
+      sourceUrl,
       savedAt: typeof entry.savedAt === "number" ? entry.savedAt : Date.now(),
     },
     ...rest,
@@ -33,16 +35,29 @@ function bookmarkToEntry(node) {
     id: node.id,
     url: parsed?.mediaUrl || node.url,
     title: parsed?.title || node.title || "",
+    sourceUrl: parsed?.sourceUrl || "",
     bookmarkUrl: node.url,
     savedAt: typeof node.dateAdded === "number" ? node.dateAdded : Date.now(),
   };
 }
 
-export function buildCollectionBookmarkUrl(mediaUrl, title = "", playerUrl = null) {
+function safeSourceUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (!(parsed.protocol === "http:" || parsed.protocol === "https:") || parsed.username || parsed.password) return "";
+    return parsed.href;
+  } catch {
+    return "";
+  }
+}
+
+export function buildCollectionBookmarkUrl(mediaUrl, title = "", playerUrl = null, sourceUrl = "") {
   const baseUrl = playerUrl || globalThis.chrome?.runtime?.getURL?.("player.html");
   if (!baseUrl) return mediaUrl;
   const params = new URLSearchParams({ collection: "1", url: mediaUrl });
   if (title) params.set("title", title.slice(0, 240));
+  const safeSource = safeSourceUrl(sourceUrl);
+  if (safeSource) params.set("source", safeSource);
   return `${baseUrl}?${params.toString()}`;
 }
 
@@ -51,11 +66,17 @@ export function parseCollectionBookmarkUrl(value) {
     const parsed = new URL(value);
     if (!(parsed.protocol === "chrome-extension:" || parsed.protocol === "moz-extension:")) return null;
     if (parsed.pathname !== "/player.html" || parsed.searchParams.get("collection") !== "1") return null;
+    const expected = globalThis.chrome?.runtime?.getURL?.("player.html");
+    if (expected) {
+      const expectedUrl = new URL(expected);
+      if (parsed.origin !== expectedUrl.origin) return null;
+    }
     const mediaUrl = parsed.searchParams.get("url") || "";
     if (!/^https?:$/i.test(new URL(mediaUrl).protocol)) return null;
     return {
       mediaUrl,
       title: parsed.searchParams.get("title") || "",
+      sourceUrl: safeSourceUrl(parsed.searchParams.get("source") || ""),
     };
   } catch {
     return null;
@@ -89,7 +110,7 @@ async function folderEntries(bookmarks) {
   for (const node of children.filter((item) => typeof item.url === "string")) {
     const entry = bookmarkToEntry(node);
     if (!parseCollectionBookmarkUrl(node.url)) {
-      const bookmarkUrl = buildCollectionBookmarkUrl(entry.url, entry.title);
+      const bookmarkUrl = buildCollectionBookmarkUrl(entry.url, entry.title, null, entry.sourceUrl);
       if (bookmarkUrl !== node.url) {
         await bookmarks.update(node.id, { url: bookmarkUrl }).catch(() => null);
         entry.bookmarkUrl = bookmarkUrl;
@@ -114,7 +135,7 @@ export function createBookmarkCollection(bookmarks) {
       const url = typeof entry?.url === "string" ? entry.url : "";
       if (!url) return null;
       const title = typeof entry.title === "string" ? entry.title.slice(0, 240) : "";
-      const bookmarkUrl = buildCollectionBookmarkUrl(url, title);
+      const bookmarkUrl = buildCollectionBookmarkUrl(url, title, null, entry.sourceUrl);
       const folderId = await findOrCreateFolder(bookmarks);
       if (!folderId) return null;
       const existing = (await bookmarks.getChildren(folderId))
@@ -146,6 +167,23 @@ export function createBookmarkCollection(bookmarks) {
       await bookmarks.remove(existing.id);
       return true;
     },
+    async replace(oldUrl, entry) {
+      if (!hasApi) return false;
+      const folderId = await findOrCreateFolder(bookmarks);
+      if (!folderId) return false;
+      const existing = (await bookmarks.getChildren(folderId))
+        .find((node) => bookmarkMediaUrl(node.url) === oldUrl);
+      if (!existing) return false;
+      const url = typeof entry?.url === "string" ? entry.url : "";
+      if (!url) return false;
+      const title = typeof entry.title === "string" ? entry.title.slice(0, 240) : existing.title || "";
+      await bookmarks.update(existing.id, {
+        title,
+        url: buildCollectionBookmarkUrl(url, title, null, entry.sourceUrl),
+      });
+      await bookmarks.move(existing.id, { parentId: folderId, index: 0 }).catch(() => null);
+      return true;
+    },
   };
 }
 
@@ -169,6 +207,12 @@ function storageFallback() {
       const current = await this.list();
       const next = current.filter((item) => item?.url !== url);
       await chrome.storage.local.set({ [STORAGE_KEY]: next });
+      return true;
+    },
+    async replace(oldUrl, entry) {
+      const current = await this.list();
+      const next = current.filter((item) => item?.url !== oldUrl);
+      await chrome.storage.local.set({ [STORAGE_KEY]: mergeCollection(next, entry) });
       return true;
     },
   };
@@ -199,4 +243,10 @@ export async function removeFromCollection(url) {
   const collection = await getCollection();
   if (!collection) return false;
   return collection.remove(url);
+}
+
+export async function replaceInCollection(oldUrl, entry) {
+  const collection = await getCollection();
+  if (!collection?.replace) return false;
+  return collection.replace(oldUrl, entry);
 }

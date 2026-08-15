@@ -13,10 +13,12 @@ test("collection bookmark URLs wrap the media address in the browser player", ()
     "https://a.test/1.m3u8?token=abc",
     "AAA-111",
     "chrome-extension://test/player.html",
+    "https://site.test/watch/1",
   );
   assert.deepEqual(parseCollectionBookmarkUrl(bookmarkUrl), {
     mediaUrl: "https://a.test/1.m3u8?token=abc",
     title: "AAA-111",
+    sourceUrl: "https://site.test/watch/1",
   });
 });
 

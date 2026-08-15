@@ -84,7 +84,19 @@ function showToast(message) {
   setTimeout(() => toast.remove(), 2600);
 }
 
-async function playInBrowser(mediaUrl, title, button) {
+async function activePageUrl() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const url = new URL(tab?.url || "");
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    if (url.username || url.password) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+async function playInBrowser(mediaUrl, title, button, sourceUrl = "") {
   const handle = await getStoredSubtitleDirectory();
   if (!handle) {
     chrome.tabs.create({ url: chrome.runtime.getURL("subtitle-folder.html") });
@@ -108,6 +120,7 @@ async function playInBrowser(mediaUrl, title, button) {
   }
   const params = new URLSearchParams({ url: mediaUrl });
   if (title) params.set("title", title.slice(0, 240));
+  if (sourceUrl) params.set("source", sourceUrl);
   params.set("sub", sessionId);
   if (proActive) params.set("pro", "1");
   chrome.tabs.create({ url: chrome.runtime.getURL(`player.html?${params.toString()}`) });
@@ -156,7 +169,7 @@ async function renderCollection() {
     play.type = "button";
     play.className = "job-list-tool";
     play.textContent = t("playBrowser");
-    play.addEventListener("click", () => playInBrowser(entry.url, entry.title, play));
+    play.addEventListener("click", () => playInBrowser(entry.url, entry.title, play, entry.sourceUrl));
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "job-list-tool";
@@ -215,8 +228,8 @@ function enhanceCandidateCard(card) {
   button.textContent = t("playBrowser");
   button.title = "브라우저에서 자막과 함께 재생";
   button.setAttribute("aria-label", "브라우저에서 자막과 함께 재생");
-  button.addEventListener("click", () => {
-    playInBrowser(mediaUrl, title, button);
+  button.addEventListener("click", async () => {
+    playInBrowser(mediaUrl, title, button, await activePageUrl());
   });
   meta.append(button);
 }

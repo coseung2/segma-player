@@ -182,6 +182,7 @@ function cleanupSessions() {
 }
 
 async function loadSubtitles() {
+  if (!proActive) return;
   let text = "";
   try {
     if (subtitleSession) {
@@ -219,7 +220,7 @@ async function loadSubtitles() {
 
 async function refreshPlanGate() {
   proActive = (await resolveEdition()) === "pro";
-  saveButton.hidden = !proActive;
+  saveButton.hidden = false;
 }
 
 function setCollectionLocale(locale) {

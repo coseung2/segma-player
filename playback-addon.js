@@ -10,6 +10,7 @@ const MESSAGES = {
     playBrowserTitle: "브라우저에서 자막과 함께 재생",
     folderNeeded: "자막 폴더를 먼저 선택해 주세요. 열린 탭에서 폴더를 고르면 다음부터 바로 재생됩니다.",
     noSubtitle: "자막을 찾지 못했습니다 — 자막 없이 재생합니다",
+    subtitlePro: "자막 기능은 Pro에서 사용할 수 있습니다",
     subtitleFolder: "자막 폴더",
     chooseFolder: "자막 폴더 선택",
     folderCurrent: "현재: {name}",
@@ -28,6 +29,7 @@ const MESSAGES = {
     playBrowserTitle: "Play with subtitles in browser",
     folderNeeded: "Pick a subtitle folder first. Choose one in the opened tab, then play again.",
     noSubtitle: "No subtitle found — playing without subtitles",
+    subtitlePro: "Subtitles are available with Pro",
     subtitleFolder: "Subtitle folder",
     chooseFolder: "Choose subtitle folder",
     folderCurrent: "Current: {name}",
@@ -46,6 +48,7 @@ const MESSAGES = {
     playBrowserTitle: "字幕付きでブラウザー再生",
     folderNeeded: "先に字幕フォルダーを選択してください。開いたタブで選ぶと、次回から再生できます。",
     noSubtitle: "字幕が見つかりません — 字幕なしで再生します",
+    subtitlePro: "字幕機能は Pro で利用できます",
     subtitleFolder: "字幕フォルダー",
     chooseFolder: "字幕フォルダーを選択",
     folderCurrent: "現在: {name}",
@@ -64,6 +67,7 @@ const MESSAGES = {
     playBrowserTitle: "在浏览器中播放并显示字幕",
     folderNeeded: "请先选择字幕文件夹。在打开的标签页中选择后即可播放。",
     noSubtitle: "未找到字幕 — 将不带字幕播放",
+    subtitlePro: "字幕功能仅限 Pro",
     subtitleFolder: "字幕文件夹",
     chooseFolder: "选择字幕文件夹",
     folderCurrent: "当前：{name}",
@@ -119,10 +123,13 @@ function showToast(message) {
 }
 
 async function refreshSubtitleFolderSettings() {
+  const panel = byId("subtitle-settings");
   const button = byId("subtitle-folder-change");
   const status = byId("subtitle-folder-status");
   const label = byId("subtitle-folder-label");
+  if (panel) panel.hidden = !proActive;
   if (!button || !status) return;
+  if (!proActive) return;
   if (label) label.textContent = t("subtitleFolder");
   byId("subtitle-settings")?.setAttribute("aria-label", t("subtitleFolder"));
   button.textContent = t("chooseFolder");
@@ -131,6 +138,7 @@ async function refreshSubtitleFolderSettings() {
 }
 
 async function chooseSubtitleFolder() {
+  if (!proActive) return;
   const button = byId("subtitle-folder-change");
   const status = byId("subtitle-folder-status");
   if (!button || !status) return;
@@ -166,27 +174,30 @@ async function activePageUrl() {
 }
 
 async function playInBrowser(mediaUrl, title, button, sourceUrl = "") {
-  const handle = await getStoredSubtitleDirectory();
-  const sessionId = crypto.randomUUID();
+  const sessionId = proActive ? crypto.randomUUID() : null;
   let subtitleLoaded = false;
-  if (handle) try {
-    const found = await findSubtitleFile(handle, title, mediaUrl);
-    if (found) {
-      const bytes = new Uint8Array(await found.file.arrayBuffer());
-      const text = await decodeSubtitleBytes(bytes);
-      await chrome.storage.local.set({
-        [`auraSubtitleSession:${sessionId}`]: { text, at: Date.now() },
-      });
-      subtitleLoaded = true;
+  if (proActive) {
+    const handle = await getStoredSubtitleDirectory();
+    if (handle) try {
+      const found = await findSubtitleFile(handle, title, mediaUrl);
+      if (found) {
+        const bytes = new Uint8Array(await found.file.arrayBuffer());
+        const text = await decodeSubtitleBytes(bytes);
+        await chrome.storage.local.set({
+          [`auraSubtitleSession:${sessionId}`]: { text, at: Date.now() },
+        });
+        subtitleLoaded = true;
+      }
+    } catch {
+      // Playback continues without subtitles when the folder is unreadable.
     }
-  } catch {
-    // Playback continues without subtitles when the folder is unreadable.
   }
-  if (!subtitleLoaded) showToast(t("noSubtitle"));
+  if (!proActive) showToast(t("subtitlePro"));
+  else if (!subtitleLoaded) showToast(t("noSubtitle"));
   const params = new URLSearchParams({ url: mediaUrl });
   if (title) params.set("title", title.slice(0, 240));
   if (sourceUrl) params.set("source", sourceUrl);
-  params.set("sub", sessionId);
+  if (sessionId && subtitleLoaded) params.set("sub", sessionId);
   if (proActive) params.set("pro", "1");
   chrome.tabs.create({ url: chrome.runtime.getURL(`player.html?${params.toString()}`) });
   button.textContent = t("browserOpening");
@@ -240,13 +251,13 @@ function enhanceCandidates() {
 async function init() {
   t = localTranslator(await loadLocale());
   byId("subtitle-folder-change")?.addEventListener("click", chooseSubtitleFolder);
-  await refreshSubtitleFolderSettings();
   if (candidates) {
     const observer = new MutationObserver(enhanceCandidates);
     observer.observe(candidates, { childList: true, subtree: true });
     enhanceCandidates();
   }
   await refreshPlanGate();
+  await refreshSubtitleFolderSettings();
   watchLicenseChanges();
 }
 

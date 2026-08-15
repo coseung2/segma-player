@@ -45,6 +45,7 @@ import {
   createMediaFetchLeaseRegistry,
   createMediaFetchRuleIdAllocator,
   exactMediaFetchRule,
+  playbackMediaFetchRule,
   MEDIA_FETCH_RULE_ID_START,
   OFFSCREEN_DOCUMENT_TAB_ID,
 } from "./media-fetch-lease.js";
@@ -206,10 +207,14 @@ let lastDownloadOverlaySignature = "";
 
 async function syncDownloadOverlayForTab(tabId) {
   if (!Number.isInteger(tabId)) return;
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: "show-download-overlay" });
-  } catch {
-    // The active tab may not host the content script (e.g. chrome:// pages).
+  for (const delay of [0, 250, 1_000]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: "show-download-overlay" });
+      return;
+    } catch {
+      // The active tab may not host the content script yet.
+    }
   }
 }
 
@@ -605,7 +610,13 @@ async function cleanupStaleMediaFetchLeases() {
 
 async function prepareMediaFetchLease(sender, rawUrl, rawReferrer, sourceContext = {}) {
   if (!validMediaFetchSender(sender)) return { ok: false, error: "unauthorized" };
-  const senderTabId = mediaFetchSenderTabId(sender);
+  return prepareMediaFetchLeaseForTab(mediaFetchSenderTabId(sender), rawUrl, rawReferrer, sourceContext);
+}
+
+async function prepareMediaFetchLeaseForTab(tabId, rawUrl, rawReferrer, sourceContext = {}, playback = false) {
+  if (!Number.isInteger(tabId) || (tabId <= 0 && tabId !== OFFSCREEN_DOCUMENT_TAB_ID)) {
+    return { ok: false, error: "invalid-tab" };
+  }
   const url = canonicalMediaFetchUrl(rawUrl);
   if (!url) return { ok: false, error: "invalid-url" };
   const lookupContext = {
@@ -632,9 +643,10 @@ async function prepareMediaFetchLease(sender, rawUrl, rawReferrer, sourceContext
   }
   let rule;
   try {
-    rule = exactMediaFetchRule({
+    const isHlsPlayback = playback && /\.m3u8(?:[?#]|$)/i.test(url);
+    rule = (isHlsPlayback ? playbackMediaFetchRule : exactMediaFetchRule)({
       ruleId,
-      tabId: senderTabId,
+      tabId,
       url,
       referrer,
       requestHeaders: recordedHeadersForUrl(url, lookupContext),
@@ -651,7 +663,7 @@ async function prepareMediaFetchLease(sender, rawUrl, rawReferrer, sourceContext
   let lease;
   try {
     lease = mediaFetchLeases.create({
-      tabId: senderTabId,
+      tabId,
       url,
       referrer,
       ruleId,
@@ -663,15 +675,38 @@ async function prepareMediaFetchLease(sender, rawUrl, rawReferrer, sourceContext
   return { ok: true, leaseId: lease.leaseId };
 }
 
-async function releaseMediaFetchLeaseForSender(sender, leaseId) {
-  if (!validMediaFetchSender(sender)) return { ok: false, error: "unauthorized" };
-  if (typeof leaseId !== "string" || leaseId.length === 0) {
-    return { ok: false, error: "invalid-lease" };
+function validPlaybackSender(sender) {
+  return sender?.id === chrome.runtime.id
+    && typeof sender.url === "string"
+    && sender.url.startsWith(chrome.runtime.getURL("player.html"));
+}
+
+async function preparePlaybackMediaLease(sender, message) {
+  if (!validPlaybackSender(sender)) return { ok: false, error: "unauthorized" };
+  const tabId = Number(message?.tabId);
+  if (!Number.isInteger(tabId) || tabId <= 0) return { ok: false, error: "invalid-tab" };
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!String(tab?.url || "").startsWith(chrome.runtime.getURL("player.html"))) {
+      return { ok: false, error: "invalid-tab" };
+    }
+  } catch {
+    return { ok: false, error: "invalid-tab" };
   }
+  return prepareMediaFetchLeaseForTab(tabId, message.url, message.referrer, {}, true);
+}
+
+async function releaseMediaFetchLeaseForTab(tabId, leaseId) {
+  if (typeof leaseId !== "string" || leaseId.length === 0) return { ok: false, error: "invalid-lease" };
   const lease = mediaFetchLeases.get(leaseId);
-  if (!lease || lease.tabId !== mediaFetchSenderTabId(sender)) return { ok: false, error: "lease-not-found" };
+  if (!lease || lease.tabId !== tabId) return { ok: false, error: "lease-not-found" };
   if (!await removeMediaFetchLease(lease)) return { ok: false, error: "media-fetch-release-failed" };
   return { ok: true };
+}
+
+async function releaseMediaFetchLeaseForSender(sender, leaseId) {
+  if (!validMediaFetchSender(sender)) return { ok: false, error: "unauthorized" };
+  return releaseMediaFetchLeaseForTab(mediaFetchSenderTabId(sender), leaseId);
 }
 
 function touchMediaFetchLeaseForSender(sender, leaseId) {
@@ -823,6 +858,9 @@ async function queueMediaDownload(candidate) {
   }
   await persistDownloadJobs();
   syncWorkerLifecycleAlarm();
+  if (Number.isInteger(candidate?.tabId) && candidate.tabId > 0) {
+    void syncDownloadOverlayForTab(candidate.tabId);
+  }
   void syncDownloadOverlayForActiveTab();
   void dispatchMediaDownload(jobId, candidate);
   return { mode, jobId };
@@ -874,6 +912,24 @@ async function cancelDownloadJob(jobId) {
     await chrome.downloads.cancel(downloadId).catch(() => {});
   }
   await chrome.runtime.sendMessage({ type: "cancel-download-worker-job", jobId }).catch(() => null);
+  return { ok: true };
+}
+
+async function releasePlaybackMediaLease(sender, tabId, leaseId) {
+  if (!validPlaybackSender(sender) || !Number.isInteger(tabId) || tabId <= 0) {
+    return { ok: false, error: "unauthorized" };
+  }
+  return releaseMediaFetchLeaseForTab(tabId, leaseId);
+}
+
+function touchPlaybackMediaLease(sender, tabId, leaseId) {
+  if (!validPlaybackSender(sender) || !Number.isInteger(tabId) || tabId <= 0) {
+    return { ok: false, error: "unauthorized" };
+  }
+  if (typeof leaseId !== "string" || leaseId.length === 0) return { ok: false, error: "invalid-lease" };
+  const lease = mediaFetchLeases.get(leaseId);
+  if (!lease || lease.tabId !== tabId) return { ok: false, error: "lease-not-found" };
+  mediaFetchLeases.touch(leaseId);
   return { ok: true };
 }
 
@@ -1253,6 +1309,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "prepare-playback-media") {
+    preparePlaybackMediaLease(sender, message).then(sendResponse);
+    return true;
+  }
+
   if (message?.type === "release-media-fetch") {
     releaseMediaFetchLeaseForSender(sender, message.leaseId).then(sendResponse);
     return true;
@@ -1260,6 +1321,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "touch-media-fetch") {
     sendResponse(touchMediaFetchLeaseForSender(sender, message.leaseId));
+    return false;
+  }
+
+  if (message?.type === "release-playback-media") {
+    releasePlaybackMediaLease(sender, Number(message.tabId), message.leaseId).then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === "touch-playback-media") {
+    sendResponse(touchPlaybackMediaLease(sender, Number(message.tabId), message.leaseId));
     return false;
   }
 

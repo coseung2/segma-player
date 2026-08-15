@@ -92,6 +92,9 @@ let noSubtitleMessage = NO_SUBTITLE_MESSAGES.ko;
 let collectionMessages = COLLECTION_MESSAGES.ko;
 let autoSubtitleMessages = AUTO_SUBTITLE_MESSAGES.ko;
 let subtitleUpdate = null;
+let playbackTabId = null;
+let playbackLeaseId = "";
+let playbackLeaseTimer = null;
 
 const video = document.getElementById("video");
 const titleElement = document.getElementById("title");
@@ -154,6 +157,47 @@ function fail(text, { refresh = false } = {}) {
     refreshButton.addEventListener("click", () => refreshFromSource(refreshButton));
     message.append(refreshButton);
   }
+}
+
+async function preparePlaybackMedia() {
+  if (!sourceUrl || !mediaUrl || typeof chrome.tabs?.getCurrent !== "function") return;
+  try {
+    const tab = await chrome.tabs.getCurrent();
+    if (!Number.isInteger(tab?.id)) return;
+    const response = await chrome.runtime.sendMessage({
+      type: "prepare-playback-media",
+      tabId: tab.id,
+      url: mediaUrl,
+      referrer: sourceUrl,
+    });
+    if (!response?.ok || typeof response.leaseId !== "string") return;
+    playbackTabId = tab.id;
+    playbackLeaseId = response.leaseId;
+    if (playbackLeaseTimer !== null) clearInterval(playbackLeaseTimer);
+    playbackLeaseTimer = setInterval(() => {
+      void chrome.runtime.sendMessage({
+        type: "touch-playback-media",
+        tabId: playbackTabId,
+        leaseId: playbackLeaseId,
+      }).catch(() => {});
+    }, 60_000);
+  } catch {
+    // Playback can still proceed when a provider does not need a referrer.
+  }
+}
+
+function releasePlaybackMedia() {
+  if (playbackLeaseTimer !== null) {
+    clearInterval(playbackLeaseTimer);
+    playbackLeaseTimer = null;
+  }
+  if (!playbackLeaseId || !Number.isInteger(playbackTabId)) return;
+  void chrome.runtime.sendMessage({
+    type: "release-playback-media",
+    tabId: playbackTabId,
+    leaseId: playbackLeaseId,
+  }).catch(() => {});
+  playbackLeaseId = "";
 }
 
 function wait(milliseconds) {
@@ -331,12 +375,13 @@ async function saveSelectedCollection() {
   }
 }
 
-function startPlayback() {
+async function startPlayback() {
   if (!mediaUrl) {
     fail("재생할 주소가 없습니다.");
     return;
   }
   if (title) titleElement.textContent = title;
+  await preparePlaybackMedia();
 
   const hlsCandidate = /\.m3u8(\?|#|$)/i.test(mediaUrl) || mediaUrl.includes(".m3u8");
   if (hlsCandidate && Hls.isSupported()) {
@@ -394,6 +439,7 @@ async function generateSubtitles() {
 
 saveButton.addEventListener("click", openCollectionPicker);
 generateSubtitleButton.addEventListener("click", generateSubtitles);
+window.addEventListener("pagehide", releasePlaybackMedia, { once: true });
 collectionNewFolderButton.addEventListener("click", () => {
   collectionNewFolderRow.hidden = false;
   collectionNewFolderInput.focus();

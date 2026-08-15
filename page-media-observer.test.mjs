@@ -228,6 +228,17 @@ test("fetch and XHR observation preserves original behavior without consuming or
   assert.equal(env.windowObject.fetch.toString(), originalFetch.toString());
 });
 
+test("binary fetch responses expose media URLs without consuming their bodies", async () => {
+  const env = createEnvironment({ contentType: "video/mp4" });
+  const response = await env.windowObject.fetch("https://cdn.example/media/segment");
+  assert.equal(response.bodyUsed, false);
+  await flush();
+  const [media] = eventMessages(env, env.protocol.events.media);
+  assert.ok(media);
+  assert.equal(media.url, "https://cdn.example/playlist.m3u8");
+  assert.equal(media.contentType, "video/mp4");
+});
+
 test("manifest observations stay bounded and non-manifest text is ignored", async () => {
   const huge = "#EXTM3U\n" + "x".repeat(envLimit("maxManifestTextBytes") + 50);
   const env = createEnvironment({ manifestText: huge, contentType: "text/plain" });

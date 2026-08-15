@@ -11,7 +11,7 @@
   const DOOD_FETCH_TIMEOUT_MS = 12_000;
   const DOOD_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   const PAGE_MEDIA_EVENT_TYPE = "aura-media-observer-event-v1";
-  const seen = new Set();
+  const seen = new Map();
   let scanTimer = null;
   let scanScheduled = false;
   let lastMainFrames = "";
@@ -74,9 +74,11 @@
 
   function report(resourceUrl, contentType = "", main = false, fromMediaElement = false) {
     if (typeof resourceUrl !== "string" || resourceUrl.length === 0 || resourceUrl.length > MAX_URL_BYTES
-      || typeof contentType !== "string" || contentType.length > 128 || seen.has(resourceUrl)) return;
-    seen.add(resourceUrl);
-    while (seen.size > MAX_SEEN) seen.delete(seen.values().next().value);
+      || typeof contentType !== "string" || contentType.length > 128) return;
+    const previousType = seen.get(resourceUrl) || "";
+    if (previousType && (!contentType || previousType === contentType)) return;
+    seen.set(resourceUrl, contentType || previousType);
+    while (seen.size > MAX_SEEN) seen.delete(seen.keys().next().value);
     send({
       type: "resource",
       resourceUrl,
@@ -289,6 +291,7 @@
     if (event.source !== window || event.data?.type !== PAGE_MEDIA_EVENT_TYPE) return;
     const data = event.data;
     if (data.kind === "manifest") report(data.url, data.contentType || "", false, false);
+    if (data.kind === "media") report(data.url, data.contentType || "application/octet-stream", false, true);
   }
 
   function handleLevel5KeyRequest(message, sendResponse) {

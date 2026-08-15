@@ -1,6 +1,6 @@
 import { canonicalHttpUrl } from "./candidate.js";
 
-export const MEDIA_FETCH_RESOURCE_TYPES = Object.freeze(["xmlhttprequest", "other"]);
+export const MEDIA_FETCH_RESOURCE_TYPES = Object.freeze(["xmlhttprequest", "other", "media"]);
 export const MEDIA_FETCH_RULE_ID_START = 1_000_000_000;
 export const OFFSCREEN_DOCUMENT_TAB_ID = -1;
 const MAX_RULE_ID = 2_147_483_647;
@@ -49,6 +49,17 @@ export function exactMediaFetchRule({ ruleId, tabId, url, referrer = "", request
     action: { type: "modifyHeaders", requestHeaders: headers },
     condition,
   };
+}
+
+export function playbackMediaFetchRule({ ruleId, tabId, url, referrer = "" }) {
+  const parsed = new URL(url);
+  if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) throw new Error("invalid-playback-media-url");
+  const directory = parsed.pathname.slice(0, parsed.pathname.lastIndexOf("/") + 1) || "/";
+  const rule = exactMediaFetchRule({ ruleId, tabId, url, referrer });
+  delete rule.condition.regexFilter;
+  delete rule.condition.urlFilter;
+  rule.condition.urlFilter = `|${parsed.origin}${directory}`;
+  return rule;
 }
 
 export function createMediaFetchRuleIdAllocator(start = MEDIA_FETCH_RULE_ID_START) {

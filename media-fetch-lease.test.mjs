@@ -7,6 +7,7 @@ import {
   createMediaFetchRuleIdAllocator,
   exactMediaFetchRule,
   OFFSCREEN_DOCUMENT_TAB_ID,
+  playbackMediaFetchRule,
 } from "./media-fetch-lease.js";
 
 test("media lease rules match one complete URL, including its query token", () => {
@@ -23,7 +24,7 @@ test("media lease rules match one complete URL, including its query token", () =
   assert.equal(matcher.test("https://cdn.example/video/file?token=a*b&part=2"), false);
   assert.equal(matcher.test("https://cdn.example/video/other?token=a*b&part=1"), false);
   assert.equal(rule.condition.isUrlFilterCaseSensitive, true);
-  assert.deepEqual(rule.condition.resourceTypes, ["xmlhttprequest", "other"]);
+  assert.deepEqual(rule.condition.resourceTypes, ["xmlhttprequest", "other", "media"]);
   assert.deepEqual(rule.condition.tabIds, [17]);
   assert.deepEqual(rule.action.requestHeaders, [
     { header: "Referer", operation: "set", value: "https://player.example/watch?id=7" },
@@ -38,6 +39,21 @@ test("long tokenized URLs avoid the compiled-regex size limit", () => {
   assert.equal(rule.condition.regexFilter, undefined);
   assert.equal(rule.condition.urlFilter, `|${url}|`);
   assert.deepEqual(rule.condition.tabIds, [18]);
+});
+
+test("playback HLS rules cover the playlist directory for segment requests", () => {
+  const rule = playbackMediaFetchRule({
+    ruleId: 103,
+    tabId: 19,
+    url: "https://cdn.example/hls/title/playlist.m3u8?token=abc",
+    referrer: "https://site.example/watch/1",
+  });
+  assert.equal(rule.condition.regexFilter, undefined);
+  assert.equal(rule.condition.urlFilter, "|https://cdn.example/hls/title/");
+  assert.deepEqual(rule.action.requestHeaders, [
+    { header: "Referer", operation: "set", value: "https://site.example/watch/1" },
+    { header: "Origin", operation: "remove" },
+  ]);
 });
 
 test("offscreen downloads use Chrome's tabless request id", () => {

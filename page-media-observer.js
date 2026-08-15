@@ -33,7 +33,7 @@
       value: Object.freeze({
         version: 1,
         eventType: EVENT_TYPE,
-        events: Object.freeze({ manifest: "manifest" }),
+        events: Object.freeze({ manifest: "manifest", media: "media" }),
         limits: LIMITS,
       }),
       writable: false,
@@ -98,6 +98,11 @@
     return /#EXTM3U|#EXT-X-[A-Z0-9-]+|<MPD(?:\s|>)|<SmoothStreamingMedia(?:\s|>)/i.test(text);
   }
 
+  function mediaLike(contentType) {
+    return /^(?:video|audio)\//i.test(contentType)
+      || /(?:octet-stream|mp4|webm|quicktime)/i.test(contentType);
+  }
+
   function rememberManifest(key) {
     if (reportedManifestKeys.has(key)) return false;
     reportedManifestKeys.add(key);
@@ -136,6 +141,20 @@
       contentType: boundedContentType,
       text: boundedText,
       truncated: Boolean(truncated || (typeof text === "string" && text.length > boundedText.length)),
+    });
+  }
+
+  function reportMedia(url, contentType, source) {
+    const boundedResourceUrl = boundedUrl(url);
+    const boundedContentType = mimeType(contentType);
+    if (!boundedResourceUrl || !mediaLike(boundedContentType)) return;
+    const key = `media\u0000${boundedResourceUrl}\u0000${boundedContentType}`;
+    if (!rememberManifest(key)) return;
+    postEvent({
+      kind: "media",
+      source,
+      url: boundedResourceUrl,
+      contentType: boundedContentType,
     });
   }
 
@@ -204,6 +223,10 @@
     const url = responseUrl(response, fallbackUrl);
     if (!url) return;
     const contentType = mimeType(headerValue(response.headers, "content-type"));
+    if (mediaLike(contentType)) {
+      reportMedia(url, contentType, "fetch");
+      return;
+    }
     const clone = typeof response.clone === "function" ? (() => {
       try { return response.clone(); } catch { return null; }
     })() : null;
@@ -302,16 +325,20 @@
   }
 
   function observeXhr(xhr, requestUrl) {
-    if (!xhrResponseTypeIsText(xhr)) return;
     let text = "";
     let contentType = "";
     let responseUrl = requestUrl;
     try {
-      text = typeof xhr.responseText === "string" ? xhr.responseText : "";
       contentType = typeof xhr.getResponseHeader === "function"
         ? xhr.getResponseHeader("content-type") || ""
         : "";
       if (typeof xhr.responseURL === "string" && xhr.responseURL) responseUrl = xhr.responseURL;
+      if (mediaLike(contentType)) {
+        reportMedia(responseUrl, contentType, "xhr");
+        return;
+      }
+      if (!xhrResponseTypeIsText(xhr)) return;
+      text = typeof xhr.responseText === "string" ? xhr.responseText : "";
     } catch {
       return;
     }

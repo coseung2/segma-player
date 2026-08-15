@@ -466,7 +466,8 @@ function buildJobCard(job, { inline = false } = {}) {
   const title = text("h2", "job-title", view.title);
   title.title = view.title;
   const state = text("span", `job-state ${view.status}`, view.statusLabel);
-  head.append(title, state);
+  if (!inline) head.append(title);
+  head.append(state);
 
   const progress = document.createElement("div");
   progress.className = `job-progress ${view.progress.mode} status-${view.status}`;

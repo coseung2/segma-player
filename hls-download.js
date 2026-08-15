@@ -840,6 +840,64 @@ async function writeChunk(writable, value) {
   await writable.write({ type: "write", data: bytes });
 }
 
+// Wraps a File System Access writable with periodic commit points so a
+// long-running progressive or server-file download can survive interruption.
+// Each checkpoint closes the writable (committing the partial file), persists
+// the committed byte offset, then reopens it with keepExistingData and seeks
+// to the offset so the next write appends.
+async function createCheckpointingSink({
+  fileHandle,
+  writtenBytes = 0,
+  checkpointIntervalBytes = CHECKPOINT_BYTE_INTERVAL,
+  persist = null,
+}) {
+  let written = writtenBytes;
+  let lastCommitted = writtenBytes;
+  let sinceCheckpoint = 0;
+  let writable = null;
+  async function reopen() {
+    writable = await fileHandle.createWritable({ keepExistingData: true });
+    if (written > 0) await writable.seek(written);
+  }
+  await reopen();
+  return {
+    get bytesWritten() {
+      return written;
+    },
+    get committedBytes() {
+      return lastCommitted;
+    },
+    async reset() {
+      // Discarded writes (abort) leave only the last committed prefix; reopen
+      // from that offset so a fallback path can continue appending.
+      written = lastCommitted;
+      sinceCheckpoint = 0;
+      await reopen();
+    },
+    async write(value) {
+      const data = value && typeof value === "object" && value.type === "write" ? value.data : value;
+      const bytes = toBytes(data);
+      if (!bytes) throw new Error(`저장 데이터 형식 오류: ${describeChunk(data)}`);
+      await writable.write({ type: "write", data: bytes });
+      written += bytes.byteLength;
+      sinceCheckpoint += bytes.byteLength;
+      if (sinceCheckpoint >= checkpointIntervalBytes) {
+        await writable.close();
+        sinceCheckpoint = 0;
+        lastCommitted = written;
+        if (persist) await persist(written);
+        await reopen();
+      }
+    },
+    async close() {
+      await writable.close();
+    },
+    async abort() {
+      try { await writable.abort(); } catch { /* already closed */ }
+    },
+  };
+}
+
 function progressiveSession(url, pageUrl, videoTabId, signal = null) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -981,8 +1039,11 @@ async function consumeResponseBody(response, onChunk) {
   if (data != null) await onChunk(data);
 }
 
-async function streamFetchToWritable(url, referrer, writable, onProgress, context = defaultDownloadContext) {
-  let totalBytes = 0;
+async function streamFetchToWritable(url, referrer, writable, onProgress, context = defaultDownloadContext, startOffset = 0) {
+  const offset = Number.isFinite(startOffset) && startOffset > 0 ? Math.floor(startOffset) : 0;
+  let totalBytes = offset;
+  let skipped = 0;
+  const extraHeaders = offset > 0 ? { Range: `bytes=${offset}-` } : {};
   await withMediaFetchLease(url, referrer, async (response) => {
     const contentType = response.headers?.get?.("content-type") || "";
     if (/^text\/html/i.test(contentType)) throw new Error("웹페이지가 반환되었습니다. 실제 미디어 주소를 입력해 주세요.");
@@ -990,18 +1051,31 @@ async function streamFetchToWritable(url, referrer, writable, onProgress, contex
       await consumeResponseBody(response, () => {});
       throw new Error(`영상 요청 실패 (${response.status}): ${redactUrlForMessage(url)}`);
     }
+    const rangeIgnored = offset > 0 && response.status === 200;
     await consumeResponseBody(response, async (value) => {
       const bytes = toBytes(value);
       if (!bytes) throw new Error(`저장 데이터 형식 오류: ${describeChunk(value)}`);
-      assertDownloadWithinPlan(totalBytes, bytes.byteLength);
-      totalBytes += bytes.byteLength;
+      let toWrite = bytes;
+      if (rangeIgnored && skipped < offset) {
+        const remaining = offset - skipped;
+        if (bytes.byteLength <= remaining) {
+          skipped += bytes.byteLength;
+          return;
+        }
+        toWrite = bytes.subarray(remaining);
+        skipped = offset;
+      }
+      assertDownloadWithinPlan(totalBytes, toWrite.byteLength);
+      totalBytes += toWrite.byteLength;
       await context.pauseGate?.();
       onProgress?.(totalBytes);
-      await writeChunk(writable, bytes);
-      await context.paceBytes?.(bytes.byteLength);
+      await writeChunk(writable, toWrite);
+      await context.paceBytes?.(toWrite.byteLength);
     });
-  }, {}, context);
-  if (totalBytes === 0) throw new Error("저장된 파일이 비어 있습니다. 주소가 만료되었거나 접근 권한이 필요할 수 있습니다.");
+  }, extraHeaders, context);
+  if (offset === 0 && totalBytes === 0) {
+    throw new Error("저장된 파일이 비어 있습니다. 주소가 만료되었거나 접근 권한이 필요할 수 있습니다.");
+  }
   return totalBytes;
 }
 
@@ -1013,21 +1087,48 @@ async function saveProgressive(
   context = defaultDownloadContext,
   preparedSession = null,
   dirHandle = null,
+  checkpointKey = null,
 ) {
   const session = preparedSession
     || await prepareProgressiveFetch(await progressiveSession(url, pageUrl, videoTabId, context.signal), context);
   let saveHandle = dirHandle || await getStoredSaveDirectory();
   if (saveHandle && !(await hasReadWritePermission(saveHandle))) saveHandle = null;
-  let allocation = null;
+
+  let fileHandle = null;
+  let allocatedFilename = "";
+  let committedBytes = 0;
+  let checkpoint = checkpointKey ? await getDownloadCheckpoint(checkpointKey, "main") : null;
+  if (checkpoint) {
+    try {
+      fileHandle = await saveHandle.getFileHandle(checkpoint.filename);
+      committedBytes = checkpoint.bytesWritten;
+      allocatedFilename = checkpoint.filename;
+    } catch {
+      fileHandle = null;
+      checkpoint = null;
+    }
+  }
   const allocatedFile = async () => {
     if (!saveHandle) throw new Error("no-save-sink");
-    if (!allocation) allocation = await createUniqueFile(saveHandle, filename);
+    if (fileHandle) return { fileHandle, filename: allocatedFilename };
+    const allocation = await createUniqueFile(saveHandle, filename);
+    fileHandle = allocation.fileHandle;
+    allocatedFilename = allocation.filename;
     return allocation;
   };
   const removeAllocatedFile = async () => {
-    if (!saveHandle || !allocation?.filename || typeof saveHandle.removeEntry !== "function") return;
-    await saveHandle.removeEntry(allocation.filename).catch(() => {});
-    allocation = null;
+    if (!saveHandle || !allocatedFilename || typeof saveHandle.removeEntry !== "function") return;
+    await saveHandle.removeEntry(allocatedFilename).catch(() => {});
+    fileHandle = null;
+    allocatedFilename = "";
+  };
+  const persistCheckpoint = async (bytesWritten) => {
+    if (!checkpointKey) return;
+    await setDownloadCheckpoint(checkpointKey, "main", {
+      filename: allocatedFilename,
+      bytesWritten,
+      resumeFromSegment: 0,
+    });
   };
 
   if (session.sourceFrameFallbackPreferred) {
@@ -1041,55 +1142,22 @@ async function saveProgressive(
     if (fallback) return fallback;
   }
 
-  if (context.rangeSupported) {
-    const referrer = referrerFor(session.url, session.referrer || pageUrl, context);
-    const fetchImpl = (targetUrl, { headers, signal }) => {
-      const all = new Headers(extraHeadersFor(targetUrl, context));
-      for (const [name, value] of Object.entries(headers || {})) all.set(name, value);
-      return fetch(targetUrl, {
-        credentials: "include",
-        referrer,
-        referrerPolicy: "unsafe-url",
-        headers: all,
-        cache: "no-store",
-        signal,
-      });
-    };
-    try {
-      const output = await allocatedFile();
-      const writable = await output.fileHandle.createWritable();
-      const sink = {
-        write: (data) => writable.write(data),
-        close: () => writable.close(),
-        abort: () => writable.abort(),
-      };
-      const result = await withParallelMediaFetchLease(session.url, referrer, context, () => parallelDownload({
-        url: session.url,
-        filename: output.filename,
-        createSink: async () => sink,
-        fetchImpl,
-        signal: context.signal,
-        onProgress: (written, total) => setStatus(saveProgressText(written, total), false, context),
-      }));
-      return { bytes: result.bytes };
-    } catch (error) {
-      if (context.signal?.aborted) throw error;
-      // Fall through to the single-stream path.
-    }
-  }
-
-  let writable = null;
+  let sink = null;
   let sinkError = null;
   if (saveHandle) {
     try {
       const output = await allocatedFile();
-      writable = await output.fileHandle.createWritable();
+      sink = await createCheckpointingSink({
+        fileHandle: output.fileHandle,
+        writtenBytes: committedBytes,
+        persist: persistCheckpoint,
+      });
     } catch (error) {
-      writable = null;
+      sink = null;
       sinkError = error;
     }
   }
-  if (!writable) {
+  if (!sink) {
     await removeAllocatedFile();
     const downloaded = await tryBrowserDownloadFallback(
       session.url,
@@ -1106,18 +1174,61 @@ async function saveProgressive(
     if (permissionExpired) sinkFailure.code = "save-permission-required";
     throw sinkFailure;
   }
+
+  const referrer = referrerFor(session.url, session.referrer || pageUrl, context);
   try {
-    const bytes = await streamFetchToWritable(
-      session.url,
-      session.referrer,
-      writable,
-      (value) => setStatus(saveProgressText(value, context.totalBytes), false, context),
-      context,
-    );
-    await writable.close();
-    return { bytes };
+    let result = null;
+    if (context.rangeSupported) {
+      const fetchImpl = (targetUrl, { headers, signal }) => {
+        const all = new Headers(extraHeadersFor(targetUrl, context));
+        for (const [name, value] of Object.entries(headers || {})) all.set(name, value);
+        return fetch(targetUrl, {
+          credentials: "include",
+          referrer,
+          referrerPolicy: "unsafe-url",
+          headers: all,
+          cache: "no-store",
+          signal,
+        });
+      };
+      try {
+        result = await withParallelMediaFetchLease(session.url, referrer, context, () => parallelDownload({
+          url: session.url,
+          filename: allocatedFilename,
+          createSink: async () => sink,
+          fetchImpl,
+          signal: context.signal,
+          startOffset: committedBytes,
+          onProgress: (written, total) => setStatus(saveProgressText(written, total), false, context),
+        }));
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        result = null;
+        await sink.reset();
+      }
+    }
+    if (!result) {
+      result = await streamFetchToWritable(
+        session.url,
+        referrer,
+        sink,
+        (value) => setStatus(saveProgressText(value, context.totalBytes), false, context),
+        context,
+        sink.committedBytes,
+      );
+    }
+    await sink.close();
+    if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
+    const bytes = Number.isFinite(result?.bytes) ? result.bytes : result;
+    return { bytes: Math.max(bytes, committedBytes) };
   } catch (error) {
-    try { await writable.abort(); } catch { /* already closed */ }
+    try { await sink?.abort(); } catch { /* already closed */ }
+    if (checkpointKey && (checkpoint || sink.committedBytes > committedBytes)) {
+      await persistCheckpoint(sink.committedBytes);
+    } else {
+      await removeAllocatedFile();
+      if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
+    }
     if (error?.code !== "media-route-failed") {
       const fallback = await requestSourceFrameDownload(
         session.url,
@@ -1128,10 +1239,10 @@ async function saveProgressive(
       );
       if (fallback) {
         await removeAllocatedFile();
+        if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
         return fallback;
       }
     }
-    await removeAllocatedFile();
     throw error;
   }
 }
@@ -1256,6 +1367,7 @@ async function saveHlsToNative(
 }
 
 export {
+  createCheckpointingSink,
   ensureCurrentBackground,
   loadRecordedHeaders,
   prepareProgressiveFetch,
@@ -1384,6 +1496,7 @@ export async function downloadPreparedCandidate(prepared) {
       context,
       prepared.session,
       dirHandle,
+      checkpointKey,
     );
     return {
       statusText: result.fallback

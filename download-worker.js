@@ -1,10 +1,20 @@
-import { downloadPreparedCandidate, prepareDownloadCandidate, setRuntimePlan } from "./hls-download.js";
+import {
+  createCheckpointingSink,
+  downloadPreparedCandidate,
+  prepareDownloadCandidate,
+  setRuntimePlan,
+} from "./hls-download.js";
 import { parallelDownload } from "./parallel-download.js";
 import { createDownloadScheduler } from "./download-scheduler.js";
 import { PRODUCT_EDITION } from "./edition.js";
 import { resolvePlan } from "./license.js";
 import { productPlan } from "./product-plan.js";
-import { clearAllDownloadCheckpoints } from "./download-checkpoint.js";
+import {
+  clearAllDownloadCheckpoints,
+  clearDownloadCheckpoint,
+  getDownloadCheckpoint,
+  setDownloadCheckpoint,
+} from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
 import {
   MIN_HEARTBEAT_CADENCE_MS,
@@ -200,6 +210,7 @@ async function runParallelSave(message) {
   syncWorkerHeartbeat();
   let directoryHandle = null;
   let allocatedFilename = "";
+  let sink = null;
   try {
     await report(message.jobId, { status: "running", statusText: "저장 준비 중…" });
     directoryHandle = await getStoredSaveDirectory();
@@ -212,43 +223,82 @@ async function runParallelSave(message) {
       throw error;
     }
     const filename = typeof message.filename === "string" && message.filename ? message.filename : "YouTube 영상.mp4";
-    let allocation;
-    try {
-      allocation = await createUniqueFile(directoryHandle, filename);
-    } catch (error) {
-      const permissionExpired = error?.name === "NotAllowedError";
-      const allocationFailure = new Error(permissionExpired
-        ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 폴더를 선택해 주세요."
-        : "저장 폴더에 새 파일을 만들 수 없습니다.");
-      if (permissionExpired) allocationFailure.code = "save-permission-required";
-      throw allocationFailure;
+    const checkpointKey = `youtube:${message.jobId}`;
+    let fileHandle = null;
+    let committedBytes = 0;
+    const checkpoint = await getDownloadCheckpoint(checkpointKey, "main");
+    if (checkpoint) {
+      try {
+        fileHandle = await directoryHandle.getFileHandle(checkpoint.filename);
+        committedBytes = checkpoint.bytesWritten;
+        allocatedFilename = checkpoint.filename;
+      } catch {
+        fileHandle = null;
+      }
     }
-    allocatedFilename = allocation.filename;
-    const writable = await allocation.fileHandle.createWritable();
-    const sink = {
-      write: (data) => writable.write(data),
-      close: () => writable.close(),
-      abort: () => writable.abort(),
+    if (!fileHandle) {
+      let allocation;
+      try {
+        allocation = await createUniqueFile(directoryHandle, filename);
+      } catch (error) {
+        const permissionExpired = error?.name === "NotAllowedError";
+        const allocationFailure = new Error(permissionExpired
+          ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 폴더를 선택해 주세요."
+          : "저장 폴더에 새 파일을 만들 수 없습니다.");
+        if (permissionExpired) allocationFailure.code = "save-permission-required";
+        throw allocationFailure;
+      }
+      fileHandle = allocation.fileHandle;
+      allocatedFilename = allocation.filename;
+    }
+    const persistCheckpoint = async (bytesWritten) => {
+      await setDownloadCheckpoint(checkpointKey, "main", {
+        filename: allocatedFilename,
+        bytesWritten,
+        resumeFromSegment: 0,
+      });
     };
+    sink = await createCheckpointingSink({
+      fileHandle,
+      writtenBytes: committedBytes,
+      persist: persistCheckpoint,
+    });
     const result = await parallelDownload({
       url: message.url,
       filename: allocatedFilename,
       createSink: async () => sink,
       signal: controller.signal,
+      startOffset: committedBytes,
       onProgress: (written, total) => {
         const percent = Math.max(0, Math.min(100, Math.round((written / total) * 100)));
         void report(message.jobId, { status: "running", statusText: `저장 중… ${percent}%` });
       },
     });
+    await sink.close();
+    await clearDownloadCheckpoint(checkpointKey, "main");
     await report(message.jobId, {
       status: "completed",
       statusText: `저장 완료 · ${allocatedFilename} (${Math.round(result.bytes / 1048576)} MB)`,
     });
   } catch (error) {
-    if (directoryHandle && allocatedFilename) {
-      await directoryHandle.removeEntry?.(allocatedFilename).catch(() => {});
-    }
     const cancelled = controller.signal.aborted || error?.code === "download-cancelled";
+    try {
+      if (cancelled) {
+        await clearAllDownloadCheckpoints(`youtube:${message.jobId}`);
+        if (directoryHandle && allocatedFilename) {
+          await directoryHandle.removeEntry?.(allocatedFilename).catch(() => {});
+        }
+      } else if (sink && allocatedFilename) {
+        await sink.abort();
+        await setDownloadCheckpoint(`youtube:${message.jobId}`, "main", {
+          filename: allocatedFilename,
+          bytesWritten: sink.committedBytes,
+          resumeFromSegment: 0,
+        });
+      }
+    } catch {
+      // Checkpoint best effort; the job still reports its failure below.
+    }
     const detail = cancelled ? "사용자가 다운로드를 취소했습니다."
       : (error instanceof Error ? error.message : "parallel-save-failed");
     await report(message.jobId, {

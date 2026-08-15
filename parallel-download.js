@@ -56,16 +56,18 @@ export async function parallelDownload({
   signal = null,
   fetchImpl = null,
   extra = {},
+  startOffset = 0,
 }) {
   const total = await probeTotal(url, signal);
-  const sink = await createSink(filename);
+  const offset = Number.isFinite(startOffset) && startOffset > 0 ? Math.floor(startOffset) : 0;
+  const sink = await createSink(filename, offset);
   const ranges = [];
-  for (let start = 0; start < total; start += chunkBytes) {
+  for (let start = offset; start < total; start += chunkBytes) {
     ranges.push([start, Math.min(start + chunkBytes - 1, total - 1)]);
   }
   let cursor = 0;
-  let nextStart = 0;
-  let written = 0;
+  let nextStart = offset;
+  let written = offset;
   const pending = new Map();
   async function flush() {
     while (pending.has(nextStart)) {

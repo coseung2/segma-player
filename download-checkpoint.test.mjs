@@ -4,6 +4,7 @@ import {
   clearAllDownloadCheckpoints,
   clearDownloadCheckpoint,
   getDownloadCheckpoint,
+  moveDownloadCheckpoints,
   setDownloadCheckpoint,
 } from "./download-checkpoint.js";
 
@@ -114,4 +115,23 @@ test("clearAllDownloadCheckpoints removes every scope for a key", async () => {
 test("setDownloadCheckpoint rejects checkpoints without a filename", async () => {
   assert.equal(await setDownloadCheckpoint("media:abc", "main", { bytesWritten: 10 }), false);
   assert.equal(await getDownloadCheckpoint("media:abc", "main"), null);
+});
+
+test("moveDownloadCheckpoints carries scopes to a new key and removes the old one", async () => {
+  await setDownloadCheckpoint("youtube:old", "main", {
+    filename: "video.mp4",
+    bytesWritten: 777,
+    resumeFromSegment: 0,
+  });
+  assert.equal(await moveDownloadCheckpoints("youtube:old", "youtube:new"), true);
+  assert.equal(await getDownloadCheckpoint("youtube:old", "main"), null);
+  const moved = await getDownloadCheckpoint("youtube:new", "main");
+  assert.equal(moved.filename, "video.mp4");
+  assert.equal(moved.bytesWritten, 777);
+});
+
+test("moveDownloadCheckpoints is a no-op for missing or identical keys", async () => {
+  assert.equal(await moveDownloadCheckpoints("youtube:missing", "youtube:new"), false);
+  assert.equal(await moveDownloadCheckpoints("youtube:same", "youtube:same"), false);
+  assert.equal(await moveDownloadCheckpoints("", "youtube:new"), false);
 });

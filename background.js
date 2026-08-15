@@ -21,6 +21,7 @@ import {
   formatFilenameTemplate,
 } from "./filename-template.js";
 import { getStoredSaveDirectory } from "./save-directory.js";
+import { moveDownloadCheckpoints } from "./download-checkpoint.js";
 import {
   createDownloadJob,
   persistedDownloadJobs,
@@ -273,7 +274,7 @@ function isYouTubeDetectionCandidate(candidate) {
 
 const YOUTUBE_QUALITIES = new Set(["best", "4320", "2160", "1440", "1080", "720", "480", "360", "240", "144"]);
 
-async function startYouTubeDownload(rawUrl, rawQuality = "best") {
+async function startYouTubeDownload(rawUrl, rawQuality = "best", { resumeFromJobId = null } = {}) {
   const url = canonicalYouTubeUrl(rawUrl);
   if (!url) throw new Error("invalid-youtube-url");
   const quality = String(rawQuality || "best");
@@ -294,6 +295,9 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best") {
     retryPayload: { kind: "youtube", url, quality },
   }));
   await persistDownloadJobs();
+  if (resumeFromJobId) {
+    await moveDownloadCheckpoints(`youtube:${resumeFromJobId}`, `youtube:${jobId}`);
+  }
   await patchDownloadJob(jobId, {
     status: "running",
     statusText: "서버에 요청하는 중…",
@@ -846,7 +850,7 @@ async function retryDownloadJob(jobId) {
     return beginCandidateDownload(payload.candidate);
   }
   if (payload.kind === "youtube") {
-    return startYouTubeDownload(payload.url, payload.quality);
+    return startYouTubeDownload(payload.url, payload.quality, { resumeFromJobId: jobId });
   }
   throw new Error("download-job-not-retryable");
 }

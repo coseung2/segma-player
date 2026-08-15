@@ -99,3 +99,23 @@ test("retries dropped ranges and still completes", async () => {
   const zeroStarts = calls.filter(([start]) => start === 0);
   assert.ok(zeroStarts.length >= 2, "dropped range should be retried");
 });
+
+test("resumes from a start offset and only fetches the remaining ranges", async () => {
+  const total = 10 * 1024 * 1024;
+  const { calls } = mockFetch(total);
+  const sink = fakeSink();
+  const progress = [];
+  const result = await parallelDownload({
+    url: "http://server.test/file",
+    filename: "T.mp4",
+    createSink: async () => sink,
+    chunkBytes: 2 * 1024 * 1024,
+    startOffset: 6 * 1024 * 1024,
+    onProgress: (written, all) => progress.push([written, all]),
+  });
+  assert.equal(result.bytes, total);
+  assert.deepEqual(calls.map(([start]) => start), [6291456, 8388608]);
+  const written = sink.chunks.reduce((sum, length) => sum + length, 0);
+  assert.equal(written, 4 * 1024 * 1024);
+  assert.deepEqual(progress.at(-1), [total, total]);
+});

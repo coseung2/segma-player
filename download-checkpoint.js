@@ -87,3 +87,20 @@ export async function clearAllDownloadCheckpoints(key) {
     return false;
   }
 }
+
+export async function moveDownloadCheckpoints(fromKey, toKey) {
+  if (typeof fromKey !== "string" || !fromKey || typeof toKey !== "string" || !toKey || fromKey === toKey) {
+    return false;
+  }
+  try {
+    const fromStorageKey = checkpointStorageKey(fromKey);
+    const stored = await chrome.storage.local.get(fromStorageKey);
+    const value = stored?.[fromStorageKey];
+    if (!value || typeof value !== "object") return false;
+    await chrome.storage.local.set({ [checkpointStorageKey(toKey)]: value });
+    await chrome.storage.local.remove(fromStorageKey);
+    return true;
+  } catch {
+    return false;
+  }
+}

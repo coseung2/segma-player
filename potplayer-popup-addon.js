@@ -5,11 +5,24 @@ import {
   companionProbeStatusUrl,
   playableMediaUrl,
 } from "./potplayer-protocol.js";
+import { decodeSubtitleBytes, findSubtitleFile } from "./player-subtitle.js";
+import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
+import { addToCollection, listCollection, removeFromCollection } from "./collection.js";
 import { loadLocale, translator } from "./i18n.js";
 
 const MESSAGES = {
   ko: {
     play: "▶ PotPlayer",
+    playBrowser: "재생",
+    browserOpening: "브라우저에서 재생합니다",
+    folderNeeded: "자막 폴더를 먼저 선택해 주세요. 열린 탭에서 폴더를 고르면 다음부터 바로 재생됩니다.",
+    noSubtitle: "자막을 찾지 못했습니다 — 자막 없이 재생합니다",
+    chooseFolder: "자막 폴더 선택",
+    collection: "컬렉션",
+    collectionEmpty: "저장한 항목이 없습니다. 감지 카드의 '저장' 버튼으로 추가하세요.",
+    collectionSave: "저장",
+    collectionSaved: "컬렉션에 저장됨",
+    collectionRemove: "삭제",
     checking: "확인 중…",
     sent: "PotPlayer로 재생합니다",
     installTitle: "PotPlayer 연동이 필요합니다",
@@ -26,6 +39,16 @@ const MESSAGES = {
   },
   en: {
     play: "▶ PotPlayer",
+    playBrowser: "Play",
+    browserOpening: "Opening in browser",
+    folderNeeded: "Pick a subtitle folder first. Choose one in the opened tab, then play again.",
+    noSubtitle: "No subtitle found — playing without subtitles",
+    chooseFolder: "Choose subtitle folder",
+    collection: "Collection",
+    collectionEmpty: "Nothing saved yet. Use the card's Save button to add an entry.",
+    collectionSave: "Save",
+    collectionSaved: "Saved to collection",
+    collectionRemove: "Remove",
     checking: "Checking…",
     sent: "Opening in PotPlayer",
     installTitle: "PotPlayer companion required",
@@ -42,6 +65,16 @@ const MESSAGES = {
   },
   ja: {
     play: "▶ PotPlayer",
+    playBrowser: "再生",
+    browserOpening: "ブラウザーで再生します",
+    folderNeeded: "先に字幕フォルダーを選択してください。開いたタブで選ぶと、次回から再生できます。",
+    noSubtitle: "字幕が見つかりません — 字幕なしで再生します",
+    chooseFolder: "字幕フォルダーを選択",
+    collection: "コレクション",
+    collectionEmpty: "保存された項目はありません。カードの「保存」ボタンで追加できます。",
+    collectionSave: "保存",
+    collectionSaved: "コレクションに保存しました",
+    collectionRemove: "削除",
     checking: "確認中…",
     sent: "PotPlayer で再生します",
     installTitle: "PotPlayer 連携が必要です",
@@ -58,6 +91,16 @@ const MESSAGES = {
   },
   zh: {
     play: "▶ PotPlayer",
+    playBrowser: "播放",
+    browserOpening: "正在浏览器中播放",
+    folderNeeded: "请先选择字幕文件夹。在打开的标签页中选择后即可播放。",
+    noSubtitle: "未找到字幕 — 将不带字幕播放",
+    chooseFolder: "选择字幕文件夹",
+    collection: "收藏",
+    collectionEmpty: "还没有保存的项目。点击卡片上的“保存”按钮添加。",
+    collectionSave: "保存",
+    collectionSaved: "已保存到收藏",
+    collectionRemove: "删除",
     checking: "正在确认…",
     sent: "正在用 PotPlayer 播放",
     installTitle: "需要安装 PotPlayer 组件",
@@ -142,6 +185,38 @@ async function playWithProbe(mediaUrl, title) {
   return pollProbe(token);
 }
 
+async function playInBrowser(mediaUrl, title, button) {
+  const handle = await getStoredSubtitleDirectory();
+  if (!handle) {
+    chrome.tabs.create({ url: chrome.runtime.getURL("subtitle-folder.html") });
+    showToast(t("folderNeeded"));
+    return;
+  }
+  const sessionId = crypto.randomUUID();
+  try {
+    const found = await findSubtitleFile(handle, title, mediaUrl);
+    if (found) {
+      const bytes = new Uint8Array(await found.file.arrayBuffer());
+      const text = await decodeSubtitleBytes(bytes);
+      await chrome.storage.local.set({
+        [`auraSubtitleSession:${sessionId}`]: { text, at: Date.now() },
+      });
+    } else {
+      showToast(t("noSubtitle"));
+    }
+  } catch {
+    // Playback continues without subtitles when the folder is unreadable.
+  }
+  const params = new URLSearchParams({ url: mediaUrl });
+  if (title) params.set("title", title.slice(0, 240));
+  params.set("sub", sessionId);
+  chrome.tabs.create({ url: chrome.runtime.getURL(`player.html?${params.toString()}`) });
+  button.textContent = t("browserOpening");
+  setTimeout(() => {
+    button.textContent = t("playBrowser");
+  }, 1800);
+}
+
 async function tryPlay(mediaUrl, title, button) {
   const { potplayerCompanionSeenAt } = await readState();
   if (potplayerCompanionSeenAt && Date.now() - potplayerCompanionSeenAt < SEEN_CACHE_MS) {
@@ -206,6 +281,16 @@ function showInstallCard() {
   verifyButton.addEventListener("click", () => verifyInstall(card, verifyButton, status));
 
   card.append(closeButton, heading, description, downloadButton, status, verifyButton);
+
+  const folderButton = document.createElement("button");
+  folderButton.type = "button";
+  folderButton.className = "job-list-tool";
+  folderButton.textContent = t("chooseFolder");
+  folderButton.addEventListener("click", () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL("subtitle-folder.html") });
+  });
+  card.append(folderButton);
+
   document.getElementById("panel-detect").append(card);
 }
 
@@ -275,6 +360,48 @@ async function verifyInstall(card, button, status) {
   status.textContent = t("verifyFailed");
 }
 
+async function renderCollection() {
+  const listElement = byId("collection-list");
+  const countElement = byId("collection-count");
+  const heading = document.querySelector(".collection-header h2");
+  if (!listElement) return;
+  if (heading) heading.textContent = t("collection");
+  const entries = await listCollection();
+  countElement.hidden = entries.length === 0;
+  countElement.textContent = String(entries.length);
+  listElement.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "collection-empty";
+    empty.textContent = t("collectionEmpty");
+    listElement.append(empty);
+    return;
+  }
+  for (const entry of entries) {
+    const row = document.createElement("div");
+    row.className = "collection-row";
+    const label = document.createElement("span");
+    label.className = "collection-title";
+    label.textContent = entry.title || entry.url;
+    label.title = entry.url;
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "job-list-tool";
+    play.textContent = t("playBrowser");
+    play.addEventListener("click", () => playInBrowser(entry.url, entry.title, play));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "job-list-tool";
+    remove.textContent = t("collectionRemove");
+    remove.addEventListener("click", async () => {
+      await removeFromCollection(entry.url);
+      renderCollection();
+    });
+    row.append(label, play, remove);
+    listElement.append(row);
+  }
+}
+
 async function resumePendingProbe() {
   const { potplayerPendingProbe, potplayerCompanionSeenAt } = await readState();
   if (!potplayerPendingProbe) return;
@@ -303,16 +430,43 @@ function enhanceCandidateCard(card) {
   if (!meta) return;
 
   const title = card.querySelector(".candidate-title")?.textContent || "";
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "download-button potplayer-button";
-  button.textContent = t("play");
-  button.title = "PotPlayer에서 스트리밍 재생";
-  button.setAttribute("aria-label", "PotPlayer에서 스트리밍 재생");
-  button.addEventListener("click", () => {
-    tryPlay(mediaUrl, title, button);
+  const actions = document.createElement("div");
+  actions.className = "candidate-player-actions";
+
+  const browserButton = document.createElement("button");
+  browserButton.type = "button";
+  browserButton.className = "download-button browser-play-button";
+  browserButton.textContent = t("playBrowser");
+  browserButton.title = "브라우저에서 자막과 함께 재생";
+  browserButton.setAttribute("aria-label", "브라우저에서 자막과 함께 재생");
+  browserButton.addEventListener("click", () => {
+    playInBrowser(mediaUrl, title, browserButton);
   });
-  meta.append(button);
+
+  const potButton = document.createElement("button");
+  potButton.type = "button";
+  potButton.className = "potplayer-button";
+  potButton.textContent = t("play");
+  potButton.title = "PotPlayer에서 스트리밍 재생";
+  potButton.setAttribute("aria-label", "PotPlayer에서 스트리밍 재생");
+  potButton.addEventListener("click", () => {
+    tryPlay(mediaUrl, title, potButton);
+  });
+
+  const saveButton = document.createElement("button");
+  saveButton.type = "button";
+  saveButton.className = "potplayer-button";
+  saveButton.textContent = t("collectionSave");
+  saveButton.title = "컬렉션에 저장";
+  saveButton.setAttribute("aria-label", "컬렉션에 저장");
+  saveButton.addEventListener("click", async () => {
+    await addToCollection({ title, url: mediaUrl });
+    showToast(t("collectionSaved"));
+    renderCollection();
+  });
+
+  actions.append(browserButton, potButton, saveButton);
+  meta.append(actions);
 }
 
 function enhanceCandidates() {
@@ -327,6 +481,7 @@ async function init() {
     observer.observe(candidates, { childList: true, subtree: true });
     enhanceCandidates();
   }
+  await renderCollection();
   await resumePendingProbe();
 }
 

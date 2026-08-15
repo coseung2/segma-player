@@ -35,12 +35,25 @@ try {
   $stage = Join-Path $tempRoot 'stage'
   Expand-Archive -LiteralPath $storeZip -DestinationPath $stage
 
-  foreach ($relative in @('popup-potplayer.html', 'potplayer-popup-addon.js', 'potplayer-protocol.js')) {
+  foreach ($relative in @(
+    'popup-potplayer.html',
+    'potplayer-popup-addon.js',
+    'potplayer-protocol.js',
+    'collection.js',
+    'player.html',
+    'player.js',
+    'player-subtitle.js',
+    'subtitle-folder.html',
+    'subtitle-folder.js',
+    'vendor/hls.min.mjs'
+  )) {
     $source = Join-Path $ProjectRoot $relative
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
       throw "Dev package file missing: $relative"
     }
-    Copy-Item -LiteralPath $source -Destination (Join-Path $stage $relative) -Force
+    $destination = Join-Path $stage $relative
+    New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($destination)) -Force | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination -Force
   }
 
   $manifestPath = Join-Path $stage 'manifest.json'

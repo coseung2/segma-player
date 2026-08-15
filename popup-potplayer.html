@@ -61,6 +61,73 @@
         line-height: 1.4;
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
       }
+      .candidate-player-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .candidate-player-actions .browser-play-button {
+        flex: 1;
+      }
+      .candidate-player-actions .potplayer-button {
+        flex: none;
+        padding: 8px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 8px;
+        background: transparent;
+        color: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .candidate-player-actions .potplayer-button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .collection-panel {
+        margin-top: 14px;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        padding-top: 12px;
+      }
+      .collection-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .collection-header h2 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .collection-count {
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: rgba(47, 111, 237, 0.25);
+        color: #9dbcf5;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .collection-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      .collection-title {
+        flex: 1;
+        min-width: 0;
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .collection-empty {
+        margin: 0;
+        font-size: 12px;
+        opacity: 0.6;
+      }
     </style>
   </head>
   <body>
@@ -139,6 +206,14 @@
         </div>
         <section id="link-jobs" class="job-list" aria-live="polite" hidden></section>
         <p id="link-save-status" class="save-status" role="status" hidden></p>
+      </section>
+
+      <section id="collection-panel" class="collection-panel" aria-label="Collection">
+        <header class="collection-header">
+          <h2>Collection</h2>
+          <span id="collection-count" class="collection-count" hidden></span>
+        </header>
+        <div id="collection-list" class="collection-list"></div>
       </section>
 
     </main>

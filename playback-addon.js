@@ -2,7 +2,7 @@ import { decodeSubtitleBytes, findSubtitleFile } from "./player-subtitle.js";
 import { getStoredSubtitleDirectory, storeSubtitleDirectory } from "./subtitle-folder.js";
 import { addToCollection, listCollection, removeFromCollection } from "./collection.js";
 import { resolveEdition } from "./license.js";
-import { loadLocale, translator } from "./i18n.js";
+import { loadLocale } from "./i18n.js";
 
 const MESSAGES = {
   ko: {
@@ -79,8 +79,19 @@ const MESSAGES = {
   },
 };
 
+function localTranslator(locale = "ko") {
+  const active = MESSAGES[locale] || MESSAGES.ko;
+  return (key, params = null) => {
+    const template = active[key] ?? MESSAGES.en[key] ?? key;
+    if (!params || typeof template !== "string") return template;
+    return template.replace(/\{(\w+)\}/g, (match, name) => (
+      Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match
+    ));
+  };
+}
+
 const candidates = document.getElementById("candidates");
-let t = translator();
+let t = localTranslator();
 let proActive = false;
 
 function byId(id) {
@@ -295,7 +306,7 @@ function enhanceCandidates() {
 }
 
 async function init() {
-  t = translator(await loadLocale());
+  t = localTranslator(await loadLocale());
   byId("subtitle-folder-change")?.addEventListener("click", chooseSubtitleFolder);
   await refreshSubtitleFolderSettings();
   if (candidates) {

@@ -1,9 +1,13 @@
-// Saved playback collection: the extension-side equivalent of the AVSUBS
-// batch-file library. Entries stay playable as long as the media URL lives;
-// the subtitle is re-matched by media identifier on every play.
+// Saved playback collection backed by the browser bookmark folder, so it
+// lives wherever bookmarks live and syncs with the browser account. The
+// Chrome bookmark roots have stable ids: 0 root, 1 bar, 2 other, 3 mobile.
+// When the bookmarks API is unavailable (no permission), entries fall back
+// to local storage so the UI still works.
 
 const STORAGE_KEY = "auraCollection";
 export const COLLECTION_CAP = 500;
+export const COLLECTION_FOLDER_TITLE = "Aura Media";
+const OTHER_BOOKMARKS_ID = "2";
 
 export function mergeCollection(list, entry, cap = COLLECTION_CAP) {
   const normalized = Array.isArray(list) ? list : [];
@@ -21,24 +25,127 @@ export function mergeCollection(list, entry, cap = COLLECTION_CAP) {
   return next.slice(0, cap);
 }
 
-export async function listCollection() {
+function bookmarkToEntry(node) {
+  return {
+    id: node.id,
+    url: node.url,
+    title: node.title || "",
+    savedAt: typeof node.dateAdded === "number" ? node.dateAdded : Date.now(),
+  };
+}
+
+async function findOrCreateFolder(bookmarks) {
   try {
-    const stored = await chrome.storage.local.get(STORAGE_KEY);
-    return Array.isArray(stored[STORAGE_KEY]) ? stored[STORAGE_KEY] : [];
+    const children = await bookmarks.getChildren(OTHER_BOOKMARKS_ID);
+    const existing = children.find((node) => !node.url && node.title === COLLECTION_FOLDER_TITLE);
+    if (existing) return existing.id;
+    const created = await bookmarks.create({
+      parentId: OTHER_BOOKMARKS_ID,
+      title: COLLECTION_FOLDER_TITLE,
+    });
+    return created.id;
   } catch {
-    return [];
+    return null;
   }
 }
 
+async function folderEntries(bookmarks) {
+  const folderId = await findOrCreateFolder(bookmarks);
+  if (!folderId) return null;
+  const children = await bookmarks.getChildren(folderId);
+  return children.filter((node) => typeof node.url === "string").map(bookmarkToEntry);
+}
+
+export function createBookmarkCollection(bookmarks) {
+  const hasApi = Boolean(bookmarks?.getChildren && bookmarks?.create && bookmarks?.remove);
+  return {
+    supported: hasApi,
+    async list() {
+      if (!hasApi) return null;
+      const entries = await folderEntries(bookmarks);
+      return entries || null;
+    },
+    async add(entry) {
+      if (!hasApi) return null;
+      const url = typeof entry?.url === "string" ? entry.url : "";
+      if (!url) return null;
+      const folderId = await findOrCreateFolder(bookmarks);
+      if (!folderId) return null;
+      const existing = (await bookmarks.getChildren(folderId))
+        .find((node) => node.url === url);
+      if (existing) {
+        const title = typeof entry.title === "string" ? entry.title.slice(0, 240) : "";
+        if (title && title !== existing.title) {
+          await bookmarks.update(existing.id, { title }).catch(() => null);
+        }
+        await bookmarks.move(existing.id, { parentId: folderId, index: 0 }).catch(() => null);
+        return existing.id;
+      }
+      const created = await bookmarks.create({
+        parentId: folderId,
+        index: 0,
+        title: typeof entry.title === "string" ? entry.title.slice(0, 240) : "",
+        url,
+      });
+      return created.id;
+    },
+    async remove(url) {
+      if (!hasApi) return false;
+      const folderId = await findOrCreateFolder(bookmarks);
+      if (!folderId) return false;
+      const existing = (await bookmarks.getChildren(folderId))
+        .find((node) => node.url === url);
+      if (!existing) return false;
+      await bookmarks.remove(existing.id);
+      return true;
+    },
+  };
+}
+
+function storageFallback() {
+  return {
+    supported: true,
+    async list() {
+      try {
+        const stored = await chrome.storage.local.get(STORAGE_KEY);
+        return Array.isArray(stored[STORAGE_KEY]) ? stored[STORAGE_KEY] : [];
+      } catch {
+        return [];
+      }
+    },
+    async add(entry) {
+      const next = mergeCollection(await this.list(), entry);
+      await chrome.storage.local.set({ [STORAGE_KEY]: next });
+      return next;
+    },
+    async remove(url) {
+      const current = await this.list();
+      const next = current.filter((item) => item?.url !== url);
+      await chrome.storage.local.set({ [STORAGE_KEY]: next });
+      return true;
+    },
+  };
+}
+
+export async function getCollection() {
+  if (globalThis.chrome?.bookmarks) {
+    return createBookmarkCollection(globalThis.chrome.bookmarks);
+  }
+  return storageFallback();
+}
+
+export async function listCollection() {
+  const collection = await getCollection();
+  const entries = await collection.list();
+  return entries || [];
+}
+
 export async function addToCollection(entry) {
-  const next = mergeCollection(await listCollection(), entry);
-  await chrome.storage.local.set({ [STORAGE_KEY]: next });
-  return next;
+  const collection = await getCollection();
+  return collection.add(entry);
 }
 
 export async function removeFromCollection(url) {
-  const current = await listCollection();
-  const next = current.filter((item) => item?.url !== url);
-  await chrome.storage.local.set({ [STORAGE_KEY]: next });
-  return next;
+  const collection = await getCollection();
+  return collection.remove(url);
 }

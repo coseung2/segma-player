@@ -20,6 +20,7 @@ const MESSAGES = {
     chooseFolder: "자막 폴더 선택",
     collection: "컬렉션",
     collectionEmpty: "저장한 항목이 없습니다. 감지 카드의 '저장' 버튼으로 추가하세요.",
+    collectionNote: "브라우저 즐겨찾기 'Aura Media' 폴더와 연동됩니다.",
     collectionSave: "저장",
     collectionSaved: "컬렉션에 저장됨",
     collectionRemove: "삭제",
@@ -46,6 +47,7 @@ const MESSAGES = {
     chooseFolder: "Choose subtitle folder",
     collection: "Collection",
     collectionEmpty: "Nothing saved yet. Use the card's Save button to add an entry.",
+    collectionNote: "Synced with the 'Aura Media' browser bookmarks folder.",
     collectionSave: "Save",
     collectionSaved: "Saved to collection",
     collectionRemove: "Remove",
@@ -72,6 +74,7 @@ const MESSAGES = {
     chooseFolder: "字幕フォルダーを選択",
     collection: "コレクション",
     collectionEmpty: "保存された項目はありません。カードの「保存」ボタンで追加できます。",
+    collectionNote: "ブラウザーのブックマーク「Aura Media」フォルダーと同期されます。",
     collectionSave: "保存",
     collectionSaved: "コレクションに保存しました",
     collectionRemove: "削除",
@@ -98,6 +101,7 @@ const MESSAGES = {
     chooseFolder: "选择字幕文件夹",
     collection: "收藏",
     collectionEmpty: "还没有保存的项目。点击卡片上的“保存”按钮添加。",
+    collectionNote: "与浏览器书签“Aura Media”文件夹同步。",
     collectionSave: "保存",
     collectionSaved: "已保存到收藏",
     collectionRemove: "删除",
@@ -367,6 +371,8 @@ async function renderCollection() {
   if (!listElement) return;
   if (heading) heading.textContent = t("collection");
   const entries = await listCollection();
+  const note = byId("collection-note");
+  if (note) note.textContent = t("collectionNote");
   countElement.hidden = entries.length === 0;
   countElement.textContent = String(entries.length);
   listElement.replaceChildren();
@@ -400,6 +406,19 @@ async function renderCollection() {
     row.append(label, play, remove);
     listElement.append(row);
   }
+}
+
+function watchBookmarkChanges() {
+  if (!globalThis.chrome?.bookmarks) return;
+  let refreshTimer = null;
+  const schedule = () => {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(renderCollection, 250);
+  };
+  chrome.bookmarks.onCreated.addListener(schedule);
+  chrome.bookmarks.onRemoved.addListener(schedule);
+  chrome.bookmarks.onMoved.addListener(schedule);
+  chrome.bookmarks.onChanged.addListener(schedule);
 }
 
 async function resumePendingProbe() {
@@ -482,6 +501,7 @@ async function init() {
     enhanceCandidates();
   }
   await renderCollection();
+  watchBookmarkChanges();
   await resumePendingProbe();
 }
 

@@ -59,6 +59,10 @@ try {
   $manifestPath = Join-Path $stage 'manifest.json'
   $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
   $manifest.action.default_popup = 'popup-potplayer.html'
+  $permissions = @($manifest.permissions)
+  if ($permissions -notcontains 'bookmarks') {
+    $manifest.permissions = @($permissions + 'bookmarks' | Sort-Object)
+  }
   [System.IO.File]::WriteAllText(
     $manifestPath,
     ($manifest | ConvertTo-Json -Depth 12),

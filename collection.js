@@ -28,12 +28,42 @@ export function mergeCollection(list, entry, cap = COLLECTION_CAP) {
 }
 
 function bookmarkToEntry(node) {
+  const parsed = parseCollectionBookmarkUrl(node.url);
   return {
     id: node.id,
-    url: node.url,
-    title: node.title || "",
+    url: parsed?.mediaUrl || node.url,
+    title: parsed?.title || node.title || "",
+    bookmarkUrl: node.url,
     savedAt: typeof node.dateAdded === "number" ? node.dateAdded : Date.now(),
   };
+}
+
+export function buildCollectionBookmarkUrl(mediaUrl, title = "", playerUrl = null) {
+  const baseUrl = playerUrl || globalThis.chrome?.runtime?.getURL?.("player.html");
+  if (!baseUrl) return mediaUrl;
+  const params = new URLSearchParams({ collection: "1", url: mediaUrl });
+  if (title) params.set("title", title.slice(0, 240));
+  return `${baseUrl}?${params.toString()}`;
+}
+
+export function parseCollectionBookmarkUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (!(parsed.protocol === "chrome-extension:" || parsed.protocol === "moz-extension:")) return null;
+    if (parsed.pathname !== "/player.html" || parsed.searchParams.get("collection") !== "1") return null;
+    const mediaUrl = parsed.searchParams.get("url") || "";
+    if (!/^https?:$/i.test(new URL(mediaUrl).protocol)) return null;
+    return {
+      mediaUrl,
+      title: parsed.searchParams.get("title") || "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function bookmarkMediaUrl(value) {
+  return parseCollectionBookmarkUrl(value)?.mediaUrl || value;
 }
 
 async function findOrCreateFolder(bookmarks) {
@@ -55,7 +85,19 @@ async function folderEntries(bookmarks) {
   const folderId = await findOrCreateFolder(bookmarks);
   if (!folderId) return null;
   const children = await bookmarks.getChildren(folderId);
-  return children.filter((node) => typeof node.url === "string").map(bookmarkToEntry);
+  const entries = [];
+  for (const node of children.filter((item) => typeof item.url === "string")) {
+    const entry = bookmarkToEntry(node);
+    if (!parseCollectionBookmarkUrl(node.url)) {
+      const bookmarkUrl = buildCollectionBookmarkUrl(entry.url, entry.title);
+      if (bookmarkUrl !== node.url) {
+        await bookmarks.update(node.id, { url: bookmarkUrl }).catch(() => null);
+        entry.bookmarkUrl = bookmarkUrl;
+      }
+    }
+    entries.push(entry);
+  }
+  return entries;
 }
 
 export function createBookmarkCollection(bookmarks) {
@@ -71,14 +113,17 @@ export function createBookmarkCollection(bookmarks) {
       if (!hasApi) return null;
       const url = typeof entry?.url === "string" ? entry.url : "";
       if (!url) return null;
+      const title = typeof entry.title === "string" ? entry.title.slice(0, 240) : "";
+      const bookmarkUrl = buildCollectionBookmarkUrl(url, title);
       const folderId = await findOrCreateFolder(bookmarks);
       if (!folderId) return null;
       const existing = (await bookmarks.getChildren(folderId))
-        .find((node) => node.url === url);
+        .find((node) => bookmarkMediaUrl(node.url) === url);
       if (existing) {
-        const title = typeof entry.title === "string" ? entry.title.slice(0, 240) : "";
         if (title && title !== existing.title) {
-          await bookmarks.update(existing.id, { title }).catch(() => null);
+          await bookmarks.update(existing.id, { title, url: bookmarkUrl }).catch(() => null);
+        } else if (existing.url !== bookmarkUrl) {
+          await bookmarks.update(existing.id, { url: bookmarkUrl }).catch(() => null);
         }
         await bookmarks.move(existing.id, { parentId: folderId, index: 0 }).catch(() => null);
         return existing.id;
@@ -86,8 +131,8 @@ export function createBookmarkCollection(bookmarks) {
       const created = await bookmarks.create({
         parentId: folderId,
         index: 0,
-        title: typeof entry.title === "string" ? entry.title.slice(0, 240) : "",
-        url,
+        title,
+        url: bookmarkUrl,
       });
       return created.id;
     },
@@ -96,7 +141,7 @@ export function createBookmarkCollection(bookmarks) {
       const folderId = await findOrCreateFolder(bookmarks);
       if (!folderId) return false;
       const existing = (await bookmarks.getChildren(folderId))
-        .find((node) => node.url === url);
+        .find((node) => bookmarkMediaUrl(node.url) === url);
       if (!existing) return false;
       await bookmarks.remove(existing.id);
       return true;

@@ -1,12 +1,14 @@
 import Hls from "./vendor/hls.min.mjs";
-import { cuesAt, parseSrt } from "./player-subtitle.js";
+import { decodeSubtitleBytes, findSubtitleFile, cuesAt, parseSrt } from "./player-subtitle.js";
+import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
 import { addToCollection } from "./collection.js";
+import { resolveEdition } from "./license.js";
 
 const params = new URLSearchParams(location.search);
 const mediaUrl = params.get("url") || "";
 const title = params.get("title") || "";
 const subtitleSession = params.get("sub") || "";
-const proActive = params.get("pro") === "1";
+let proActive = false;
 
 const video = document.getElementById("video");
 const titleElement = document.getElementById("title");
@@ -14,7 +16,7 @@ const subtitleElement = document.getElementById("subtitle");
 const subtitleTag = document.getElementById("subtitle-tag");
 const message = document.getElementById("message");
 const saveButton = document.getElementById("save");
-if (!proActive) saveButton.hidden = true;
+saveButton.hidden = true;
 
 function fail(text) {
   message.hidden = false;
@@ -32,13 +34,21 @@ function cleanupSessions() {
 }
 
 async function loadSubtitles() {
-  if (!subtitleSession) return;
+  let text = "";
   try {
-    const stored = await chrome.storage.local.get(`auraSubtitleSession:${subtitleSession}`);
-    const session = stored[`auraSubtitleSession:${subtitleSession}`];
-    await chrome.storage.local.remove(`auraSubtitleSession:${subtitleSession}`);
-    if (!session?.text) return;
-    const cues = parseSrt(session.text);
+    if (subtitleSession) {
+      const stored = await chrome.storage.local.get(`auraSubtitleSession:${subtitleSession}`);
+      const session = stored[`auraSubtitleSession:${subtitleSession}`];
+      await chrome.storage.local.remove(`auraSubtitleSession:${subtitleSession}`);
+      text = session?.text || "";
+    } else if (params.get("collection") === "1") {
+      const handle = await getStoredSubtitleDirectory();
+      const found = await findSubtitleFile(handle, title, mediaUrl);
+      if (found) {
+        text = await decodeSubtitleBytes(new Uint8Array(await found.file.arrayBuffer()));
+      }
+    }
+    const cues = parseSrt(text);
     if (!cues.length) return;
     subtitleTag.hidden = false;
     video.addEventListener("timeupdate", () => {
@@ -54,6 +64,11 @@ async function loadSubtitles() {
   } catch {
     // Subtitle overlay is best-effort; playback continues without it.
   }
+}
+
+async function refreshPlanGate() {
+  proActive = (await resolveEdition()) === "pro";
+  saveButton.hidden = !proActive;
 }
 
 function startPlayback() {
@@ -87,4 +102,4 @@ saveButton.addEventListener("click", async () => {
 });
 
 cleanupSessions();
-loadSubtitles().then(startPlayback);
+refreshPlanGate().then(loadSubtitles).then(startPlayback);

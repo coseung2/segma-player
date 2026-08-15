@@ -1,6 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { COLLECTION_FOLDER_TITLE, createBookmarkCollection, mergeCollection } from "./collection.js";
+import {
+  buildCollectionBookmarkUrl,
+  COLLECTION_FOLDER_TITLE,
+  createBookmarkCollection,
+  mergeCollection,
+  parseCollectionBookmarkUrl,
+} from "./collection.js";
+
+test("collection bookmark URLs wrap the media address in the browser player", () => {
+  const bookmarkUrl = buildCollectionBookmarkUrl(
+    "https://a.test/1.m3u8?token=abc",
+    "AAA-111",
+    "chrome-extension://test/player.html",
+  );
+  assert.deepEqual(parseCollectionBookmarkUrl(bookmarkUrl), {
+    mediaUrl: "https://a.test/1.m3u8?token=abc",
+    title: "AAA-111",
+  });
+});
 
 test("collection merge dedupes by media url and prepends newest", () => {
   const first = mergeCollection([], { url: "https://a.test/1.m3u8", title: "AAA-111" });

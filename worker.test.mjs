@@ -166,3 +166,144 @@ test("serves the custom 404 page for missing assets", async () => {
   assert.equal(response.status, 404);
   assert.equal(await response.text(), "custom-404");
 });
+
+function payOrder(period = "month") {
+  return new Request("https://aura.mdownloader.workers.dev/api/pay/order", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ period }),
+  });
+}
+
+function payVerify(orderId, txHash) {
+  return new Request("https://aura.mdownloader.workers.dev/api/pay/verify", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderId, txHash }),
+  });
+}
+
+const PAY_WALLET = "TGwSFr1JQhMz9bn2RfqQs4zJfRwv7rcWK5";
+const PAY_WALLET_HEX = "0x4c731cfcd08b7729df01b11fab04d44126aabd8f";
+const USDT_CONTRACT_HEX = "0xa614f803b6fd780986a42c78ec9c7f77e6ded13c";
+
+function tronGridStub(events) {
+  return async () => new Response(JSON.stringify({ data: events }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+test("confirms a real TronGrid transfer whose address is reported as hex", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const originalFetch = globalThis.fetch;
+  // TronGrid reports `to` and `contract_address` in 41-prefixed hex form while
+  // the configured wallet is base58; both must still match.
+  globalThis.fetch = tronGridStub([{
+    event_name: "Transfer",
+    contract_address: USDT_CONTRACT_HEX,
+    result: { to: PAY_WALLET_HEX, value: "5990000" },
+  }]);
+  try {
+    const created = await worker.fetch(payOrder("month"), environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }));
+    assert.equal(created.status, 201);
+    const order = await created.json();
+    assert.equal(order.amountUsdt, 5.99);
+
+    const verified = await worker.fetch(
+      payVerify(order.orderId, "a".repeat(64)),
+      environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }),
+    );
+    assert.equal(verified.status, 200);
+    const body = await verified.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.key, order.licenseKey);
+    assert.ok(body.expiresAt > Date.now());
+
+    const record = await kv.get(order.licenseKey, "json");
+    assert.equal(record.status, "approved");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rejects a transfer to another wallet, the wrong token, or a short amount", async () => {
+  const cases = [
+    {
+      name: "different recipient",
+      events: [{ event_name: "Transfer", contract_address: USDT_CONTRACT_HEX, result: { to: "0x1196931d2ee2c2770115dba52082bae7ebff6d3a", value: "5990000" } }],
+    },
+    {
+      name: "non-USDT contract",
+      events: [{ event_name: "Transfer", contract_address: "0x1111111111111111111111111111111111111111", result: { to: PAY_WALLET_HEX, value: "5990000" } }],
+    },
+    {
+      name: "underpaid",
+      events: [{ event_name: "Transfer", contract_address: USDT_CONTRACT_HEX, result: { to: PAY_WALLET_HEX, value: "1000000" } }],
+    },
+  ];
+  for (const { name, events } of cases) {
+    const worker = await loadWorker();
+    const kv = memoryKv();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = tronGridStub(events);
+    try {
+      const created = await worker.fetch(payOrder("month"), environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }));
+      const order = await created.json();
+      const verified = await worker.fetch(
+        payVerify(order.orderId, "b".repeat(64)),
+        environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }),
+      );
+      assert.equal(verified.status, 400, name);
+      const body = await verified.json();
+      assert.equal(body.error, "usdt-transfer-not-found", name);
+      const record = await kv.get(order.licenseKey, "json");
+      assert.equal(record.status, "pending", name);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+test("reports an unconfirmed transaction separately from a missing transfer", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = tronGridStub([]);
+  try {
+    const created = await worker.fetch(payOrder("year"), environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }));
+    const order = await created.json();
+    assert.equal(order.amountUsdt, 49);
+    const verified = await worker.fetch(
+      payVerify(order.orderId, "c".repeat(64)),
+      environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }),
+    );
+    assert.equal(verified.status, 400);
+    assert.equal((await verified.json()).error, "transaction-not-confirmed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a confirmed order cannot be redeemed twice", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = tronGridStub([{
+    event_name: "Transfer",
+    contract_address: USDT_CONTRACT_HEX,
+    result: { to: PAY_WALLET_HEX, value: "49000000" },
+  }]);
+  try {
+    const created = await worker.fetch(payOrder("year"), environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }));
+    const order = await created.json();
+    const first = await worker.fetch(payVerify(order.orderId, "d".repeat(64)), environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }));
+    assert.equal(first.status, 200);
+    const second = await worker.fetch(payVerify(order.orderId, "d".repeat(64)), environment(kv, { USDT_TRC20_ADDRESS: PAY_WALLET }));
+    assert.equal(second.status, 409);
+    assert.equal((await second.json()).error, "already-confirmed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

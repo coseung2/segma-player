@@ -7,6 +7,9 @@ function json(data, status = 200) {
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers": "content-type, authorization",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
     },
   });
 }
@@ -87,6 +90,67 @@ function licenseExpired(record) {
     && Date.now() > record.expiresAt;
 }
 
+const asrRequestsByIp = new Map();
+
+function asrRateLimited(request, limit = 12, windowMs = 60 * 60 * 1000) {
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  const now = Date.now();
+  const list = (asrRequestsByIp.get(ip) || []).filter((stamp) => now - stamp < windowMs);
+  if (list.length >= limit) {
+    asrRequestsByIp.set(ip, list);
+    return true;
+  }
+  list.push(now);
+  asrRequestsByIp.set(ip, list);
+  return false;
+}
+
+function isSafeAsrUrl(value) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 4096) return false;
+  try {
+    const parsed = new URL(value);
+    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    if (parsed.username || parsed.password || parsed.hash) return false;
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost")
+      || hostname === "::1" || hostname === "0.0.0.0" || hostname.startsWith("127.")
+      || hostname.startsWith("10.") || hostname.startsWith("192.168.")
+      || /^172\.(?:1[6-9]|2\d|3[0-1])\./.test(hostname)
+      || hostname.startsWith("169.254.") || hostname.startsWith("fc")
+      || hostname.startsWith("fd") || hostname.startsWith("fe80:")) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function approvedAsrLicense(env, value) {
+  const key = typeof value === "string" ? value.trim().toUpperCase() : "";
+  if (!isValidLicenseKey(key)) return null;
+  const record = await readRecord(env, key);
+  if (!record || record.status !== "approved" || licenseExpired(record)) return null;
+  return key;
+}
+
+function modalAsrUrl(env, path) {
+  if (typeof env.MODAL_ASR_URL !== "string" || !isSafeAsrUrl(env.MODAL_ASR_URL)) return null;
+  return `${env.MODAL_ASR_URL.replace(/\/+$/, "")}${path}`;
+}
+
+async function forwardModalJson(response) {
+  const text = await response.text().catch(() => "");
+  let body = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = null;
+  }
+  if (!body || typeof body !== "object") {
+    return json({ ok: false, error: response.ok ? "invalid-modal-response" : "modal-request-failed" }, response.ok ? 502 : response.status);
+  }
+  return json(body, response.status);
+}
+
 async function verifyTrc20(txHash, walletAddress, expectedAmount, apiKey) {
   try {
     const headers = apiKey ? { "TRON-PRO-API-KEY": apiKey } : {};
@@ -116,6 +180,63 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    if (path === "/api/subtitles" && request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": "*",
+          "access-control-allow-headers": "content-type, authorization",
+          "access-control-allow-methods": "GET, POST, OPTIONS",
+        },
+      });
+    }
+
+    if (path === "/api/subtitles" && request.method === "POST") {
+      if (!env.MODAL_ASR_TOKEN) return json({ ok: false, error: "asr-not-configured" }, 503);
+      if (asrRateLimited(request)) return json({ ok: false, error: "rate-limited" }, 429);
+      const body = await request.json().catch(() => null);
+      const mediaUrl = typeof body?.mediaUrl === "string" ? body.mediaUrl.trim() : "";
+      const sourceUrl = typeof body?.sourceUrl === "string" ? body.sourceUrl.trim() : "";
+      const title = typeof body?.title === "string" ? body.title.trim().slice(0, 240) : "";
+      if (!isSafeAsrUrl(mediaUrl) || (sourceUrl && !isSafeAsrUrl(sourceUrl))) {
+        return json({ ok: false, error: "invalid-media-url" }, 400);
+      }
+      if (!await approvedAsrLicense(env, body?.licenseKey)) {
+        return json({ ok: false, error: "pro-license-required" }, 403);
+      }
+      const endpoint = modalAsrUrl(env, "/submit");
+      if (!endpoint) return json({ ok: false, error: "asr-not-configured" }, 503);
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${env.MODAL_ASR_TOKEN}`,
+          },
+          body: JSON.stringify({ mediaUrl, sourceUrl, title }),
+        });
+        return forwardModalJson(response);
+      } catch {
+        return json({ ok: false, error: "asr-upstream-unreachable" }, 502);
+      }
+    }
+
+    if (path === "/api/subtitles" && request.method === "GET") {
+      if (!env.MODAL_ASR_TOKEN) return json({ ok: false, error: "asr-not-configured" }, 503);
+      const jobId = url.searchParams.get("id") || "";
+      if (!/^[A-Za-z0-9._:-]{1,160}$/.test(jobId)) return json({ ok: false, error: "invalid-job-id" }, 400);
+      const endpoint = modalAsrUrl(env, `/result/${encodeURIComponent(jobId)}`);
+      if (!endpoint) return json({ ok: false, error: "asr-not-configured" }, 503);
+      try {
+        const response = await fetch(endpoint, {
+          headers: { authorization: `Bearer ${env.MODAL_ASR_TOKEN}` },
+        });
+        return forwardModalJson(response);
+      } catch {
+        return json({ ok: false, error: "asr-upstream-unreachable" }, 502);
+      }
+    }
 
     if (path === "/api/license" && request.method === "GET") {
       const key = (url.searchParams.get("key") || "").trim().toUpperCase();

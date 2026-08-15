@@ -16,7 +16,8 @@
     "nodejs_compat"
   ],
   "vars": {
-    "USDT_TRC20_ADDRESS": "TGwSFr1JQhMz9bn2RfqQs4zJfRwv7rcWK5"
+    "USDT_TRC20_ADDRESS": "TGwSFr1JQhMz9bn2RfqQs4zJfRwv7rcWK5",
+    "MODAL_ASR_URL": ""
   },
   "kv_namespaces": [
     {

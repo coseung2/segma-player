@@ -54,6 +54,10 @@
         opacity: 0.6;
         cursor: default;
       }
+      #generate-subtitle {
+        border-color: rgba(47, 111, 237, 0.65);
+        background: rgba(47, 111, 237, 0.2);
+      }
       .collection-picker {
         position: absolute;
         top: calc(100% + 8px);
@@ -202,6 +206,7 @@
     <header>
       <h1 id="title">Aura Media Player</h1>
       <span class="spacer"></span>
+      <button id="generate-subtitle" type="button" hidden>자막 생성</button>
       <button id="save" type="button">컬렉션에 저장</button>
       <span id="subtitle-tag" class="tag" hidden>자막</span>
       <section id="collection-picker" class="collection-picker" hidden aria-label="컬렉션 저장">

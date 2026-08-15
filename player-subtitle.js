@@ -58,16 +58,19 @@ export async function decodeSubtitleBytes(bytes) {
 }
 
 function timestampToSeconds(value) {
-  const match = /(\d+):(\d{2}):(\d{2})[,.](\d{1,3})/.exec(String(value).trim());
-  if (!match) return null;
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const seconds = Number(match[3]);
-  const millis = Number(match[4].padEnd(3, "0"));
-  return hours * 3600 + minutes * 60 + seconds + millis / 1000;
+  const raw = String(value).trim();
+  const long = /^(\d+):(\d{2}):(\d{2})[,.](\d{1,3})/.exec(raw);
+  if (long) {
+    const millis = Number(long[4].padEnd(3, "0"));
+    return Number(long[1]) * 3600 + Number(long[2]) * 60 + Number(long[3]) + millis / 1000;
+  }
+  const short = /^(\d{1,3}):(\d{2})[,.](\d{1,3})/.exec(raw);
+  if (!short) return null;
+  const millis = Number(short[3].padEnd(3, "0"));
+  return Number(short[1]) * 60 + Number(short[2]) + millis / 1000;
 }
 
-export function parseSrt(text) {
+function parseTimedText(text) {
   const cues = [];
   const normalized = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const blocks = normalized.split(/\n{2,}/);
@@ -84,6 +87,18 @@ export function parseSrt(text) {
     cues.push({ start, end, text: payload });
   }
   return cues;
+}
+
+export function parseSrt(text) {
+  return parseTimedText(text);
+}
+
+export function parseVtt(text) {
+  return parseTimedText(String(text || "").replace(/^\uFEFF?WEBVTT[^\n]*(?:\n|$)/i, ""));
+}
+
+export function parseSubtitle(text) {
+  return /^\uFEFF?\s*WEBVTT\b/i.test(String(text || "")) ? parseVtt(text) : parseSrt(text);
 }
 
 export function cuesAt(cues, time) {

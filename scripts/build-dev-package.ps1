@@ -44,6 +44,7 @@ try {
     'player.html',
     'player.js',
     'player-subtitle.js',
+    'subtitle-generation.js',
     'subtitle-folder.html',
     'subtitle-folder.js',
     'vendor/hls.min.mjs'

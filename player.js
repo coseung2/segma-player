@@ -1,5 +1,5 @@
 import Hls from "./vendor/hls.min.mjs";
-import { decodeSubtitleBytes, findSubtitleFile, cuesAt, parseSrt } from "./player-subtitle.js";
+import { decodeSubtitleBytes, findSubtitleFile, cuesAt, parseSubtitle } from "./player-subtitle.js";
 import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
 import {
   addToCollection,
@@ -9,12 +9,25 @@ import {
 } from "./collection.js";
 import { resolveEdition } from "./license.js";
 import { loadLocale } from "./i18n.js";
+import {
+  loadGeneratedSubtitle,
+  requestGeneratedSubtitle,
+  storeGeneratedSubtitle,
+  SubtitleGenerationError,
+} from "./subtitle-generation.js";
 
 const NO_SUBTITLE_MESSAGES = {
   ko: "자막을 찾지 못했습니다 — 자막 없이 재생합니다",
   en: "No subtitle found — playing without subtitles",
   ja: "字幕が見つかりません — 字幕なしで再生します",
   zh: "未找到字幕 — 将不带字幕播放",
+};
+
+const AUTO_SUBTITLE_MESSAGES = {
+  ko: { generate: "자막 생성", generating: "자막 생성 중…", ready: "자막 준비됨", failed: "자막 생성 실패", empty: "인식된 대사가 없습니다" },
+  en: { generate: "Generate subtitles", generating: "Generating subtitles…", ready: "Subtitles ready", failed: "Subtitle generation failed", empty: "No speech was recognized" },
+  ja: { generate: "字幕を生成", generating: "字幕を生成中…", ready: "字幕を準備しました", failed: "字幕生成に失敗しました", empty: "認識できる発話がありません" },
+  zh: { generate: "生成字幕", generating: "正在生成字幕…", ready: "字幕已准备好", failed: "字幕生成失败", empty: "没有识别到语音" },
 };
 
 const COLLECTION_MESSAGES = {
@@ -77,6 +90,8 @@ let proActive = false;
 let refreshInProgress = false;
 let noSubtitleMessage = NO_SUBTITLE_MESSAGES.ko;
 let collectionMessages = COLLECTION_MESSAGES.ko;
+let autoSubtitleMessages = AUTO_SUBTITLE_MESSAGES.ko;
+let subtitleUpdate = null;
 
 const video = document.getElementById("video");
 const titleElement = document.getElementById("title");
@@ -84,6 +99,7 @@ const subtitleElement = document.getElementById("subtitle");
 const subtitleTag = document.getElementById("subtitle-tag");
 const message = document.getElementById("message");
 const saveButton = document.getElementById("save");
+const generateSubtitleButton = document.getElementById("generate-subtitle");
 const collectionPicker = document.getElementById("collection-picker");
 const collectionFolder = document.getElementById("collection-folder");
 const collectionFolderLabel = document.getElementById("collection-folder-label");
@@ -101,6 +117,27 @@ function showToast(text) {
   toast.textContent = text;
   document.body.append(toast);
   setTimeout(() => toast.remove(), 2800);
+}
+
+function bindSubtitleCues(cues) {
+  if (subtitleUpdate) {
+    video.removeEventListener("timeupdate", subtitleUpdate);
+    video.removeEventListener("seeking", subtitleUpdate);
+  }
+  if (!cues.length) {
+    subtitleTag.hidden = true;
+    return false;
+  }
+  subtitleUpdate = () => {
+    const cue = cuesAt(cues, video.currentTime);
+    subtitleElement.hidden = !cue;
+    subtitleElement.textContent = cue?.text || "";
+  };
+  subtitleTag.hidden = false;
+  video.addEventListener("timeupdate", subtitleUpdate);
+  video.addEventListener("seeking", subtitleUpdate);
+  subtitleUpdate();
+  return true;
 }
 
 function fail(text, { refresh = false } = {}) {
@@ -197,22 +234,12 @@ async function loadSubtitles() {
         text = await decodeSubtitleBytes(new Uint8Array(await found.file.arrayBuffer()));
       }
     }
-    const cues = parseSrt(text);
+    const cues = parseSubtitle(text);
     if (!cues.length) {
       showToast(noSubtitleMessage);
       return;
     }
-    subtitleTag.hidden = false;
-    video.addEventListener("timeupdate", () => {
-      const cue = cuesAt(cues, video.currentTime);
-      subtitleElement.hidden = !cue;
-      subtitleElement.textContent = cue?.text || "";
-    });
-    video.addEventListener("seeking", () => {
-      const cue = cuesAt(cues, video.currentTime);
-      subtitleElement.hidden = !cue;
-      subtitleElement.textContent = cue?.text || "";
-    });
+    bindSubtitleCues(cues);
   } catch {
     // Subtitle overlay is best-effort; playback continues without it.
   }
@@ -221,6 +248,7 @@ async function loadSubtitles() {
 async function refreshPlanGate() {
   proActive = (await resolveEdition()) === "pro";
   saveButton.hidden = false;
+  generateSubtitleButton.hidden = !proActive;
 }
 
 function setCollectionLocale(locale) {
@@ -261,7 +289,6 @@ async function refreshCollectionFolders(selectedId = null) {
 }
 
 async function openCollectionPicker() {
-  if (!proActive) return;
   await refreshCollectionFolders();
   collectionPicker.hidden = false;
   collectionFolder.focus();
@@ -335,7 +362,38 @@ function startPlayback() {
   }
 }
 
+function subtitleGenerationErrorMessage(error) {
+  if (!(error instanceof SubtitleGenerationError)) return autoSubtitleMessages.failed;
+  if (error.code === "pro-license-required") return noSubtitleMessage;
+  if (error.code === "empty-subtitle") return autoSubtitleMessages.empty;
+  if (error.code === "aborted") return autoSubtitleMessages.failed;
+  return autoSubtitleMessages.failed;
+}
+
+async function generateSubtitles() {
+  if (!proActive || generateSubtitleButton.disabled || !mediaUrl) return;
+  generateSubtitleButton.disabled = true;
+  generateSubtitleButton.textContent = autoSubtitleMessages.generating;
+  const input = { mediaUrl, sourceUrl, title };
+  try {
+    const cached = await loadGeneratedSubtitle(input);
+    const generated = cached || await requestGeneratedSubtitle(input);
+    if (!cached) await storeGeneratedSubtitle(input, generated);
+    if (!bindSubtitleCues(parseSubtitle(generated.vtt))) {
+      showToast(autoSubtitleMessages.empty);
+      return;
+    }
+    showToast(autoSubtitleMessages.ready);
+  } catch (error) {
+    showToast(subtitleGenerationErrorMessage(error));
+  } finally {
+    generateSubtitleButton.disabled = false;
+    generateSubtitleButton.textContent = autoSubtitleMessages.generate;
+  }
+}
+
 saveButton.addEventListener("click", openCollectionPicker);
+generateSubtitleButton.addEventListener("click", generateSubtitles);
 collectionNewFolderButton.addEventListener("click", () => {
   collectionNewFolderRow.hidden = false;
   collectionNewFolderInput.focus();
@@ -351,6 +409,8 @@ async function init() {
   const locale = await loadLocale();
   setCollectionLocale(locale);
   noSubtitleMessage = NO_SUBTITLE_MESSAGES[locale] || NO_SUBTITLE_MESSAGES.ko;
+  autoSubtitleMessages = AUTO_SUBTITLE_MESSAGES[locale] || AUTO_SUBTITLE_MESSAGES.ko;
+  generateSubtitleButton.textContent = autoSubtitleMessages.generate;
   cleanupSessions();
   await refreshPlanGate();
   await loadSubtitles();

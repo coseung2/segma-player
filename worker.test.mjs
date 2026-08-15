@@ -81,6 +81,64 @@ test("issues a pro token only for an approved key", async () => {
   assert.equal(payload.keyId, key);
 });
 
+test("pro subtitle jobs are proxied without exposing the worker secret", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"D".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (request, options) => {
+    calls.push({ request: String(request), options });
+    return new Response(JSON.stringify({ ok: true, jobId: "fc-123" }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const response = await worker.fetch(new Request("https://aura.mdownloader.workers.dev/api/subtitles", {
+      method: "POST",
+      headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.30" },
+      body: JSON.stringify({
+        mediaUrl: "https://cdn.example.test/video.mp4",
+        sourceUrl: "https://example.test/watch/1",
+        title: "Sample",
+        licenseKey: key,
+      }),
+    }), environment(kv, {
+      MODAL_ASR_URL: "https://aura-asr.modal.run",
+      MODAL_ASR_TOKEN: "modal-secret",
+    }));
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { ok: true, jobId: "fc-123" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].request, "https://aura-asr.modal.run/submit");
+    assert.equal(calls[0].options.headers.authorization, "Bearer modal-secret");
+    assert.equal(JSON.parse(calls[0].options.body).licenseKey, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subtitle proxy rejects private media addresses and handles preflight", async () => {
+  const worker = await loadWorker();
+  const invalid = await worker.fetch(new Request("https://aura.mdownloader.workers.dev/api/subtitles", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mediaUrl: "http://127.0.0.1/video.mp4", licenseKey: `AM-${"E".repeat(36)}` }),
+  }), environment(memoryKv(), {
+    MODAL_ASR_URL: "https://aura-asr.modal.run",
+    MODAL_ASR_TOKEN: "modal-secret",
+  }));
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).error, "invalid-media-url");
+  const options = await worker.fetch(new Request("https://aura.mdownloader.workers.dev/api/subtitles", {
+    method: "OPTIONS",
+  }), environment());
+  assert.equal(options.status, 204);
+  assert.equal(options.headers.get("access-control-allow-origin"), "*");
+});
+
 test("license endpoint enforces three devices per key", async () => {
   const worker = await loadWorker();
   const kv = memoryKv();

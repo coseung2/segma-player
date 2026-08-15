@@ -5,6 +5,8 @@ import {
   decodeSubtitleBytes,
   mediaIdentifier,
   parseSrt,
+  parseSubtitle,
+  parseVtt,
   subtitleNameMatches,
 } from "./player-subtitle.js";
 
@@ -47,6 +49,24 @@ test("SRT parsing handles CRLF, multiline cues, and ordering", () => {
   assert.equal(cuesAt(cues, 1).text, "첫 번째");
   assert.equal(cuesAt(cues, 3.05), null);
   assert.equal(cuesAt(cues, 60.5).text, "세 번째");
+});
+
+test("WEBVTT parsing handles short timestamps and cue settings", () => {
+  const cues = parseVtt([
+    "WEBVTT",
+    "",
+    "00:01.250 --> 00:03.500 align:start",
+    "日本語の字幕",
+    "",
+    "00:00:05.000 --> 00:00:07.000",
+    "次の字幕",
+    "",
+  ].join("\n"));
+  assert.equal(cues.length, 2);
+  assert.deepEqual(cues[0], { start: 1.25, end: 3.5, text: "日本語の字幕" });
+  assert.deepEqual(parseSubtitle("WEBVTT\n\n00:00.000 --> 00:01.000\n字幕"), [
+    { start: 0, end: 1, text: "字幕" },
+  ]);
 });
 
 test("subtitle decoding falls back to euc-kr for CP949 bytes", async () => {

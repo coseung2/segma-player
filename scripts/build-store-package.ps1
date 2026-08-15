@@ -56,6 +56,7 @@ $runtimeFiles = @(
   'filename-template.js',
   'hls-download.js',
   'hls.js',
+  'i18n.js',
   'level5-key-error.js',
   'level5-page-bridge.js',
   'license.js',

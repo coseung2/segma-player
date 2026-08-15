@@ -50,7 +50,7 @@ test("download progress renders under its detected video card with accessible st
   assert.match(script, /buildJobCard\(job, \{ inline: true \}\)/);
   assert.match(script, /buildJobCard\(job\)/);
   assert.match(script, /container\.hidden = collapsed \|\| surfaceJobs\.length === 0/);
-  assert.match(script, /downloadJobView\(job\)/);
+  assert.match(script, /downloadJobView\(job, t\)/);
   assert.doesNotMatch(script, /job-marker/);
   assert.match(script, /role", "progressbar"/);
   assert.match(script, /aria-valuenow/);
@@ -217,6 +217,41 @@ test("every direct filesystem save allocates a non-overwriting filename", async 
   assert.match(hls, /createUniqueFile\(saveHandle, filename\)/);
   assert.doesNotMatch(hls, /saveHandle\.getFileHandle\(filename, \{ create: true \}\)/);
   assert.match(saveDirectory, /numberedFilename/);
+});
+
+test("popup and settings render every visible string through the locale table", async () => {
+  const [popupHtml, popupScript, optionsHtml, optionsScript] = await Promise.all([
+    readFile(new URL("./popup.html", import.meta.url), "utf8"),
+    readFile(new URL("./popup.js", import.meta.url), "utf8"),
+    readFile(new URL("./options.html", import.meta.url), "utf8"),
+    readFile(new URL("./options.js", import.meta.url), "utf8"),
+  ]);
+  const korean = /[\uAC00-\uD7A3]/;
+  assert.doesNotMatch(popupHtml, korean, "popup.html must not hardcode Korean copy");
+  assert.doesNotMatch(optionsHtml, korean, "options.html must not hardcode Korean copy");
+  for (const [name, script] of [["popup.js", popupScript], ["options.js", optionsScript]]) {
+    for (const line of script.split("\n")) {
+      if (!korean.test(line)) continue;
+      assert.match(line.trim(), /^\/\//, `${name} keeps Korean only in comments: ${line.trim()}`);
+    }
+  }
+  assert.match(optionsHtml, /id="ui-locale"/);
+  assert.match(optionsScript, /SUPPORTED_LOCALES/);
+  assert.match(optionsScript, /saveLocale\(next\)/);
+  assert.match(popupScript, /applyLocale\(await loadLocale\(\)\)/);
+  assert.match(popupScript, /changes\[LOCALE_STORAGE_KEY\]/);
+});
+
+test("the in-page download overlay follows the stored UI locale", async () => {
+  const content = await readFile(new URL("./content.js", import.meta.url), "utf8");
+  assert.match(content, /OVERLAY_LOCALE_KEY = "auraUiLocale"/);
+  for (const locale of ["ko", "en", "ja", "zh"]) {
+    assert.match(content, new RegExp(`\\b${locale}:\\s*\\{`), `overlay is missing ${locale}`);
+  }
+  assert.match(content, /overlayText\("heading"\)/);
+  assert.match(content, /syncOverlayLocale/);
+  // Progress is still parsed from the canonical Korean pipeline text.
+  assert.match(content, /저장 중…/);
 });
 
 async function launchPopupLayoutBrowser() {

@@ -373,14 +373,67 @@
     return host;
   }
 
-  const DOWNLOAD_STATUS_LABELS = {
-    queued: "대기",
-    running: "진행 중",
-    paused: "일시정지",
-    completed: "완료",
-    failed: "실패",
-    cancelled: "취소됨",
+  // The content script is a classic script and cannot import i18n.js, so the
+  // overlay keeps its own copy of the few strings it renders. The active locale
+  // comes from the same storage key the popup and settings write.
+  const OVERLAY_LOCALE_KEY = "auraUiLocale";
+  const OVERLAY_TEXT = {
+    ko: {
+      heading: "다운로드", close: "다운로드 창 닫기", cancel: "취소", cancelling: "취소 중",
+      fallbackTitle: "다운로드",
+      queued: "대기", running: "진행 중", paused: "일시정지", completed: "완료", failed: "실패", cancelled: "취소됨",
+    },
+    en: {
+      heading: "Downloads", close: "Close the download panel", cancel: "Cancel", cancelling: "Cancelling",
+      fallbackTitle: "Download",
+      queued: "Queued", running: "In progress", paused: "Paused", completed: "Done", failed: "Failed", cancelled: "Cancelled",
+    },
+    ja: {
+      heading: "ダウンロード", close: "ダウンロード画面を閉じる", cancel: "キャンセル", cancelling: "キャンセル中",
+      fallbackTitle: "ダウンロード",
+      queued: "待機", running: "進行中", paused: "一時停止", completed: "完了", failed: "失敗", cancelled: "キャンセル",
+    },
+    zh: {
+      heading: "下载", close: "关闭下载面板", cancel: "取消", cancelling: "正在取消",
+      fallbackTitle: "下载",
+      queued: "等待", running: "进行中", paused: "已暂停", completed: "完成", failed: "失败", cancelled: "已取消",
+    },
   };
+  let overlayLocale = "en";
+
+  function normalizeOverlayLocale(value) {
+    const base = String(value || "").toLowerCase().replace("_", "-").split("-")[0];
+    return Object.prototype.hasOwnProperty.call(OVERLAY_TEXT, base) ? base : null;
+  }
+
+  function overlayText(key) {
+    const table = OVERLAY_TEXT[overlayLocale] || OVERLAY_TEXT.en;
+    return table[key] ?? OVERLAY_TEXT.en[key] ?? key;
+  }
+
+  async function syncOverlayLocale() {
+    try {
+      const entry = await chrome.storage.local.get(OVERLAY_LOCALE_KEY);
+      const stored = normalizeOverlayLocale(entry?.[OVERLAY_LOCALE_KEY]);
+      if (stored) {
+        overlayLocale = stored;
+        return;
+      }
+    } catch {
+      // Storage is unavailable here; fall back to the browser UI language.
+    }
+    overlayLocale = normalizeOverlayLocale(navigator.language) || "en";
+  }
+
+  try {
+    chrome.storage?.onChanged?.addListener((changes, area) => {
+      if (area !== "local" || !changes[OVERLAY_LOCALE_KEY]) return;
+      const next = normalizeOverlayLocale(changes[OVERLAY_LOCALE_KEY].newValue);
+      if (next) overlayLocale = next;
+    });
+  } catch {
+    // Storage change events are optional for the overlay.
+  }
 
   function downloadOverlayPercent(job) {
     const message = String(job?.statusText || "");
@@ -406,10 +459,10 @@
     const info = document.createElement("div");
     info.setAttribute("style", "flex:1;min-width:0;");
     const title = document.createElement("div");
-    title.textContent = typeof job.title === "string" && job.title ? job.title : "다운로드";
+    title.textContent = typeof job.title === "string" && job.title ? job.title : overlayText("fallbackTitle");
     title.setAttribute("style", "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#f4f7fb;font-size:11px;font-weight:700;");
     const status = document.createElement("div");
-    const label = DOWNLOAD_STATUS_LABELS[job.status] || "진행 중";
+    const label = overlayText(job.status) || overlayText("running");
     const percent = job.status === "running" ? downloadOverlayPercent(job) : null;
     const message = String(job.status === "failed" ? (job.error || job.statusText || label) : (job.statusText || label));
     status.textContent = percent !== null ? `${label} · ${percent}%` : `${label} · ${message}`;
@@ -421,11 +474,11 @@
     if (ACTIVE_DOWNLOAD_STATUSES.has(job.status)) {
       const cancel = document.createElement("button");
       cancel.type = "button";
-      cancel.textContent = "취소";
+      cancel.textContent = overlayText("cancel");
       cancel.setAttribute("style", "border:0;border-radius:6px;background:transparent;color:#d09a97;cursor:pointer;font-size:10px;font-weight:700;padding:4px 6px;");
       cancel.addEventListener("click", async () => {
         cancel.disabled = true;
-        cancel.textContent = "취소 중";
+        cancel.textContent = overlayText("cancelling");
         await chrome.runtime.sendMessage({ type: "cancel-download-job", jobId: job.id }).catch(() => null);
         void refreshDownloadOverlay();
       });
@@ -459,12 +512,12 @@
     const head = document.createElement("div");
     head.setAttribute("style", "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;");
     const heading = document.createElement("div");
-    heading.textContent = "다운로드";
+    heading.textContent = overlayText("heading");
     heading.setAttribute("style", "color:#f4f7fb;font-size:12px;font-weight:800;");
     const close = document.createElement("button");
     close.type = "button";
     close.textContent = "×";
-    close.setAttribute("aria-label", "다운로드 창 닫기");
+    close.setAttribute("aria-label", overlayText("close"));
     close.setAttribute("style", "border:0;background:transparent;color:#8b9ab0;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;");
     close.addEventListener("click", cleanDownloadOverlay);
     head.append(heading, close);
@@ -475,7 +528,7 @@
 
   function showDownloadOverlay() {
     if (window !== window.top) return;
-    void refreshDownloadOverlay();
+    void syncOverlayLocale().then(() => refreshDownloadOverlay());
     if (downloadOverlayTimer !== null) clearInterval(downloadOverlayTimer);
     downloadOverlayTimer = setInterval(() => void refreshDownloadOverlay(), 1000);
   }

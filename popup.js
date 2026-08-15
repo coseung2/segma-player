@@ -2,9 +2,19 @@ import { candidateDownloadErrorMessage } from "./download-errors.js";
 import { isDownloadableMediaType } from "./candidate.js";
 import { downloadJobView, retryableDownloadJob } from "./download-job-view.js";
 import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
-import { PRO_BENEFITS, productPlan, youtubeQualityAllowed } from "./product-plan.js";
+import { productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
 import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
+import {
+  LOCALE_STORAGE_KEY,
+  applyStaticTranslations,
+  loadLocale,
+  localizeStatusText,
+  normalizeLocale,
+  translator,
+} from "./i18n.js";
+
+let t = translator();
 
 const byId = (id) => document.getElementById(id);
 const shellElement = document.querySelector(".popup-shell");
@@ -37,6 +47,14 @@ let currentPlan = productPlan(PRODUCT_EDITION);
 let qualityCheckTimer = null;
 let lastQualityCheckUrl = "";
 let qualityWasUserSelected = false;
+
+function planLabel(plan) {
+  return plan.id === "pro" ? t("plan.pro") : t("plan.free");
+}
+
+function proBenefits() {
+  return [t("plan.benefitConcurrent"), t("plan.benefitSize"), t("plan.benefitQuality")];
+}
 
 function syncSettingsFrameHeight() {
   const frame = byId("settings-frame");
@@ -74,14 +92,16 @@ const STATIC_QUALITIES = ["1080", "720", "480"];
 
 function qualityLabel(value, exact = false) {
   if (value === "best") {
-    return currentPlan.id === "free" ? "최고 화질 · 자동 · Pro" : "최고 화질 · 자동";
+    return currentPlan.id === "free"
+      ? `${t("quality.bestAuto")}${t("quality.proSuffix")}`
+      : t("quality.bestAuto");
   }
   const height = Number(value);
   if (!Number.isFinite(height)) return String(value);
-  const proSuffix = currentPlan.id === "free" && height > 1080 ? " · Pro" : "";
+  const proSuffix = currentPlan.id === "free" && height > 1080 ? t("quality.proSuffix") : "";
   // Detected options are the video's real heights, so they are choices
-  // ("1080p"); only the fallback list works as a cap ("최대 1080p").
-  return exact ? `${height}p${proSuffix}` : `최대 ${height}p${proSuffix}`;
+  // ("1080p"); only the fallback list works as a cap ("up to 1080p").
+  return `${t(exact ? "quality.exact" : "quality.cap", { height })}${proSuffix}`;
 }
 
 function rebuildQualityOptions(values, exact = false) {
@@ -141,14 +161,14 @@ async function refreshAvailableQualities(url) {
 }
 
 function renderPlan() {
-  byId("plan-badge").textContent = currentPlan.label;
+  byId("plan-badge").textContent = planLabel(currentPlan);
   byId("plan-summary").textContent = currentPlan.id === "pro"
-    ? "동시 제한 없음 · 용량 제한 없음 · 최고 화질"
-    : "동시 1개 · 파일당 1GB";
+    ? t("plan.summaryPro")
+    : t("plan.summaryFree");
   const offer = byId("pro-offer");
   offer.hidden = currentPlan.id === "pro";
   if (!offer.hidden) {
-    byId("pro-benefits").textContent = `Pro · ${PRO_BENEFITS.join(" · ")}`;
+    byId("pro-benefits").textContent = `${t("plan.pro")} · ${proBenefits().join(" · ")}`;
     const upgrade = byId("upgrade-link");
     if (/^https:\/\//i.test(UPGRADE_URL)) {
       upgrade.href = UPGRADE_URL;
@@ -164,8 +184,8 @@ function renderPlan() {
 async function refreshSaveStatus() {
   const handle = await getStoredSaveDirectory();
   const statusText = handle
-    ? `저장 경로: ${handle.name}`
-    : "저장 폴더 미설정 — 다운로드할 때 선택 창이 열립니다.";
+    ? t("save.path", { name: handle.name })
+    : t("save.missing");
   for (const el of saveStatusElements) el.textContent = statusText;
   syncLinkActivityState();
 }
@@ -263,25 +283,27 @@ function createPreview(candidate) {
     video.muted = true;
     video.playsInline = true;
     video.preload = "metadata";
-    video.setAttribute("aria-label", `${candidate.pageTitle || "미디어"} 미리보기`);
+    video.setAttribute("aria-label", t("media.previewLabel", {
+      title: candidate.pageTitle || t("media.fallbackTitle"),
+    }));
     video.addEventListener("error", () => {
       video.remove();
-      preview.append(text("span", "preview-label", "미리보기 없음"));
+      preview.append(text("span", "preview-label", t("media.noPreview")));
     }, { once: true });
     preview.append(video);
     return preview;
   }
   preview.append(text("span", "preview-label", candidate.mediaType.startsWith("HLS") || candidate.mediaType === "DASH"
-    ? "스트리밍 영상" : "미리보기 없음"));
+    ? t("media.streamPreview") : t("media.noPreview")));
   return preview;
 }
 
 function mediaTypeLabel(mediaType) {
   return {
-    PROGRESSIVE: "직접 영상",
-    HLS_MASTER: "스트리밍",
-    HLS_MEDIA: "스트리밍",
-    YOUTUBE: "YouTube",
+    PROGRESSIVE: t("media.progressive"),
+    HLS_MASTER: t("media.stream"),
+    HLS_MEDIA: t("media.stream"),
+    YOUTUBE: t("media.youtube"),
   }[mediaType] || mediaType;
 }
 
@@ -316,10 +338,10 @@ function renderCandidates(candidates) {
   const sorted = [...downloadable].reverse().sort((a, b) => Number(b.main) - Number(a.main));
   const hasMain = sorted.some((item) => item.main && !String(item.displayUrl || "").startsWith("blob:"));
   const shown = mainOnlyElement.checked && hasMain ? sorted.filter((item) => item.main) : sorted;
-  summaryElement.textContent = `${shown.length}개 후보`;
+  summaryElement.textContent = t("detect.candidateCount", { count: shown.length });
   candidatesElement.replaceChildren();
   if (!shown.length) {
-    candidatesElement.append(text("div", "empty-state", "영상을 재생한 뒤 다시 감지해 보세요."));
+    candidatesElement.append(text("div", "empty-state", t("detect.empty")));
     return;
   }
   for (const candidate of shown) {
@@ -333,7 +355,7 @@ function renderCandidates(candidates) {
     const info = document.createElement("div");
     info.className = "candidate-info";
     info.append(
-      text("h2", "candidate-title", candidate.pageTitle || "제목 없음"),
+      text("h2", "candidate-title", candidate.pageTitle || t("detect.untitled")),
       text("p", "candidate-origin", candidate.pageOrigin || ""),
       text("p", "candidate-url", candidate.displayUrl || ""),
     );
@@ -341,31 +363,31 @@ function renderCandidates(candidates) {
     const meta = document.createElement("div");
     meta.className = "candidate-meta";
     const label = mediaTypeLabel(candidate.mediaType);
-    meta.append(text("span", "badge", candidate.main ? `${label} · 메인` : label));
-    const button = text("button", "download-button", "다운로드");
+    meta.append(text("span", "badge", candidate.main ? t("media.mainSuffix", { label }) : label));
+    const button = text("button", "download-button", t("action.download"));
     button.type = "button";
     button.disabled = !isDownloadableMediaType(candidate.mediaType);
     button.addEventListener("click", async () => {
       button.disabled = true;
-      button.textContent = "요청 중…";
+      button.textContent = t("action.requesting");
       try {
-        button.textContent = "요청 중…";
+        button.textContent = t("action.requesting");
         button.removeAttribute("aria-label");
         const folder = await ensureSaveFolder();
         if (!folder) {
-          throw new Error("저장 폴더가 필요합니다. 다시 누르면 폴더 선택 창이 열립니다. (Downloads 안에 새 폴더를 만들어 선택하세요)");
+          throw new Error(t("save.needFolderHint"));
         }
         const response = await chrome.runtime.sendMessage({
           type: "download-candidate",
           candidateId: candidate.id,
         });
         if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
-        button.textContent = "다운로드 중";
+        button.textContent = t("action.downloading");
         void requestJobs();
       } catch (error) {
-        statusElement.textContent = error?.message || "다운로드를 시작하지 못했습니다.";
+        statusElement.textContent = error?.message || t("link.startFailed");
         button.disabled = false;
-        button.textContent = "다시 시도";
+        button.textContent = t("action.tryAgain");
       }
     });
     meta.append(button);
@@ -376,18 +398,18 @@ function renderCandidates(candidates) {
 }
 
 async function requestCandidates() {
-  statusElement.textContent = "현재 페이지의 미디어를 확인하는 중…";
+  statusElement.textContent = t("detect.scanning");
   try {
     const response = await chrome.runtime.sendMessage({ type: "list-candidates" });
     renderCandidates(response?.candidates || []);
-    statusElement.textContent = "감지된 항목에서 다운로드를 누르세요.";
+    statusElement.textContent = t("detect.ready");
   } catch {
-    statusElement.textContent = "확장 서비스를 다시 로드한 뒤 시도해 주세요.";
+    statusElement.textContent = t("detect.reloadExtension");
   }
 }
 
 function buildJobCard(job, { inline = false } = {}) {
-  const view = downloadJobView(job);
+  const view = downloadJobView(job, t);
   const card = document.createElement("article");
   card.className = inline ? "job-card inline-job-card" : "job-card";
   const head = document.createElement("div");
@@ -422,35 +444,35 @@ function buildJobCard(job, { inline = false } = {}) {
     feedback.setAttribute("aria-live", "polite");
     statusRow.append(status, feedback);
     if (cancellable) {
-      const cancel = text("button", "job-cancel-button", "취소");
+      const cancel = text("button", "job-cancel-button", t("action.cancel"));
       cancel.type = "button";
       cancel.addEventListener("click", async () => {
         cancel.disabled = true;
-        cancel.textContent = "취소 중…";
+        cancel.textContent = t("action.cancelling");
         feedback.textContent = "";
         try {
           const response = await chrome.runtime.sendMessage({ type: "cancel-download-job", jobId: job.id });
           if (!response?.ok) throw new Error(response?.error || "cancel-failed");
           await requestJobs();
         } catch {
-          feedback.textContent = "취소하지 못했습니다.";
+          feedback.textContent = t("action.cancelFailed");
           cancel.disabled = false;
-          cancel.textContent = "취소";
+          cancel.textContent = t("action.cancel");
         }
       });
       statusRow.append(cancel);
     }
     if (retryable) {
-      const retry = text("button", "job-retry-button", "재시도");
+      const retry = text("button", "job-retry-button", t("action.retry"));
       retry.type = "button";
       retry.addEventListener("click", async () => {
         retry.disabled = true;
-        retry.textContent = "재시도 중…";
+        retry.textContent = t("action.retrying");
         feedback.textContent = "";
         try {
           const folder = await ensureSaveFolder({ forcePick: job.errorCode === "save-permission-required" });
           if (!folder) {
-            throw new Error("저장 폴더가 필요합니다. 다시 누르면 폴더 선택 창이 열립니다.");
+            throw new Error(t("save.needFolder"));
           }
           const response = await chrome.runtime.sendMessage({
             type: "retry-download-job",
@@ -459,9 +481,9 @@ function buildJobCard(job, { inline = false } = {}) {
           if (!response?.ok) throw new Error(response?.error || "download-job-retry-failed");
           await requestJobs();
         } catch {
-          feedback.textContent = "재시도 요청에 실패했습니다.";
+          feedback.textContent = t("action.retryFailed");
           retry.disabled = false;
-          retry.textContent = "재시도";
+          retry.textContent = t("action.retry");
         }
       });
       statusRow.append(retry);
@@ -501,7 +523,7 @@ function renderJobs(jobs) {
     const collapsed = collapsedJobSurfaces.has(surface);
     config.tools.hidden = (surface === "detect" ? detectJobs : linkJobs).length === 0;
     config.toggle.setAttribute("aria-expanded", String(!collapsed));
-    config.toggle.textContent = collapsed ? "진행 목록 펼치기" : "진행 목록 접기";
+    config.toggle.textContent = collapsed ? t("jobs.expand") : t("jobs.collapse");
     config.clear.disabled = !(surface === "detect" ? detectJobs : linkJobs)
       .some((job) => ["completed", "failed", "cancelled"].includes(job.status));
     const container = config.container;
@@ -564,14 +586,14 @@ function updateLinkPanel() {
 async function directDownload() {
   const input = byId("direct-url");
   const button = byId("download-url");
-  if (!input.value.trim()) { setDirectStatus("주소를 입력해 주세요."); return; }
+  if (!input.value.trim()) { setDirectStatus(t("link.needAddress")); return; }
   button.disabled = true;
-  setDirectStatus("주소를 확인하는 중…");
+  setDirectStatus(t("link.checking"));
   try {
     const value = input.value.trim();
     const folder = await ensureSaveFolder();
     if (!folder) {
-      setDirectStatus("저장 폴더가 필요합니다. 다시 누르면 폴더 선택 창이 열립니다. (Downloads 안에 새 폴더를 만들어 선택하세요)");
+      setDirectStatus(t("save.needFolderHint"));
       return;
     }
     if (isYouTubeUrl(value)) {
@@ -581,13 +603,13 @@ async function directDownload() {
         quality: byId("youtube-quality").value,
       });
       if (!response?.ok) {
-        if (response?.error === "pro-feature-required") throw new Error("이 화질은 Pro에서 사용할 수 있습니다.");
-        if (response?.error === "invalid-youtube-url") throw new Error("올바른 YouTube 주소가 아닙니다.");
+        if (response?.error === "pro-feature-required") throw new Error(t("link.proQuality"));
+        if (response?.error === "invalid-youtube-url") throw new Error(t("link.invalidYouTube"));
         const detail = typeof response?.error === "string" && response.error ? response.error : "";
         if (detail) {
           throw new Error(detail);
         }
-        throw new Error("유튜브 저장에 실패했습니다. 서버 연결과 옵션의 서버 주소를 확인해 주세요.");
+        throw new Error(t("link.youtubeFailed"));
       }
     } else {
       const response = await chrome.runtime.sendMessage({
@@ -596,10 +618,10 @@ async function directDownload() {
       });
       if (!response?.ok) throw new Error(candidateDownloadErrorMessage(response?.error));
     }
-    setDirectStatus("다운로드를 시작했습니다.");
+    setDirectStatus(t("link.started"));
     void requestJobs();
   } catch (error) {
-    setDirectStatus(error?.message || "다운로드를 시작하지 못했습니다.");
+    setDirectStatus(error?.message || t("link.startFailed"));
   } finally { button.disabled = false; }
 }
 
@@ -628,8 +650,31 @@ byId("direct-url").addEventListener("keydown", (event) => { if (event.key === "E
 byId("direct-url").addEventListener("input", updateLinkPanel);
 mainOnlyElement.addEventListener("change", () => renderCandidates(lastCandidates));
 chrome.runtime.onMessage.addListener((message) => { if (message?.type === "download-jobs-changed") void requestJobs(); });
-renderPlan();
-updateLinkPanel();
-void refreshSaveStatus();
-void requestJobs();
-void requestCandidates();
+
+function applyLocale(locale) {
+  t = translator(locale);
+  document.documentElement.lang = t.locale;
+  document.title = t("app.title");
+  applyStaticTranslations(document, t);
+  const frame = byId("settings-frame");
+  if (frame) frame.title = t("settings.title");
+  renderPlan();
+  renderCandidates(lastCandidates);
+  renderJobs(lastJobs);
+  void refreshSaveStatus();
+}
+
+chrome.storage?.onChanged?.addListener((changes, area) => {
+  if (area !== "local" || !changes[LOCALE_STORAGE_KEY]) return;
+  const next = normalizeLocale(changes[LOCALE_STORAGE_KEY].newValue);
+  if (next && next !== t.locale) applyLocale(next);
+});
+
+async function start() {
+  applyLocale(await loadLocale());
+  updateLinkPanel();
+  void requestJobs();
+  void requestCandidates();
+}
+
+void start();

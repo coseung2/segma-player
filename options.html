@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Aura Media 설정</title>
+    <title data-i18n="settings.title">Aura Media settings</title>
     <style>
       :root { color-scheme: dark; font-family: "Segoe UI", "Malgun Gothic", sans-serif; background: #10141c; color: #f4f7fb; }
       body { width: 100%; margin: 0; padding: 18px; box-sizing: border-box; background: #10141c; }
@@ -37,55 +37,60 @@
   </head>
   <body>
     <section id="license-section">
-      <p class="label">Pro 라이선스</p>
+      <p class="label" data-i18n="settings.license">Pro license</p>
       <div class="license-device-row">
-        <span id="license-device-status" class="status" role="status" aria-live="polite">키당 기기 3개 제한</span>
+        <span id="license-device-status" class="status" role="status" aria-live="polite"></span>
         <span id="license-auth-status" class="auth-status" role="status" aria-live="polite"></span>
       </div>
       <div class="license-key-field">
-        <input id="license-key" type="text" placeholder="AM-XXXX…" autocomplete="off" />
-        <button id="license-copy" class="input-icon-button" type="button" aria-label="키 복사" title="키 복사">
+        <input id="license-key" type="text" data-i18n-placeholder="settings.keyPlaceholder" placeholder="AM-XXXX…" autocomplete="off" />
+        <button id="license-copy" class="input-icon-button" type="button" data-i18n-label="settings.copyKey" aria-label="Copy key" title="Copy key">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
           </svg>
         </button>
       </div>
-      <p id="license-status" class="status" role="status" aria-live="polite">확인 중…</p>
+      <p id="license-status" class="status" role="status" aria-live="polite" data-i18n="settings.checking">Checking…</p>
       <div class="buttons">
-        <button id="license-activate" class="primary" type="button">키 등록</button>
+        <button id="license-activate" class="primary" type="button" data-i18n="settings.activateKey">Register key</button>
       </div>
     </section>
     <section id="purchase-section">
-      <p class="label">Pro 구매 · USDT</p>
-      <p class="desc">USDT-TRC20으로 결제하면 즉시 라이선스 키가 발급됩니다. 네트워크와 금액을 정확히 확인하세요.</p>
-      <label class="label" for="purchase-period">기간</label>
+      <p class="label" data-i18n="settings.purchase">Buy Pro · USDT</p>
+      <p class="desc" data-i18n="settings.purchaseDesc">Pay with USDT-TRC20 and the license key is issued immediately.</p>
+      <label class="label" for="purchase-period" data-i18n="settings.period">Period</label>
       <select id="purchase-period">
-        <option value="month">1개월 · $5.99 USDT</option>
-        <option value="year">1년 · $49 USDT</option>
+        <option value="month" data-i18n="settings.periodMonth">1 month · $5.99 USDT</option>
+        <option value="year" data-i18n="settings.periodYear">1 year · $49 USDT</option>
       </select>
       <div class="buttons">
-        <button id="purchase-create" class="primary" type="button">주문 생성</button>
+        <button id="purchase-create" class="primary" type="button" data-i18n="settings.createOrder">Create order</button>
       </div>
       <div id="purchase-order" hidden>
         <p id="purchase-address" class="status address-value"></p>
         <p id="purchase-amount" class="status"></p>
         <div class="purchase-field">
-          <input id="purchase-tx" type="text" placeholder="송금 후 트랜잭션 해시(TxID) 입력" autocomplete="off" />
+          <input id="purchase-tx" type="text" data-i18n-placeholder="settings.txPlaceholder" placeholder="Enter the transaction hash (TxID) after sending" autocomplete="off" />
         </div>
         <div class="buttons">
-          <button id="purchase-verify" class="primary" type="button">결제 확인</button>
+          <button id="purchase-verify" class="primary" type="button" data-i18n="settings.verifyPayment">Verify payment</button>
         </div>
       </div>
       <p id="purchase-status" class="status" role="status" aria-live="polite"></p>
     </section>
     <section>
-      <p class="label">저장 폴더</p>
-      <p class="desc">새 폴더를 만들어 선택해 주세요. 선택한 폴더에 자동으로 저장됩니다.</p>
-      <p id="parallel-status" class="status" role="status" aria-live="polite">확인 중…</p>
+      <p class="label" data-i18n="settings.saveFolder">Save folder</p>
+      <p class="desc" data-i18n="settings.saveFolderDesc">Create a new folder and select it.</p>
+      <p id="parallel-status" class="status" role="status" aria-live="polite" data-i18n="settings.checking">Checking…</p>
       <div class="buttons">
-        <button id="parallel-folder" class="ghost" type="button">저장 폴더 변경</button>
+        <button id="parallel-folder" class="ghost" type="button" data-i18n="settings.changeFolder">Change save folder</button>
       </div>
+    </section>
+    <section>
+      <p class="label" data-i18n="settings.language">Display language</p>
+      <p class="desc" data-i18n="settings.languageDesc">Language used in the popup and settings.</p>
+      <select id="ui-locale" data-i18n-label="settings.language" aria-label="Display language"></select>
     </section>
     <script type="module" src="options.js"></script>
   </body>

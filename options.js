@@ -1,6 +1,18 @@
 import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
 import { LICENSE_API_URL } from "./license.js";
+import {
+  LOCALE_NAMES,
+  LOCALE_STORAGE_KEY,
+  SUPPORTED_LOCALES,
+  applyStaticTranslations,
+  loadLocale,
+  normalizeLocale,
+  saveLocale,
+  translator,
+} from "./i18n.js";
+
 const PURCHASE_API_ORIGIN = LICENSE_API_URL.replace(/\/api\/license$/, "");
+let t = translator();
 const licenseStatusElement = document.querySelector("#license-status");
 const licenseDeviceStatusElement = document.querySelector("#license-device-status");
 const licenseAuthStatusElement = document.querySelector("#license-auth-status");
@@ -18,31 +30,29 @@ const purchaseAmount = document.querySelector("#purchase-amount");
 const purchaseTxInput = document.querySelector("#purchase-tx");
 const purchaseVerifyButton = document.querySelector("#purchase-verify");
 const purchaseStatus = document.querySelector("#purchase-status");
+const localeSelect = document.querySelector("#ui-locale");
 let purchaseOrderId = null;
 
 async function refreshParallelStatus() {
   const handle = await getStoredSaveDirectory();
   parallelStatusElement.textContent = handle
-    ? `저장 경로: ${handle.name}`
-    : "저장 폴더가 아직 없습니다. 아래 버튼으로 새 폴더를 만들어 선택해 주세요.";
+    ? t("save.path", { name: handle.name })
+    : t("settings.folderMissing");
 }
 
 parallelFolderButton.addEventListener("click", async () => {
   try {
     const handle = await ensureSaveDirectory({ pick: true });
     parallelStatusElement.textContent = handle
-      ? `저장 경로: ${handle.name}`
-      : "폴더 선택이 취소되었습니다.";
+      ? t("save.path", { name: handle.name })
+      : t("settings.folderCancelled");
   } catch {
-    parallelStatusElement.textContent = "폴더 선택이 차단됐어요. Downloads 루트 대신 새 폴더를 만들어 선택해 주세요.";
+    parallelStatusElement.textContent = t("settings.folderBlocked");
   }
 });
 
-void refreshParallelStatus();
-
-
 async function refreshLicenseStatus() {
-  licenseStatusElement.textContent = "확인 중…";
+  licenseStatusElement.textContent = t("settings.checking");
   try {
     const response = await chrome.runtime.sendMessage({ type: "license-status" });
     const key = typeof response?.key === "string" ? response.key : "";
@@ -54,34 +64,36 @@ async function refreshLicenseStatus() {
     const devices = typeof response?.devices === "number" ? response.devices : null;
     const limit = typeof response?.limit === "number" ? response.limit : 3;
     licenseDeviceStatusElement.textContent = devices === null
-      ? `키당 기기 ${limit}개 제한`
-      : `키당 기기 ${limit}개 제한 · 현재 ${devices}/${limit}`;
+      ? t("settings.deviceLimit", { limit })
+      : t("settings.deviceLimitUsed", { limit, devices });
     const authenticated = Boolean(response?.ok && response.edition === "pro" && key);
-    licenseAuthStatusElement.textContent = authenticated ? "인증됨" : "미인증";
+    licenseAuthStatusElement.textContent = authenticated
+      ? t("settings.authenticated")
+      : t("settings.unauthenticated");
     licenseAuthStatusElement.classList.toggle("authenticated", authenticated);
     licenseStatusElement.textContent = "";
   } catch {
-    licenseStatusElement.textContent = "상태를 확인할 수 없습니다.";
+    licenseStatusElement.textContent = t("settings.statusUnavailable");
   }
 }
 
 licenseCopyButton.addEventListener("click", async () => {
   const key = licenseKeyInput.value.trim();
   if (!key) {
-    licenseStatusElement.textContent = "복사할 키가 없습니다.";
+    licenseStatusElement.textContent = t("settings.noKeyToCopy");
     return;
   }
   try {
     await navigator.clipboard.writeText(key);
-    licenseStatusElement.textContent = "키를 복사했습니다.";
+    licenseStatusElement.textContent = t("settings.keyCopied");
   } catch {
     licenseKeyInput.focus();
     licenseKeyInput.select();
     try {
       document.execCommand("copy");
-      licenseStatusElement.textContent = "키를 복사했습니다.";
+      licenseStatusElement.textContent = t("settings.keyCopied");
     } catch {
-      licenseStatusElement.textContent = "키를 직접 선택해 복사해 주세요.";
+      licenseStatusElement.textContent = t("settings.copyManually");
     }
   }
 });
@@ -89,31 +101,29 @@ licenseCopyButton.addEventListener("click", async () => {
 licenseActivateButton.addEventListener("click", async () => {
   const key = licenseKeyInput.value.trim();
   if (!key) {
-    licenseStatusElement.textContent = "키를 입력해 주세요.";
+    licenseStatusElement.textContent = t("settings.enterKey");
     return;
   }
-  licenseStatusElement.textContent = "확인 중…";
+  licenseStatusElement.textContent = t("settings.checking");
   const response = await chrome.runtime.sendMessage({ type: "license-activate", key });
   if (response?.ok) {
     await refreshLicenseStatus();
   } else if (response?.error === "license-pending") {
-    licenseStatusElement.textContent = "키가 등록되었습니다. 개발자 승인 후 자동으로 Pro가 적용됩니다.";
+    licenseStatusElement.textContent = t("settings.keyPending");
   } else if (response?.error === "invalid-key") {
-    licenseStatusElement.textContent = "키 형식이 올바르지 않습니다.";
+    licenseStatusElement.textContent = t("settings.keyInvalid");
   } else if (response?.error === "license-server-unreachable") {
-    licenseStatusElement.textContent = "라이선스 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.";
+    licenseStatusElement.textContent = t("settings.keyServerDown");
   } else if (response?.error === "device-limit-reached") {
-    licenseStatusElement.textContent = "기기 3개 제한에 도달했습니다.";
+    licenseStatusElement.textContent = t("settings.keyDeviceLimit");
   } else {
-    licenseStatusElement.textContent = "아직 승인되지 않은 키입니다.";
+    licenseStatusElement.textContent = t("settings.keyNotApproved");
   }
 });
 
-void refreshLicenseStatus();
-
 purchaseCreateButton.addEventListener("click", async () => {
   purchaseCreateButton.disabled = true;
-  purchaseStatus.textContent = "주문 생성 중…";
+  purchaseStatus.textContent = t("settings.creatingOrder");
   try {
     const response = await fetch(`${PURCHASE_API_ORIGIN}/api/pay/order`, {
       method: "POST",
@@ -123,17 +133,20 @@ purchaseCreateButton.addEventListener("click", async () => {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       purchaseStatus.textContent = data?.error === "payment-not-configured"
-        ? "결제가 아직 설정되지 않았습니다."
-        : "주문을 생성하지 못했습니다.";
+        ? t("settings.paymentNotConfigured")
+        : t("settings.orderFailed");
       return;
     }
     purchaseOrderId = data.orderId;
-    purchaseAddress.textContent = `${String(data.network).toUpperCase()} 주소: ${data.walletAddress}`;
-    purchaseAmount.textContent = `결제 금액: ${data.amountUsdt} USDT`;
+    purchaseAddress.textContent = t("settings.walletAddress", {
+      network: String(data.network).toUpperCase(),
+      address: data.walletAddress,
+    });
+    purchaseAmount.textContent = t("settings.payAmount", { amount: data.amountUsdt });
     purchaseOrderBox.hidden = false;
-    purchaseStatus.textContent = "위 주소로 정확한 금액을 보낸 뒤 TxID를 입력해 주세요.";
+    purchaseStatus.textContent = t("settings.sendThenVerify");
   } catch {
-    purchaseStatus.textContent = "주문을 생성하지 못했습니다.";
+    purchaseStatus.textContent = t("settings.orderFailed");
   } finally {
     purchaseCreateButton.disabled = false;
   }
@@ -142,11 +155,11 @@ purchaseCreateButton.addEventListener("click", async () => {
 purchaseVerifyButton.addEventListener("click", async () => {
   const txHash = purchaseTxInput.value.trim();
   if (!txHash || !purchaseOrderId) {
-    purchaseStatus.textContent = "TxID를 입력해 주세요.";
+    purchaseStatus.textContent = t("settings.txRequired");
     return;
   }
   purchaseVerifyButton.disabled = true;
-  purchaseStatus.textContent = "결제 확인 중…";
+  purchaseStatus.textContent = t("settings.verifyingPayment");
   try {
     const response = await fetch(`${PURCHASE_API_ORIGIN}/api/pay/verify`, {
       method: "POST",
@@ -156,17 +169,57 @@ purchaseVerifyButton.addEventListener("click", async () => {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       purchaseStatus.textContent = data?.error === "transaction-not-confirmed"
-        ? "아직 블록체인에 확정되지 않았습니다. 잠시 후 다시 시도하세요."
-        : (data?.error || "결제 확인에 실패했습니다.");
+        ? t("settings.txUnconfirmed")
+        : (data?.error || t("settings.verifyFailed"));
       return;
     }
     licenseKeyInput.value = data.key;
-    purchaseStatus.textContent = "결제가 확인되었습니다. 라이선스 키가 자동 입력됐습니다.";
+    purchaseStatus.textContent = t("settings.paymentConfirmed");
     purchaseOrderBox.hidden = true;
     licenseActivateButton.click();
   } catch {
-    purchaseStatus.textContent = "결제 확인에 실패했습니다.";
+    purchaseStatus.textContent = t("settings.verifyFailed");
   } finally {
     purchaseVerifyButton.disabled = false;
   }
 });
+
+function renderLocaleOptions() {
+  localeSelect.replaceChildren();
+  for (const locale of SUPPORTED_LOCALES) {
+    const option = document.createElement("option");
+    option.value = locale;
+    option.textContent = LOCALE_NAMES[locale];
+    localeSelect.append(option);
+  }
+  localeSelect.value = t.locale;
+}
+
+function applyLocale(locale) {
+  t = translator(locale);
+  document.documentElement.lang = t.locale;
+  document.title = t("settings.title");
+  applyStaticTranslations(document, t);
+  renderLocaleOptions();
+  void refreshParallelStatus();
+  void refreshLicenseStatus();
+}
+
+localeSelect.addEventListener("change", async () => {
+  const next = normalizeLocale(localeSelect.value);
+  if (!next) return;
+  await saveLocale(next);
+  applyLocale(next);
+});
+
+chrome.storage?.onChanged?.addListener((changes, area) => {
+  if (area !== "local" || !changes[LOCALE_STORAGE_KEY]) return;
+  const next = normalizeLocale(changes[LOCALE_STORAGE_KEY].newValue);
+  if (next && next !== t.locale) applyLocale(next);
+});
+
+async function start() {
+  applyLocale(await loadLocale());
+}
+
+void start();

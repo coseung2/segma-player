@@ -283,6 +283,19 @@ test("the in-page download overlay follows the stored UI locale", async () => {
   assert.match(content, /appearance:none;-webkit-appearance:none/);
 });
 
+test("browser playback uses private candidate URLs instead of redacted display text", async () => {
+  const [popup, playback, background] = await Promise.all([
+    readFile(new URL("./popup.js", import.meta.url), "utf8"),
+    readFile(new URL("./playback-addon.js", import.meta.url), "utf8"),
+    readFile(new URL("./background.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(background, /return \{ \.\.\.projection, previewUrl, sourceUrl \}/);
+  assert.match(popup, /card\.dataset\.mediaUrl = candidate\.previewUrl/);
+  assert.match(popup, /card\.dataset\.sourceUrl = candidate\.sourceUrl/);
+  assert.match(playback, /card\.dataset\.mediaUrl \|\| card\.querySelector/);
+  assert.match(playback, /card\.dataset\.sourceUrl \|\| origin/);
+});
+
 async function launchPopupLayoutBrowser() {
   const launchers = [
     () => chromium.launch({ channel: "chrome", headless: true }),

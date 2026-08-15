@@ -224,7 +224,7 @@ function enhanceCandidateCard(card) {
   if (!(card instanceof HTMLElement) || card.dataset.playbackEnhanced === "true") return;
   card.dataset.playbackEnhanced = "true";
 
-  const urlText = card.querySelector(".candidate-url")?.textContent || "";
+  const urlText = card.dataset.mediaUrl || card.querySelector(".candidate-url")?.textContent || "";
   const mediaUrl = playableMediaUrl(urlText);
   if (!mediaUrl) return;
 
@@ -240,7 +240,7 @@ function enhanceCandidateCard(card) {
   button.setAttribute("aria-label", t("playBrowserTitle"));
   button.addEventListener("click", async () => {
     const origin = card.querySelector(".candidate-origin")?.textContent?.trim() || "";
-    playInBrowser(mediaUrl, title, button, origin || await activePageUrl());
+    playInBrowser(mediaUrl, title, button, card.dataset.sourceUrl || origin || await activePageUrl());
   });
   meta.append(button);
 }

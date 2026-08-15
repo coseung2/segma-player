@@ -178,9 +178,19 @@ function secureId() {
   return globalThis.crypto.randomUUID();
 }
 
-function likelyAd(pageTitle, resourceUrl) {
-  const value = `${pageTitle} ${resourceUrl}`.toLowerCase();
-  return ["/ad/", "/ads/", "advert", "doubleclick", "preroll", "vast"].some((marker) => value.includes(marker));
+function likelyAd(pageTitle, resourceUrl, pageUrl = "") {
+  const value = `${pageTitle} ${pageUrl} ${resourceUrl}`.toLowerCase();
+  if (["/ad/", "/ads/", "advert", "doubleclick", "preroll", "vast"].some((marker) => value.includes(marker))) {
+    return true;
+  }
+  return [resourceUrl, pageUrl].some((value) => {
+    try {
+      return /(?:^|\.)(?:growcdnssedge\.com|mayzaent\.com|myavlive\.com|stripchat\.(?:com|mov)|snaptrckr\.fun)$/i
+        .test(new URL(value).hostname);
+    } catch {
+      return false;
+    }
+  });
 }
 
 function fnv1a(value) {
@@ -257,7 +267,7 @@ export function makeCandidate({
     protection: "UNKNOWN",
     support: "UNKNOWN",
     variants: normalizedVariants,
-    likelyAdvertisement: Boolean(likelyAdvertisement) || likelyAd(pageTitle, canonical),
+    likelyAdvertisement: Boolean(likelyAdvertisement) || likelyAd(pageTitle, canonical, pageCanonical?.href || ""),
   };
 }
 

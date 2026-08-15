@@ -1,9 +1,12 @@
 (() => {
   const REQUEST = "aura-level5-key-request-v1";
   const RESPONSE = "aura-level5-key-response-v1";
+  const MEDIA_EVENT = "aura-media-observer-event-v1";
+  const MEDIA_DISCOVERY_REQUEST = "aura-level5-media-discovery-request-v1";
   const WRAPPED_PLAYER = Symbol("aura-level5-player-wrapped");
   let decoderPromise = null;
   const observedHlsSessions = new Set();
+  const reportedManifestUrls = new Set();
 
   function errorCode(error, fallback) {
     const code = typeof error?.message === "string" ? error.message : "";
@@ -30,8 +33,42 @@
     return sessions;
   }
 
+  function reportManifestUrl(value) {
+    const values = Array.isArray(value) ? value : [value];
+    for (const item of values) {
+      try {
+        const url = new URL(item, location.href);
+        if (!/^https?:$/.test(url.protocol) || !/\.(?:m3u8|mpd)$/i.test(url.pathname)
+          || reportedManifestUrls.has(url.href)) continue;
+        reportedManifestUrls.add(url.href);
+        window.postMessage({
+          type: MEDIA_EVENT,
+          kind: "manifest",
+          source: "level5",
+          url: url.href,
+          contentType: url.pathname.toLowerCase().endsWith(".mpd")
+            ? "application/dash+xml" : "application/vnd.apple.mpegurl",
+          text: "",
+          truncated: false,
+        }, "*");
+      } catch {
+        // Ignore player-owned values that are not URLs.
+      }
+    }
+  }
+
+  function reportSessionManifests(hls) {
+    if (!hls) return;
+    reportManifestUrl(hls.url);
+    for (const level of hls.levels || []) reportManifestUrl(level?.url || level?.uri);
+    for (const track of hls.audioTracks || []) reportManifestUrl(track?.url || track?.uri);
+  }
+
   function rememberSession(session) {
     if (session?.hls?.config?.loader) observedHlsSessions.add(session.hls);
+    reportSessionManifests(session?.hls);
+    const manifestEvent = window.Hls?.Events?.MANIFEST_PARSED || "hlsManifestParsed";
+    try { session?.hls?.on?.(manifestEvent, () => reportSessionManifests(session.hls)); } catch { /* best effort */ }
     return session;
   }
 
@@ -271,7 +308,12 @@
   observeLevel5Player();
 
   window.addEventListener("message", async (event) => {
-    if (event.source !== window || event.data?.type !== REQUEST) return;
+    if (event.source !== window) return;
+    if (event.data?.type === MEDIA_DISCOVERY_REQUEST) {
+      for (const hls of activeHlsSessions()) reportSessionManifests(hls);
+      return;
+    }
+    if (event.data?.type !== REQUEST) return;
     const requestId = typeof event.data.requestId === "string" ? event.data.requestId : "";
     let url;
     try {

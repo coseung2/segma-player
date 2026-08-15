@@ -515,6 +515,8 @@ test("YouTube transport resources stay out of media detection candidates", async
   const listed = await runtimeMessage({ type: "list-candidates" }, {});
   assert.equal(listed.response.candidates.some((candidate) => candidate.previewUrl?.includes("googlevideo.com")), false);
   assert.equal(listed.response.candidates.some((candidate) => candidate.previewUrl === "https://cdn.example/normal-video.mp4"), true);
+  assert.equal(listed.response.candidates.find((candidate) => candidate.previewUrl === "https://cdn.example/normal-video.mp4")?.sourceUrl,
+    "https://outer.example/watch");
 });
 
 test("license activation flips the background plan without reinstalling", async () => {

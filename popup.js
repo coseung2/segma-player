@@ -382,7 +382,8 @@ for (const tab of tabs) {
 }
 
 function renderCandidates(candidates) {
-  const downloadable = candidates.filter((candidate) => isDownloadableMediaType(candidate.mediaType));
+  const downloadable = candidates.filter((candidate) => isDownloadableMediaType(candidate.mediaType)
+    && !candidate.likelyAdvertisement);
   lastCandidates = downloadable;
   const sorted = [...downloadable].reverse().sort((a, b) => Number(b.main) - Number(a.main));
   const hasMain = sorted.some((item) => item.main && !String(item.displayUrl || "").startsWith("blob:"));
@@ -396,6 +397,8 @@ function renderCandidates(candidates) {
   for (const candidate of shown) {
     const card = document.createElement("article");
     card.className = "candidate-card";
+    card.dataset.mediaUrl = candidate.previewUrl || "";
+    card.dataset.sourceUrl = candidate.sourceUrl || "";
     const inlineJobs = document.createElement("section");
     inlineJobs.className = "candidate-job-list";
     inlineJobs.dataset.candidateId = candidate.id;

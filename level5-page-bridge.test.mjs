@@ -35,6 +35,7 @@ class Hls15LikeKeyLoader {
 function runBridgeFor({ requestUrl, video = null, playerSession = null }) {
   return new Promise((resolve, reject) => {
     const listeners = new Set();
+    const posted = [];
     let settled = false;
     const sandbox = {
       console,
@@ -56,8 +57,10 @@ function runBridgeFor({ requestUrl, video = null, playerSession = null }) {
         if (type === "message") listeners.add(listener);
       },
       postMessage(message) {
+        posted.push(message);
         if (message?.type === "aura-level5-key-response-v1" && !settled) {
           settled = true;
+          message.posted = posted;
           resolve(message);
         }
       },
@@ -128,6 +131,28 @@ test("captures the Level5Player.play session when the player does not expose vid
   assert.equal(response.ok, true, `expected a cached player key, got error ${response.error}`);
   const bytes = Uint8Array.from(atob(response.key), (character) => character.charCodeAt(0));
   assert.deepEqual([...bytes], Array(16).fill(0x6b));
+});
+
+test("reports the real Level5 HLS manifest for isolated-world detection", async () => {
+  const requestUrl = "https://k.example/v/session?v=video&p=0";
+  const key = new Uint8Array(16).fill(0x6b);
+  const hls = {
+    url: "https://k.vdnext.com/cast2/id/master.m3u8?tok=secret",
+    levels: [{ url: ["https://k.vdnext.com/cast2/id/720p.m3u8?tok=secret"] }],
+    config: { loader: Hls15LikeKeyLoader },
+    streamController: {
+      keyLoader: {
+        keyUriToKeyInfo: new Map([[requestUrl, { decryptdata: { uri: requestUrl, key } }]]),
+      },
+    },
+    on() {},
+  };
+  const response = await runBridgeFor({ requestUrl, playerSession: { hls } });
+  const manifests = response.posted.filter((message) => message.type === "aura-media-observer-event-v1");
+  assert.deepEqual(manifests.map((message) => message.url), [
+    "https://k.vdnext.com/cast2/id/master.m3u8?tok=secret",
+    "https://k.vdnext.com/cast2/id/720p.m3u8?tok=secret",
+  ]);
 });
 
 test("Level5 bridge decodes session responses with the page runtime before loader fallback", () => {

@@ -142,6 +142,23 @@ test("does not promote misleading preview GIF sources to downloadable video", ()
   assert.equal(candidate, null);
 });
 
+test("marks known embedded advertising stream hosts without flagging the primary CDN", () => {
+  const advertisement = makeCandidate({
+    pageTitle: "Video",
+    pageUrl: "https://creative.myavlive.com/widgets/Player",
+    resourceUrl: "https://media-hls.growcdnssedge.com/live/channel.m3u8",
+    contentType: "application/vnd.apple.mpegurl",
+  });
+  const primary = makeCandidate({
+    pageTitle: "Video",
+    pageUrl: "https://missav123.com/ko/example",
+    resourceUrl: "https://surrit.com/video/playlist.m3u8",
+    contentType: "application/vnd.apple.mpegurl",
+  });
+  assert.equal(advertisement?.likelyAdvertisement, true);
+  assert.equal(primary?.likelyAdvertisement, false);
+});
+
 test("does not expose individual HLS transport segments as complete videos", () => {
   const segmentUrl = "https://cdn.example/hls/segment-0075.ts?token=secret";
   assert.equal(isLikelyHlsSegmentUrl(segmentUrl), true);

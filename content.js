@@ -11,6 +11,7 @@
   const DOOD_FETCH_TIMEOUT_MS = 12_000;
   const DOOD_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   const PAGE_MEDIA_EVENT_TYPE = "aura-media-observer-event-v1";
+  const LEVEL5_MEDIA_DISCOVERY_REQUEST = "aura-level5-media-discovery-request-v1";
   const seen = new Map();
   let scanTimer = null;
   let scanScheduled = false;
@@ -652,5 +653,6 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => handleMessage(message, sendResponse));
   window.addEventListener("message", handlePageMediaEvent);
+  window.postMessage({ type: LEVEL5_MEDIA_DISCOVERY_REQUEST }, "*");
   scan();
 })();

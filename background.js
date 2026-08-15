@@ -971,7 +971,8 @@ async function sniffMediaContentType(url) {
 function popupCandidate(candidate) {
   const projection = redactCandidateForUi(candidate);
   const previewUrl = canonicalHttpUrl(candidate.resourceUrl)?.href || null;
-  return { ...projection, previewUrl };
+  const sourceUrl = canonicalHttpUrl(candidate.pageUrl)?.href || null;
+  return { ...projection, previewUrl, sourceUrl };
 }
 
 function playerCandidateHasQuery(candidate) {

@@ -239,7 +239,8 @@ function enhanceCandidateCard(card) {
   button.title = t("playBrowserTitle");
   button.setAttribute("aria-label", t("playBrowserTitle"));
   button.addEventListener("click", async () => {
-    playInBrowser(mediaUrl, title, button, await activePageUrl());
+    const origin = card.querySelector(".candidate-origin")?.textContent?.trim() || "";
+    playInBrowser(mediaUrl, title, button, origin || await activePageUrl());
   });
   meta.append(button);
 }

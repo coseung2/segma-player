@@ -102,23 +102,63 @@ async function findOrCreateFolder(bookmarks) {
   }
 }
 
-async function folderEntries(bookmarks) {
-  const folderId = await findOrCreateFolder(bookmarks);
-  if (!folderId) return null;
+async function folderOptions(bookmarks, parentId, parentTitle = "", seen = new Set()) {
+  if (!parentId || seen.has(parentId)) return [];
+  seen.add(parentId);
+  const children = await bookmarks.getChildren(parentId);
+  const options = [];
+  for (const node of children.filter((item) => !item.url)) {
+    const title = String(node.title || "").trim();
+    const path = parentTitle && title ? `${parentTitle} / ${title}` : title || parentTitle;
+    options.push({ id: node.id, title: path, parentId });
+    options.push(...await folderOptions(bookmarks, node.id, path, seen));
+  }
+  return options;
+}
+
+async function resolveFolderId(bookmarks, rootId, requestedId) {
+  if (!requestedId || requestedId === rootId) return rootId;
+  const options = await folderOptions(bookmarks, rootId);
+  return options.some((option) => option.id === String(requestedId)) ? String(requestedId) : rootId;
+}
+
+async function folderEntries(bookmarks, folderId, seen = new Set()) {
+  if (!folderId || seen.has(folderId)) return [];
+  seen.add(folderId);
   const children = await bookmarks.getChildren(folderId);
   const entries = [];
-  for (const node of children.filter((item) => typeof item.url === "string")) {
-    const entry = bookmarkToEntry(node);
-    if (!parseCollectionBookmarkUrl(node.url)) {
-      const bookmarkUrl = buildCollectionBookmarkUrl(entry.url, entry.title, null, entry.sourceUrl);
-      if (bookmarkUrl !== node.url) {
-        await bookmarks.update(node.id, { url: bookmarkUrl }).catch(() => null);
-        entry.bookmarkUrl = bookmarkUrl;
+  for (const node of children) {
+    if (typeof node.url === "string") {
+      const entry = bookmarkToEntry(node);
+      if (!parseCollectionBookmarkUrl(node.url)) {
+        const bookmarkUrl = buildCollectionBookmarkUrl(entry.url, entry.title, null, entry.sourceUrl);
+        if (bookmarkUrl !== node.url) {
+          await bookmarks.update(node.id, { url: bookmarkUrl }).catch(() => null);
+          entry.bookmarkUrl = bookmarkUrl;
+        }
       }
+      entries.push(entry);
+      continue;
     }
-    entries.push(entry);
+    entries.push(...await folderEntries(bookmarks, node.id, seen));
   }
   return entries;
+}
+
+async function findBookmark(bookmarks, folderId, mediaUrl, seen = new Set()) {
+  if (!folderId || seen.has(folderId)) return null;
+  seen.add(folderId);
+  const children = await bookmarks.getChildren(folderId);
+  for (const node of children) {
+    if (typeof node.url === "string" && bookmarkMediaUrl(node.url) === mediaUrl) {
+      return { node, parentId: folderId };
+    }
+    if (!node.url) {
+      const found = await findBookmark(bookmarks, node.id, mediaUrl, seen);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 export function createBookmarkCollection(bookmarks) {
@@ -127,16 +167,38 @@ export function createBookmarkCollection(bookmarks) {
     supported: hasApi,
     async list() {
       if (!hasApi) return null;
-      const entries = await folderEntries(bookmarks);
+      const folderId = await findOrCreateFolder(bookmarks);
+      const entries = await folderEntries(bookmarks, folderId);
       return entries || null;
     },
-    async add(entry) {
+    async listFolders() {
+      if (!hasApi) return [];
+      const folderId = await findOrCreateFolder(bookmarks);
+      if (!folderId) return [];
+      return [
+        { id: folderId, title: COLLECTION_FOLDER_TITLE, root: true },
+        ...await folderOptions(bookmarks, folderId),
+      ];
+    },
+    async createFolder(title) {
+      if (!hasApi) return null;
+      const safeTitle = String(title || "").trim().slice(0, 80);
+      if (!safeTitle) return null;
+      const folderId = await findOrCreateFolder(bookmarks);
+      if (!folderId) return null;
+      const existing = (await bookmarks.getChildren(folderId))
+        .find((node) => !node.url && node.title === safeTitle);
+      if (existing) return existing;
+      return bookmarks.create({ parentId: folderId, title: safeTitle });
+    },
+    async add(entry, requestedFolderId = null) {
       if (!hasApi) return null;
       const url = typeof entry?.url === "string" ? entry.url : "";
       if (!url) return null;
       const title = typeof entry.title === "string" ? entry.title.slice(0, 240) : "";
       const bookmarkUrl = buildCollectionBookmarkUrl(url, title, null, entry.sourceUrl);
-      const folderId = await findOrCreateFolder(bookmarks);
+      const rootId = await findOrCreateFolder(bookmarks);
+      const folderId = await resolveFolderId(bookmarks, rootId, requestedFolderId);
       if (!folderId) return null;
       const existing = (await bookmarks.getChildren(folderId))
         .find((node) => bookmarkMediaUrl(node.url) === url);
@@ -161,27 +223,25 @@ export function createBookmarkCollection(bookmarks) {
       if (!hasApi) return false;
       const folderId = await findOrCreateFolder(bookmarks);
       if (!folderId) return false;
-      const existing = (await bookmarks.getChildren(folderId))
-        .find((node) => bookmarkMediaUrl(node.url) === url);
+      const existing = await findBookmark(bookmarks, folderId, url);
       if (!existing) return false;
-      await bookmarks.remove(existing.id);
+      await bookmarks.remove(existing.node.id);
       return true;
     },
     async replace(oldUrl, entry) {
       if (!hasApi) return false;
       const folderId = await findOrCreateFolder(bookmarks);
       if (!folderId) return false;
-      const existing = (await bookmarks.getChildren(folderId))
-        .find((node) => bookmarkMediaUrl(node.url) === oldUrl);
+      const existing = await findBookmark(bookmarks, folderId, oldUrl);
       if (!existing) return false;
       const url = typeof entry?.url === "string" ? entry.url : "";
       if (!url) return false;
-      const title = typeof entry.title === "string" ? entry.title.slice(0, 240) : existing.title || "";
-      await bookmarks.update(existing.id, {
+      const title = typeof entry.title === "string" ? entry.title.slice(0, 240) : existing.node.title || "";
+      await bookmarks.update(existing.node.id, {
         title,
         url: buildCollectionBookmarkUrl(url, title, null, entry.sourceUrl),
       });
-      await bookmarks.move(existing.id, { parentId: folderId, index: 0 }).catch(() => null);
+      await bookmarks.move(existing.node.id, { parentId: existing.parentId, index: 0 }).catch(() => null);
       return true;
     },
   };
@@ -193,10 +253,16 @@ function storageFallback() {
     async list() {
       try {
         const stored = await chrome.storage.local.get(STORAGE_KEY);
-        return Array.isArray(stored[STORAGE_KEY]) ? stored[STORAGE_KEY] : [];
+      return Array.isArray(stored[STORAGE_KEY]) ? stored[STORAGE_KEY] : [];
       } catch {
         return [];
       }
+    },
+    async listFolders() {
+      return [{ id: "", title: COLLECTION_FOLDER_TITLE, root: true }];
+    },
+    async createFolder() {
+      return null;
     },
     async add(entry) {
       const next = mergeCollection(await this.list(), entry);
@@ -233,10 +299,22 @@ export async function listCollection() {
   return entries || [];
 }
 
-export async function addToCollection(entry) {
+export async function listCollectionFolders() {
+  const collection = await getCollection();
+  if (!collection?.listFolders) return [];
+  return collection.listFolders();
+}
+
+export async function createCollectionFolder(title) {
+  const collection = await getCollection();
+  if (!collection?.createFolder) return null;
+  return collection.createFolder(title);
+}
+
+export async function addToCollection(entry, folderId = null) {
   const collection = await getCollection();
   if (!collection) return null;
-  return collection.add(entry);
+  return collection.add(entry, folderId);
 }
 
 export async function removeFromCollection(url) {

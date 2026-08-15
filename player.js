@@ -1,7 +1,12 @@
 import Hls from "./vendor/hls.min.mjs";
 import { decodeSubtitleBytes, findSubtitleFile, cuesAt, parseSrt } from "./player-subtitle.js";
 import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
-import { addToCollection, replaceInCollection } from "./collection.js";
+import {
+  addToCollection,
+  createCollectionFolder,
+  listCollectionFolders,
+  replaceInCollection,
+} from "./collection.js";
 import { resolveEdition } from "./license.js";
 import { loadLocale } from "./i18n.js";
 
@@ -12,6 +17,57 @@ const NO_SUBTITLE_MESSAGES = {
   zh: "未找到字幕 — 将不带字幕播放",
 };
 
+const COLLECTION_MESSAGES = {
+  ko: {
+    save: "즐겨찾기에 저장",
+    saved: "저장됨",
+    folderLabel: "저장 폴더",
+    newFolder: "새 폴더",
+    folderPlaceholder: "새 폴더 이름",
+    create: "만들기",
+    cancel: "취소",
+    confirm: "저장",
+    folderCreateFailed: "폴더를 만들지 못했습니다.",
+    saveFailed: "즐겨찾기에 저장하지 못했습니다.",
+  },
+  en: {
+    save: "Save to bookmarks",
+    saved: "Saved",
+    folderLabel: "Save folder",
+    newFolder: "New folder",
+    folderPlaceholder: "New folder name",
+    create: "Create",
+    cancel: "Cancel",
+    confirm: "Save",
+    folderCreateFailed: "Could not create the folder.",
+    saveFailed: "Could not save the bookmark.",
+  },
+  ja: {
+    save: "ブックマークに保存",
+    saved: "保存しました",
+    folderLabel: "保存先フォルダー",
+    newFolder: "新しいフォルダー",
+    folderPlaceholder: "フォルダー名",
+    create: "作成",
+    cancel: "キャンセル",
+    confirm: "保存",
+    folderCreateFailed: "フォルダーを作成できませんでした。",
+    saveFailed: "ブックマークを保存できませんでした。",
+  },
+  zh: {
+    save: "保存到书签",
+    saved: "已保存",
+    folderLabel: "保存文件夹",
+    newFolder: "新建文件夹",
+    folderPlaceholder: "文件夹名称",
+    create: "创建",
+    cancel: "取消",
+    confirm: "保存",
+    folderCreateFailed: "无法创建文件夹。",
+    saveFailed: "无法保存书签。",
+  },
+};
+
 const params = new URLSearchParams(location.search);
 const mediaUrl = params.get("url") || "";
 const title = params.get("title") || "";
@@ -20,6 +76,7 @@ const sourceUrl = params.get("source") || "";
 let proActive = false;
 let refreshInProgress = false;
 let noSubtitleMessage = NO_SUBTITLE_MESSAGES.ko;
+let collectionMessages = COLLECTION_MESSAGES.ko;
 
 const video = document.getElementById("video");
 const titleElement = document.getElementById("title");
@@ -27,6 +84,15 @@ const subtitleElement = document.getElementById("subtitle");
 const subtitleTag = document.getElementById("subtitle-tag");
 const message = document.getElementById("message");
 const saveButton = document.getElementById("save");
+const collectionPicker = document.getElementById("collection-picker");
+const collectionFolder = document.getElementById("collection-folder");
+const collectionFolderLabel = document.getElementById("collection-folder-label");
+const collectionNewFolderButton = document.getElementById("collection-new-folder");
+const collectionNewFolderRow = document.getElementById("collection-new-folder-row");
+const collectionNewFolderInput = document.getElementById("collection-new-folder-input");
+const collectionCreateFolderButton = document.getElementById("collection-create-folder");
+const collectionCancelButton = document.getElementById("collection-cancel");
+const collectionConfirmButton = document.getElementById("collection-confirm");
 saveButton.hidden = true;
 
 function showToast(text) {
@@ -156,6 +222,87 @@ async function refreshPlanGate() {
   saveButton.hidden = !proActive;
 }
 
+function setCollectionLocale(locale) {
+  collectionMessages = COLLECTION_MESSAGES[locale] || COLLECTION_MESSAGES.ko;
+  saveButton.textContent = collectionMessages.save;
+  collectionFolderLabel.textContent = collectionMessages.folderLabel;
+  collectionNewFolderButton.textContent = collectionMessages.newFolder;
+  collectionNewFolderInput.placeholder = collectionMessages.folderPlaceholder;
+  collectionCreateFolderButton.textContent = collectionMessages.create;
+  collectionCancelButton.textContent = collectionMessages.cancel;
+  collectionConfirmButton.textContent = collectionMessages.confirm;
+}
+
+function closeCollectionPicker() {
+  collectionPicker.hidden = true;
+  collectionNewFolderRow.hidden = true;
+  collectionNewFolderInput.value = "";
+}
+
+async function refreshCollectionFolders(selectedId = null) {
+  collectionFolder.replaceChildren();
+  let folders = [];
+  try {
+    folders = await listCollectionFolders();
+  } catch {
+    folders = [];
+  }
+  if (!folders.length) {
+    folders = [{ id: "", title: "Aura Media", root: true }];
+  }
+  for (const folder of folders) {
+    const option = document.createElement("option");
+    option.value = folder.id || "";
+    option.textContent = folder.title || "Aura Media";
+    option.selected = selectedId !== null ? option.value === selectedId : Boolean(folder.root);
+    collectionFolder.append(option);
+  }
+}
+
+async function openCollectionPicker() {
+  if (!proActive) return;
+  await refreshCollectionFolders();
+  collectionPicker.hidden = false;
+  collectionFolder.focus();
+}
+
+async function createCollectionFolderFromPicker() {
+  const title = collectionNewFolderInput.value.trim();
+  if (!title) {
+    collectionNewFolderInput.focus();
+    return;
+  }
+  collectionCreateFolderButton.disabled = true;
+  try {
+    const folder = await createCollectionFolder(title);
+    if (!folder?.id) {
+      showToast(collectionMessages.folderCreateFailed);
+      return;
+    }
+    await refreshCollectionFolders(folder.id);
+    collectionNewFolderRow.hidden = true;
+    collectionNewFolderInput.value = "";
+  } finally {
+    collectionCreateFolderButton.disabled = false;
+  }
+}
+
+async function saveSelectedCollection() {
+  collectionConfirmButton.disabled = true;
+  try {
+    const saved = await addToCollection({ title, url: mediaUrl, sourceUrl }, collectionFolder.value || null);
+    if (!saved) {
+      showToast(collectionMessages.saveFailed);
+      return;
+    }
+    saveButton.textContent = collectionMessages.saved;
+    saveButton.disabled = true;
+    closeCollectionPicker();
+  } finally {
+    collectionConfirmButton.disabled = false;
+  }
+}
+
 function startPlayback() {
   if (!mediaUrl) {
     fail("재생할 주소가 없습니다.");
@@ -187,14 +334,21 @@ function startPlayback() {
   }
 }
 
-saveButton.addEventListener("click", async () => {
-  await addToCollection({ title, url: mediaUrl, sourceUrl });
-  saveButton.textContent = "저장됨";
-  saveButton.disabled = true;
+saveButton.addEventListener("click", openCollectionPicker);
+collectionNewFolderButton.addEventListener("click", () => {
+  collectionNewFolderRow.hidden = false;
+  collectionNewFolderInput.focus();
 });
+collectionCreateFolderButton.addEventListener("click", createCollectionFolderFromPicker);
+collectionNewFolderInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") createCollectionFolderFromPicker();
+});
+collectionCancelButton.addEventListener("click", closeCollectionPicker);
+collectionConfirmButton.addEventListener("click", saveSelectedCollection);
 
 async function init() {
   const locale = await loadLocale();
+  setCollectionLocale(locale);
   noSubtitleMessage = NO_SUBTITLE_MESSAGES[locale] || NO_SUBTITLE_MESSAGES.ko;
   cleanupSessions();
   await refreshPlanGate();

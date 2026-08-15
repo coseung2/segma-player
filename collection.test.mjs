@@ -127,6 +127,23 @@ test("bookmark collection dedupes by url and removes entries", async () => {
   assert.equal(await collection.remove("https://a.test/missing.m3u8"), false);
 });
 
+test("bookmark collection saves into a selected nested folder", async () => {
+  const { api } = mockBookmarks();
+  const collection = createBookmarkCollection(api);
+  const folder = await collection.createFolder("Anime");
+  assert.equal(folder.title, "Anime");
+  const folders = await collection.listFolders();
+  assert.deepEqual(folders.map((item) => item.title), [COLLECTION_FOLDER_TITLE, "Anime"]);
+  await collection.add({ url: "https://a.test/1.m3u8", title: "AAA-111" }, folder.id);
+  assert.equal((await api.getChildren(folder.id)).filter((node) => node.url).length, 1);
+  assert.equal((await collection.list()).length, 1);
+  assert.equal(await collection.replace("https://a.test/1.m3u8", {
+    url: "https://a.test/2.m3u8",
+    title: "BBB-222",
+  }), true);
+  assert.equal((await api.getChildren(folder.id)).find((node) => node.url).title, "BBB-222");
+});
+
 test("bookmark collection reports unsupported without the API", () => {
   const collection = createBookmarkCollection(null);
   assert.equal(collection.supported, false);

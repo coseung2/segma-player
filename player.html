@@ -21,6 +21,7 @@
         flex-direction: column;
       }
       header {
+        position: relative;
         display: flex;
         align-items: center;
         gap: 10px;
@@ -52,6 +53,63 @@
       header button:disabled {
         opacity: 0.6;
         cursor: default;
+      }
+      .collection-picker {
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 16px;
+        z-index: 5;
+        width: min(320px, calc(100vw - 32px));
+        padding: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 10px;
+        background: #121925;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+      }
+      .collection-picker[hidden] {
+        display: none;
+      }
+      .collection-picker label {
+        display: block;
+        margin-bottom: 6px;
+        color: #a9b7c9;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .collection-picker select,
+      .collection-picker input {
+        width: 100%;
+        min-height: 32px;
+        padding: 0 9px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 7px;
+        background: #0b111b;
+        color: #eef2f7;
+        font: inherit;
+        font-size: 12px;
+      }
+      .collection-picker-row {
+        display: flex;
+        gap: 7px;
+        margin-top: 8px;
+      }
+      .collection-picker-row button {
+        padding: 6px 9px;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .collection-picker-row input {
+        flex: 1;
+      }
+      .collection-picker-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 7px;
+        margin-top: 10px;
+      }
+      .collection-picker-actions button:last-child {
+        border-color: #2f6fed;
+        background: #2f6fed;
       }
       header .tag {
         flex: none;
@@ -146,6 +204,21 @@
       <span class="spacer"></span>
       <button id="save" type="button">컬렉션에 저장</button>
       <span id="subtitle-tag" class="tag" hidden>자막</span>
+      <section id="collection-picker" class="collection-picker" hidden aria-label="컬렉션 저장">
+        <label id="collection-folder-label" for="collection-folder">저장 폴더</label>
+        <select id="collection-folder"></select>
+        <div class="collection-picker-row">
+          <button id="collection-new-folder" type="button">새 폴더</button>
+        </div>
+        <div id="collection-new-folder-row" class="collection-picker-row" hidden>
+          <input id="collection-new-folder-input" type="text" maxlength="80" placeholder="새 폴더 이름" />
+          <button id="collection-create-folder" type="button">만들기</button>
+        </div>
+        <div class="collection-picker-actions">
+          <button id="collection-cancel" type="button">취소</button>
+          <button id="collection-confirm" type="button">저장</button>
+        </div>
+      </section>
     </header>
     <main class="stage">
       <video id="video" controls playsinline></video>

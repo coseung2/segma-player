@@ -41,26 +41,9 @@ public static class AuraPotPlayerSetup
       Directory.CreateDirectory(defaultSubs);
 
       string subtitleDir = null;
-      bool silent = false;
-      for (int i = 0; i < args.Length; i++)
-      {
-        if (args[i] == "--silent" && i + 1 < args.Length)
-        {
-          subtitleDir = args[i + 1];
-          silent = true;
-        }
-      }
-      if (subtitleDir == null)
-      {
-        using (var dialog = new FolderBrowserDialog())
-        {
-          dialog.Description = "PotPlayer 자막 폴더를 선택해 주세요. 새 폴더를 만들어 주세요.\r\n선택한 폴더의 자막(.srt)이 PotPlayer에서 자동으로 표시됩니다.";
-          dialog.SelectedPath = defaultSubs;
-          dialog.ShowNewFolderButton = true;
-          if (dialog.ShowDialog() != DialogResult.OK) { return; }
-          subtitleDir = dialog.SelectedPath;
-        }
-      }
+      // Zero-interaction install: subtitles always live in
+      // %USERPROFILE%\Downloads\Subtitles (created automatically).
+      subtitleDir = defaultSubs;
       Directory.CreateDirectory(subtitleDir);
 
       Directory.CreateDirectory(installDir);
@@ -87,14 +70,6 @@ public static class AuraPotPlayerSetup
         }
       }
 
-      if (!silent)
-      {
-        MessageBox.Show(
-          "PotPlayer 연동 설치가 완료되었습니다.\r\n\r\n자막 폴더: " + subtitleDir,
-          "Aura PotPlayer",
-          MessageBoxButtons.OK,
-          MessageBoxIcon.Information);
-      }
     }
     catch (Exception ex)
     {

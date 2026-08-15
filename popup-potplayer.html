@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title data-i18n="app.title">Aura Media Downloader</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="popup-header">
+        <div><p class="eyebrow">AURA</p><div class="title-row"><h1 data-i18n="app.heading">Media Download</h1><span id="plan-badge" class="plan-badge"></span></div></div>
+        <div class="header-actions">
+          <div class="locale-menu-wrap">
+            <button id="locale" class="icon-button" type="button" data-i18n-label="app.language" aria-label="Language" title="Language" aria-haspopup="true" aria-expanded="false">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10"></circle>
+                <path d="M2 12h20"></path>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+              </svg>
+            </button>
+            <div id="locale-menu" class="locale-menu" role="menu" data-i18n-label="app.language" aria-label="Language" hidden></div>
+          </div>
+          <button id="settings" class="icon-button" type="button" data-i18n-label="app.settings" aria-label="Settings" title="Settings">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+          </button>
+          <button id="refresh" class="icon-button" type="button" data-i18n-label="app.refresh" aria-label="Reload the current tab">↻</button>
+        </div>
+      </header>
+
+      <section id="plan-card" class="plan-card" data-i18n-label="app.planRegion" aria-label="Current plan">
+        <p id="plan-summary" class="plan-summary"></p>
+        <div id="pro-offer" class="pro-offer" hidden>
+          <p id="pro-benefits" class="pro-benefits"></p>
+          <a id="upgrade-link" class="upgrade-link" target="_blank" rel="noreferrer" data-i18n="plan.viewPro" hidden>See Pro</a>
+          <a id="license-entry" class="upgrade-link" href="#" data-i18n="plan.enterKey">Enter Pro key</a>
+        </div>
+      </section>
+
+      <div class="tab-list" role="tablist" data-i18n-label="app.tablist" aria-label="Download tools">
+        <button id="tab-detect" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="panel-detect" data-tab="detect" data-i18n="tab.detect">Detect media</button>
+        <button id="tab-link" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-link" data-tab="link" data-i18n="tab.link">Paste link</button>
+      </div>
+
+      <section id="panel-detect" class="tab-panel" role="tabpanel" aria-labelledby="tab-detect">
+        <p id="status" class="status" role="status" aria-live="polite" data-i18n="detect.checking">Checking this page…</p>
+        <div class="detect-controls">
+          <span id="summary" class="summary"></span>
+          <div class="detect-options">
+            <label class="main-toggle"><input id="main-only" type="checkbox" checked /> <span data-i18n="detect.mainOnly">Main only</span></label>
+          </div>
+        </div>
+        <div id="detect-jobs-tools" class="job-list-tools" hidden>
+          <button id="detect-jobs-toggle" class="job-list-tool" type="button" aria-expanded="true" data-i18n="jobs.collapse">Collapse list</button>
+          <button id="detect-jobs-clear" class="job-list-tool" type="button" data-i18n="jobs.clear">Clear history</button>
+        </div>
+        <section id="candidates" class="candidate-list" aria-live="polite"></section>
+        <button id="rescan" class="primary-button" type="button" data-i18n="detect.rescan">Scan this page again</button>
+        <section id="detect-jobs" class="job-list" aria-live="polite" hidden></section>
+      </section>
+
+      <section id="panel-link" class="tab-panel" role="tabpanel" aria-labelledby="tab-link" hidden>
+        <p class="storage-note" data-i18n="link.note">Paste a media address or player page to save it.</p>
+        <label class="field-label" for="direct-url" data-i18n="link.addressLabel">Media address</label>
+        <input id="direct-url" type="url" data-i18n-placeholder="link.addressPlaceholder" placeholder="Media / player" spellcheck="false" />
+        <div id="youtube-quality-row" class="quality-row" hidden>
+          <label class="field-label" for="youtube-quality" data-i18n="quality.label">Quality</label>
+          <select id="youtube-quality">
+            <option value="1080">Up to 1080p</option>
+            <option value="720">Up to 720p</option>
+            <option value="480">Up to 480p</option>
+          </select>
+        </div>
+        <button id="download-url" class="primary-button" type="button" data-i18n="action.download">Download</button>
+        <p id="direct-status" class="field-status" role="status" aria-live="polite" hidden></p>
+        <div id="link-jobs-tools" class="job-list-tools" hidden>
+          <button id="link-jobs-toggle" class="job-list-tool" type="button" aria-expanded="true" data-i18n="jobs.collapse">Collapse list</button>
+          <button id="link-jobs-clear" class="job-list-tool" type="button" data-i18n="jobs.clear">Clear history</button>
+        </div>
+        <section id="link-jobs" class="job-list" aria-live="polite" hidden></section>
+        <p id="link-save-status" class="save-status" role="status" hidden></p>
+      </section>
+
+    </main>
+
+    <section id="settings-overlay" class="settings-overlay" role="dialog" aria-modal="true" data-i18n-label="app.settings" aria-label="Settings" hidden>
+      <header class="settings-overlay-header">
+        <h2 data-i18n="app.settings">Settings</h2>
+        <button id="settings-close" class="icon-button" type="button" data-i18n-label="app.settingsClose" aria-label="Close settings">×</button>
+      </header>
+      <iframe id="settings-frame" src="options.html" title="Aura Media settings"></iframe>
+    </section>
+
+    <script type="module" src="popup.js"></script>
+    <script type="module" src="potplayer-popup-addon.js"></script>
+  </body>
+</html>

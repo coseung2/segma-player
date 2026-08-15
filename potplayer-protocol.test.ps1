@@ -59,6 +59,15 @@ try {
     $found = Find-Subtitle "ABC-123 sample" ""
     if ($found -ne $subtitleFile) { throw "Config subtitle root was not used: $found" }
     Write-Output "OK config subtitle root"
+
+    # Nested folders (e.g. D:/자막/마돈나/juq-921.srt) must be searched too.
+    $nestedDir = Join-Path $configDir "마돈나"
+    New-Item -ItemType Directory -Path $nestedDir -Force | Out-Null
+    $nestedFile = Join-Path $nestedDir "xyz-789.srt"
+    [System.IO.File]::WriteAllText($nestedFile, $subtitleText, (New-Object System.Text.UTF8Encoding($false)))
+    $nested = Find-Subtitle "XYZ-789 nested" ""
+    if ($nested -ne $nestedFile) { throw "Nested subtitle was not found: $nested" }
+    Write-Output "OK nested subtitle root"
   } finally {
     if ($null -eq $oldConfig) { Remove-Item Env:AURA_COMPANION_CONFIG -ErrorAction SilentlyContinue }
     else { $env:AURA_COMPANION_CONFIG = $oldConfig }

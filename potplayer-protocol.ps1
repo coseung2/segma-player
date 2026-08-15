@@ -80,7 +80,7 @@ function Find-Subtitle {
     if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { continue }
     if ($identifier) {
       $pattern = $identifier -replace '-', '[-_ ]?'
-      $subtitle = Get-ChildItem -LiteralPath $root -Filter '*.srt' -File -ErrorAction SilentlyContinue |
+      $subtitle = Get-ChildItem -LiteralPath $root -Filter '*.srt' -File -Recurse -ErrorAction SilentlyContinue |
         Where-Object { $_.BaseName -match ('(?i)' + $pattern) } |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1

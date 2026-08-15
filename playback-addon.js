@@ -1,6 +1,5 @@
 import { decodeSubtitleBytes, findSubtitleFile } from "./player-subtitle.js";
 import { getStoredSubtitleDirectory, storeSubtitleDirectory } from "./subtitle-folder.js";
-import { addToCollection, listCollection, removeFromCollection } from "./collection.js";
 import { resolveEdition } from "./license.js";
 import { loadLocale } from "./i18n.js";
 
@@ -196,75 +195,8 @@ async function playInBrowser(mediaUrl, title, button, sourceUrl = "") {
   }, 1800);
 }
 
-async function renderCollection() {
-  const listElement = byId("collection-list");
-  const countElement = byId("collection-count");
-  const heading = document.querySelector(".collection-header h2");
-  if (!listElement) return;
-  if (heading) heading.textContent = t("collection");
-  if (!proActive) {
-    countElement.hidden = true;
-    listElement.replaceChildren();
-    const locked = document.createElement("p");
-    locked.className = "collection-empty";
-    locked.textContent = t("collectionLocked");
-    listElement.append(locked);
-    return;
-  }
-  const entries = await listCollection();
-  const note = byId("collection-note");
-  if (note) note.textContent = t("collectionNote");
-  countElement.hidden = entries.length === 0;
-  countElement.textContent = String(entries.length);
-  listElement.replaceChildren();
-  if (!entries.length) {
-    const empty = document.createElement("p");
-    empty.className = "collection-empty";
-    empty.textContent = t("collectionEmpty");
-    listElement.append(empty);
-    return;
-  }
-  for (const entry of entries) {
-    const row = document.createElement("div");
-    row.className = "collection-row";
-    const label = document.createElement("span");
-    label.className = "collection-title";
-    label.textContent = entry.title || entry.url;
-    label.title = entry.url;
-    const play = document.createElement("button");
-    play.type = "button";
-    play.className = "job-list-tool";
-    play.textContent = t("playBrowser");
-    play.addEventListener("click", () => playInBrowser(entry.url, entry.title, play, entry.sourceUrl));
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "job-list-tool";
-    remove.textContent = t("collectionRemove");
-    remove.addEventListener("click", async () => {
-      await removeFromCollection(entry.url);
-      renderCollection();
-    });
-    row.append(label, play, remove);
-    listElement.append(row);
-  }
-}
-
 async function refreshPlanGate() {
   proActive = (await resolveEdition()) === "pro";
-  renderCollection();
-}
-
-function watchBookmarkChanges() {
-  if (!globalThis.chrome?.bookmarks) return;
-  let refreshTimer = null;
-  const schedule = () => {
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(renderCollection, 250);
-  };
-  chrome.bookmarks.onCreated.addListener(schedule);
-  chrome.bookmarks.onRemoved.addListener(schedule);
-  chrome.bookmarks.onMoved.addListener(schedule);
-  chrome.bookmarks.onChanged.addListener(schedule);
 }
 
 function watchLicenseChanges() {
@@ -315,7 +247,6 @@ async function init() {
     enhanceCandidates();
   }
   await refreshPlanGate();
-  watchBookmarkChanges();
   watchLicenseChanges();
 }
 

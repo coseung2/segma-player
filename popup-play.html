@@ -25,55 +25,6 @@
       .browser-play-button {
         margin-top: 0;
       }
-      .collection-panel {
-        margin-top: 14px;
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
-        padding-top: 12px;
-      }
-      .collection-header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-bottom: 8px;
-      }
-      .collection-header h2 {
-        margin: 0;
-        font-size: 13px;
-        font-weight: 700;
-      }
-      .collection-count {
-        padding: 1px 7px;
-        border-radius: 999px;
-        background: rgba(47, 111, 237, 0.25);
-        color: #9dbcf5;
-        font-size: 11px;
-        font-weight: 700;
-      }
-      .collection-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 7px 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-      }
-      .collection-title {
-        flex: 1;
-        min-width: 0;
-        font-size: 12px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      .collection-empty {
-        margin: 0;
-        font-size: 12px;
-        opacity: 0.6;
-      }
-      .collection-note {
-        margin: 0 0 6px;
-        font-size: 11px;
-        opacity: 0.55;
-      }
     </style>
   </head>
   <body>
@@ -152,15 +103,6 @@
         </div>
         <section id="link-jobs" class="job-list" aria-live="polite" hidden></section>
         <p id="link-save-status" class="save-status" role="status" hidden></p>
-      </section>
-
-      <section id="collection-panel" class="collection-panel" aria-label="Collection">
-        <header class="collection-header">
-          <h2>Collection</h2>
-          <span id="collection-count" class="collection-count" hidden></span>
-        </header>
-        <p id="collection-note" class="collection-note"></p>
-        <div id="collection-list" class="collection-list"></div>
       </section>
 
     </main>

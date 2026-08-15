@@ -6,6 +6,7 @@ globalThis.document = { querySelector: () => null };
 const {
   browserDownloadFilename,
   chooseDashRepresentation,
+  createCheckpointingSink,
   createDownloadContext,
   dashTracksForPlan,
   mediaChunks,
@@ -16,6 +17,27 @@ const {
   requestSourceFrameDownload,
   tryBrowserDownloadFallback,
 } = await import("./hls-download.js");
+
+test("checkpointing sink close is idempotent after a parallel save closes it", async () => {
+  let closeCount = 0;
+  const fileHandle = {
+    async createWritable() {
+      return {
+        async write() {},
+        async seek() {},
+        async close() {
+          closeCount += 1;
+          if (closeCount > 1) throw new Error("Cannot close a CLOSED writable stream");
+        },
+        async abort() {},
+      };
+    },
+  };
+  const sink = await createCheckpointingSink({ fileHandle });
+  await sink.close();
+  await sink.close();
+  assert.equal(closeCount, 1);
+});
 
 test("page-key preparation exits immediately when cancelled", async () => {
   const controller = new AbortController();

@@ -855,9 +855,11 @@ async function createCheckpointingSink({
   let lastCommitted = writtenBytes;
   let sinceCheckpoint = 0;
   let writable = null;
+  let closed = false;
   async function reopen() {
     writable = await fileHandle.createWritable({ keepExistingData: true });
     if (written > 0) await writable.seek(written);
+    closed = false;
   }
   await reopen();
   return {
@@ -883,6 +885,7 @@ async function createCheckpointingSink({
       sinceCheckpoint += bytes.byteLength;
       if (sinceCheckpoint >= checkpointIntervalBytes) {
         await writable.close();
+        closed = true;
         sinceCheckpoint = 0;
         lastCommitted = written;
         if (persist) await persist(written);
@@ -890,10 +893,14 @@ async function createCheckpointingSink({
       }
     },
     async close() {
+      if (closed) return;
       await writable.close();
+      closed = true;
     },
     async abort() {
+      if (closed) return;
       try { await writable.abort(); } catch { /* already closed */ }
+      closed = true;
     },
   };
 }

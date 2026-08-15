@@ -70,9 +70,10 @@ h1 { margin: 0; overflow: hidden; font-size: 19px; letter-spacing: -.02em; text-
 .candidate-title, .candidate-origin, .candidate-url { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .candidate-title { color: #f3f7fd; font-size: 12px; }
 .candidate-origin, .candidate-url { margin-top: 4px; color: #8594a9; font-size: 10px; }
-.candidate-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
+.candidate-meta { display: flex; align-items: center; justify-content: flex-start; gap: 6px; margin-top: 9px; }
+.candidate-meta .badge { margin-right: auto; }
 .badge { padding: 3px 7px; border-radius: 999px; background: #243754; color: #b3d0ff; font-size: 9px; font-weight: 800; }
-.download-button { min-height: 29px; padding: 0 10px; border: 0; border-radius: 8px; background: #4e85e7; color: #fff; font-size: 10px; font-weight: 750; }
+.download-button { min-width: 70px; min-height: 29px; padding: 0 10px; border: 0; border-radius: 8px; background: #4e85e7; color: #fff; font-size: 10px; font-weight: 750; white-space: nowrap; }
 .download-button:disabled, button:disabled { opacity: .55; cursor: wait; }
 .empty-state { display: grid; min-height: 118px; padding: 16px 12px; place-items: center; border: 1px dashed #354257; border-radius: 11px; color: #95a4b8; font-size: 12px; line-height: 1.5; text-align: center; }
 .save-status { margin: 0; padding-top: 10px; color: #74849a; font-size: 10px; line-height: 1.45; }
@@ -124,4 +125,11 @@ option:disabled { color: #68768a; }
 .settings-overlay-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 10px; border-bottom: 1px solid #2a3444; }
 .settings-overlay-header h2 { margin: 0; font-size: 15px; }
 .settings-overlay-header .icon-button { width: 24px; height: 24px; font-size: 16px; }
+.subtitle-settings { padding: 12px 16px; border-bottom: 1px solid #2a3444; }
+.subtitle-settings-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.subtitle-settings h3 { margin: 0; font-size: 12px; }
+#subtitle-folder-status { min-width: 0; overflow: hidden; color: #8f9db0; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.subtitle-folder-button { width: 100%; min-height: 32px; padding: 0 12px; border: 1px solid #3a4c67; border-radius: 8px; background: #182232; color: #dce6f4; font-size: 11px; font-weight: 700; }
+.subtitle-folder-button:hover, .subtitle-folder-button:focus-visible { border-color: #73a5ff; color: #fff; }
+.subtitle-folder-button:focus-visible { outline: 2px solid #73a5ff; outline-offset: 1px; }
 .settings-overlay iframe { display: block; flex: 0 0 auto; width: 100%; height: 360px; min-height: 0; border: 0; background: #10141c; }

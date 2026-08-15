@@ -1,5 +1,5 @@
 import { decodeSubtitleBytes, findSubtitleFile } from "./player-subtitle.js";
-import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
+import { getStoredSubtitleDirectory, storeSubtitleDirectory } from "./subtitle-folder.js";
 import { addToCollection, listCollection, removeFromCollection } from "./collection.js";
 import { resolveEdition } from "./license.js";
 import { loadLocale, translator } from "./i18n.js";
@@ -8,9 +8,15 @@ const MESSAGES = {
   ko: {
     playBrowser: "재생",
     browserOpening: "브라우저에서 재생합니다",
+    playBrowserTitle: "브라우저에서 자막과 함께 재생",
     folderNeeded: "자막 폴더를 먼저 선택해 주세요. 열린 탭에서 폴더를 고르면 다음부터 바로 재생됩니다.",
     noSubtitle: "자막을 찾지 못했습니다 — 자막 없이 재생합니다",
+    subtitleFolder: "자막 폴더",
     chooseFolder: "자막 폴더 선택",
+    folderCurrent: "현재: {name}",
+    folderSaved: "저장됨",
+    folderPickerUnavailable: "폴더 선택을 지원하지 않는 브라우저입니다.",
+    folderSelectFailed: "폴더를 선택하지 못했습니다.",
     collection: "컬렉션",
     collectionEmpty: "저장한 항목이 없습니다. 재생 중 '컬렉션에 저장' 버튼으로 추가하세요.",
     collectionNote: "브라우저 즐겨찾기 'Aura Media' 폴더와 연동됩니다.",
@@ -20,9 +26,15 @@ const MESSAGES = {
   en: {
     playBrowser: "Play",
     browserOpening: "Opening in browser",
+    playBrowserTitle: "Play with subtitles in browser",
     folderNeeded: "Pick a subtitle folder first. Choose one in the opened tab, then play again.",
     noSubtitle: "No subtitle found — playing without subtitles",
+    subtitleFolder: "Subtitle folder",
     chooseFolder: "Choose subtitle folder",
+    folderCurrent: "Current: {name}",
+    folderSaved: "Saved",
+    folderPickerUnavailable: "Folder selection is not supported in this browser.",
+    folderSelectFailed: "Could not choose the folder.",
     collection: "Collection",
     collectionEmpty: "Nothing saved yet. Use the Save button in the player to add an entry.",
     collectionNote: "Synced with the 'Aura Media' browser bookmarks folder.",
@@ -32,9 +44,15 @@ const MESSAGES = {
   ja: {
     playBrowser: "再生",
     browserOpening: "ブラウザーで再生します",
+    playBrowserTitle: "字幕付きでブラウザー再生",
     folderNeeded: "先に字幕フォルダーを選択してください。開いたタブで選ぶと、次回から再生できます。",
     noSubtitle: "字幕が見つかりません — 字幕なしで再生します",
+    subtitleFolder: "字幕フォルダー",
     chooseFolder: "字幕フォルダーを選択",
+    folderCurrent: "現在: {name}",
+    folderSaved: "保存しました",
+    folderPickerUnavailable: "このブラウザーではフォルダー選択に対応していません。",
+    folderSelectFailed: "フォルダーを選択できませんでした。",
     collection: "コレクション",
     collectionEmpty: "保存された項目はありません。再生中に「保存」ボタンで追加できます。",
     collectionNote: "ブラウザーのブックマーク「Aura Media」フォルダーと同期されます。",
@@ -44,9 +62,15 @@ const MESSAGES = {
   zh: {
     playBrowser: "播放",
     browserOpening: "正在浏览器中播放",
+    playBrowserTitle: "在浏览器中播放并显示字幕",
     folderNeeded: "请先选择字幕文件夹。在打开的标签页中选择后即可播放。",
     noSubtitle: "未找到字幕 — 将不带字幕播放",
+    subtitleFolder: "字幕文件夹",
     chooseFolder: "选择字幕文件夹",
+    folderCurrent: "当前：{name}",
+    folderSaved: "已保存",
+    folderPickerUnavailable: "此浏览器不支持文件夹选择。",
+    folderSelectFailed: "无法选择文件夹。",
     collection: "收藏",
     collectionEmpty: "还没有保存的项目。播放时点击“保存”按钮添加。",
     collectionNote: "与浏览器书签“Aura Media”文件夹同步。",
@@ -84,6 +108,41 @@ function showToast(message) {
   setTimeout(() => toast.remove(), 2600);
 }
 
+async function refreshSubtitleFolderSettings() {
+  const button = byId("subtitle-folder-change");
+  const status = byId("subtitle-folder-status");
+  const label = byId("subtitle-folder-label");
+  if (!button || !status) return;
+  if (label) label.textContent = t("subtitleFolder");
+  byId("subtitle-settings")?.setAttribute("aria-label", t("subtitleFolder"));
+  button.textContent = t("chooseFolder");
+  const handle = await getStoredSubtitleDirectory();
+  status.textContent = handle ? t("folderCurrent", { name: handle.name }) : "";
+}
+
+async function chooseSubtitleFolder() {
+  const button = byId("subtitle-folder-change");
+  const status = byId("subtitle-folder-status");
+  if (!button || !status) return;
+  if (typeof window.showDirectoryPicker !== "function") {
+    status.textContent = t("folderPickerUnavailable");
+    chrome.tabs.create({ url: chrome.runtime.getURL("subtitle-folder.html") });
+    return;
+  }
+  button.disabled = true;
+  try {
+    const handle = await window.showDirectoryPicker({ id: "aura-subtitles", mode: "read" });
+    if (!await storeSubtitleDirectory(handle)) throw new Error("subtitle-folder-store-failed");
+    status.textContent = t("folderCurrent", { name: handle.name });
+    button.textContent = t("folderSaved");
+  } catch (error) {
+    if (error?.name !== "AbortError") status.textContent = t("folderSelectFailed");
+  } finally {
+    button.disabled = false;
+    if (button.textContent === t("folderSaved")) setTimeout(() => { button.textContent = t("chooseFolder"); }, 1600);
+  }
+}
+
 async function activePageUrl() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -98,13 +157,9 @@ async function activePageUrl() {
 
 async function playInBrowser(mediaUrl, title, button, sourceUrl = "") {
   const handle = await getStoredSubtitleDirectory();
-  if (!handle) {
-    chrome.tabs.create({ url: chrome.runtime.getURL("subtitle-folder.html") });
-    showToast(t("folderNeeded"));
-    return;
-  }
   const sessionId = crypto.randomUUID();
-  try {
+  let subtitleLoaded = false;
+  if (handle) try {
     const found = await findSubtitleFile(handle, title, mediaUrl);
     if (found) {
       const bytes = new Uint8Array(await found.file.arrayBuffer());
@@ -112,12 +167,12 @@ async function playInBrowser(mediaUrl, title, button, sourceUrl = "") {
       await chrome.storage.local.set({
         [`auraSubtitleSession:${sessionId}`]: { text, at: Date.now() },
       });
-    } else {
-      showToast(t("noSubtitle"));
+      subtitleLoaded = true;
     }
   } catch {
     // Playback continues without subtitles when the folder is unreadable.
   }
+  if (!subtitleLoaded) showToast(t("noSubtitle"));
   const params = new URLSearchParams({ url: mediaUrl });
   if (title) params.set("title", title.slice(0, 240));
   if (sourceUrl) params.set("source", sourceUrl);
@@ -226,8 +281,8 @@ function enhanceCandidateCard(card) {
   button.type = "button";
   button.className = "download-button browser-play-button";
   button.textContent = t("playBrowser");
-  button.title = "브라우저에서 자막과 함께 재생";
-  button.setAttribute("aria-label", "브라우저에서 자막과 함께 재생");
+  button.title = t("playBrowserTitle");
+  button.setAttribute("aria-label", t("playBrowserTitle"));
   button.addEventListener("click", async () => {
     playInBrowser(mediaUrl, title, button, await activePageUrl());
   });
@@ -241,6 +296,8 @@ function enhanceCandidates() {
 
 async function init() {
   t = translator(await loadLocale());
+  byId("subtitle-folder-change")?.addEventListener("click", chooseSubtitleFolder);
+  await refreshSubtitleFolderSettings();
   if (candidates) {
     const observer = new MutationObserver(enhanceCandidates);
     observer.observe(candidates, { childList: true, subtree: true });

@@ -3,6 +3,14 @@ import { decodeSubtitleBytes, findSubtitleFile, cuesAt, parseSrt } from "./playe
 import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
 import { addToCollection, replaceInCollection } from "./collection.js";
 import { resolveEdition } from "./license.js";
+import { loadLocale } from "./i18n.js";
+
+const NO_SUBTITLE_MESSAGES = {
+  ko: "자막을 찾지 못했습니다 — 자막 없이 재생합니다",
+  en: "No subtitle found — playing without subtitles",
+  ja: "字幕が見つかりません — 字幕なしで再生します",
+  zh: "未找到字幕 — 将不带字幕播放",
+};
 
 const params = new URLSearchParams(location.search);
 const mediaUrl = params.get("url") || "";
@@ -11,6 +19,7 @@ const subtitleSession = params.get("sub") || "";
 const sourceUrl = params.get("source") || "";
 let proActive = false;
 let refreshInProgress = false;
+let noSubtitleMessage = NO_SUBTITLE_MESSAGES.ko;
 
 const video = document.getElementById("video");
 const titleElement = document.getElementById("title");
@@ -19,6 +28,14 @@ const subtitleTag = document.getElementById("subtitle-tag");
 const message = document.getElementById("message");
 const saveButton = document.getElementById("save");
 saveButton.hidden = true;
+
+function showToast(text) {
+  const toast = document.createElement("p");
+  toast.className = "player-toast";
+  toast.textContent = text;
+  document.body.append(toast);
+  setTimeout(() => toast.remove(), 2800);
+}
 
 function fail(text, { refresh = false } = {}) {
   message.hidden = false;
@@ -114,7 +131,10 @@ async function loadSubtitles() {
       }
     }
     const cues = parseSrt(text);
-    if (!cues.length) return;
+    if (!cues.length) {
+      showToast(noSubtitleMessage);
+      return;
+    }
     subtitleTag.hidden = false;
     video.addEventListener("timeupdate", () => {
       const cue = cuesAt(cues, video.currentTime);
@@ -173,5 +193,13 @@ saveButton.addEventListener("click", async () => {
   saveButton.disabled = true;
 });
 
-cleanupSessions();
-refreshPlanGate().then(loadSubtitles).then(startPlayback);
+async function init() {
+  const locale = await loadLocale();
+  noSubtitleMessage = NO_SUBTITLE_MESSAGES[locale] || NO_SUBTITLE_MESSAGES.ko;
+  cleanupSessions();
+  await refreshPlanGate();
+  await loadSubtitles();
+  startPlayback();
+}
+
+init();

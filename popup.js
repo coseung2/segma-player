@@ -6,11 +6,14 @@ import { productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
 import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
 import {
+  LOCALE_NAMES,
   LOCALE_STORAGE_KEY,
+  SUPPORTED_LOCALES,
   applyStaticTranslations,
   loadLocale,
   localizeStatusText,
   normalizeLocale,
+  saveLocale,
   translator,
 } from "./i18n.js";
 
@@ -253,11 +256,50 @@ byId("license-entry")?.addEventListener("click", (event) => {
 
 byId("settings")?.addEventListener("click", openSettings);
 byId("settings-close")?.addEventListener("click", closeSettings);
+
+function closeLocaleMenu() {
+  byId("locale-menu").hidden = true;
+  byId("locale").setAttribute("aria-expanded", "false");
+}
+
+function renderLocaleMenu() {
+  const menu = byId("locale-menu");
+  menu.replaceChildren();
+  for (const locale of SUPPORTED_LOCALES) {
+    const option = text("button", "locale-option", LOCALE_NAMES[locale]);
+    option.type = "button";
+    option.setAttribute("role", "menuitemradio");
+    option.setAttribute("aria-checked", String(locale === t.locale));
+    option.addEventListener("click", async () => {
+      closeLocaleMenu();
+      if (locale === t.locale) return;
+      await saveLocale(locale);
+      applyLocale(locale);
+    });
+    menu.append(option);
+  }
+}
+
+byId("locale")?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const menu = byId("locale-menu");
+  const opening = menu.hidden;
+  menu.hidden = !opening;
+  byId("locale").setAttribute("aria-expanded", String(opening));
+  if (opening) menu.querySelector('[aria-checked="true"]')?.focus();
+});
+document.addEventListener("click", (event) => {
+  if (byId("locale-menu").hidden) return;
+  if (!event.target.closest(".locale-menu-wrap")) closeLocaleMenu();
+});
+
 byId("settings-frame")?.addEventListener("load", () => {
   setTimeout(syncSettingsFrameHeight, 120);
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !byId("settings-overlay")?.hidden) closeSettings();
+  if (event.key !== "Escape") return;
+  if (!byId("locale-menu")?.hidden) { closeLocaleMenu(); return; }
+  if (!byId("settings-overlay")?.hidden) closeSettings();
 });
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -658,6 +700,7 @@ function applyLocale(locale) {
   applyStaticTranslations(document, t);
   const frame = byId("settings-frame");
   if (frame) frame.title = t("settings.title");
+  renderLocaleMenu();
   renderPlan();
   renderCandidates(lastCandidates);
   renderJobs(lastJobs);

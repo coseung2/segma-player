@@ -1,13 +1,10 @@
 import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
 import { LICENSE_API_URL } from "./license.js";
 import {
-  LOCALE_NAMES,
   LOCALE_STORAGE_KEY,
-  SUPPORTED_LOCALES,
   applyStaticTranslations,
   loadLocale,
   normalizeLocale,
-  saveLocale,
   translator,
 } from "./i18n.js";
 
@@ -24,14 +21,21 @@ const parallelFolderButton = document.querySelector("#parallel-folder");
 const parallelStatusElement = document.querySelector("#parallel-status");
 const purchasePeriodSelect = document.querySelector("#purchase-period");
 const purchaseCreateButton = document.querySelector("#purchase-create");
+const purchaseToggleButton = document.querySelector("#purchase-toggle");
+const purchasePanel = document.querySelector("#purchase-panel");
 const purchaseOrderBox = document.querySelector("#purchase-order");
 const purchaseAddress = document.querySelector("#purchase-address");
 const purchaseAmount = document.querySelector("#purchase-amount");
 const purchaseTxInput = document.querySelector("#purchase-tx");
 const purchaseVerifyButton = document.querySelector("#purchase-verify");
 const purchaseStatus = document.querySelector("#purchase-status");
-const localeSelect = document.querySelector("#ui-locale");
 let purchaseOrderId = null;
+
+purchaseToggleButton.addEventListener("click", () => {
+  const opening = purchasePanel.hidden;
+  purchasePanel.hidden = !opening;
+  purchaseToggleButton.setAttribute("aria-expanded", String(opening));
+});
 
 async function refreshParallelStatus() {
   const handle = await getStoredSaveDirectory();
@@ -184,33 +188,14 @@ purchaseVerifyButton.addEventListener("click", async () => {
   }
 });
 
-function renderLocaleOptions() {
-  localeSelect.replaceChildren();
-  for (const locale of SUPPORTED_LOCALES) {
-    const option = document.createElement("option");
-    option.value = locale;
-    option.textContent = LOCALE_NAMES[locale];
-    localeSelect.append(option);
-  }
-  localeSelect.value = t.locale;
-}
-
 function applyLocale(locale) {
   t = translator(locale);
   document.documentElement.lang = t.locale;
   document.title = t("settings.title");
   applyStaticTranslations(document, t);
-  renderLocaleOptions();
   void refreshParallelStatus();
   void refreshLicenseStatus();
 }
-
-localeSelect.addEventListener("change", async () => {
-  const next = normalizeLocale(localeSelect.value);
-  if (!next) return;
-  await saveLocale(next);
-  applyLocale(next);
-});
 
 chrome.storage?.onChanged?.addListener((changes, area) => {
   if (area !== "local" || !changes[LOCALE_STORAGE_KEY]) return;

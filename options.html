@@ -7,28 +7,32 @@
     <style>
       :root { color-scheme: dark; font-family: "Segoe UI", "Malgun Gothic", sans-serif; background: #10141c; color: #f4f7fb; }
       body { width: 100%; margin: 0; padding: 18px; box-sizing: border-box; background: #10141c; }
-      h1 { margin: 0 0 4px; font-size: 18px; }
-      .sub { margin: 0 0 16px; color: #8f9db0; font-size: 11px; line-height: 1.5; }
-      section + section { padding-top: 10px; border-top: 1px solid #2a3444; }
-      .label { margin: 0 0 6px; font-size: 12px; font-weight: 700; }
+      section + section { margin-top: 14px; padding-top: 14px; border-top: 1px solid #2a3444; }
+      .label { margin: 0 0 8px; font-size: 12px; font-weight: 700; }
       .desc { margin: 0 0 10px; color: #9eacc0; font-size: 11px; line-height: 1.5; }
-      .buttons { display: flex; gap: 8px; margin-top: 8px; }
-      button { flex: 1; min-height: 32px; padding: 0 11px; border: 0; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700; text-align: left; }
+      .row { display: flex; gap: 8px; margin-top: 8px; }
+      .row > select { flex: 1 1 auto; min-width: 0; }
+      button { min-height: 32px; padding: 0 14px; border: 0; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700; white-space: nowrap; }
+      .block { width: 100%; text-align: left; }
       .primary { background: #4d84e8; color: #fff; }
       .primary:hover { background: #6195f2; }
       .ghost { background: #202c3d; color: #dce6f4; }
       .ghost:hover { background: #2c3d55; }
-      .status { min-height: 16px; margin: 8px 0 0; color: #8f9db0; font-size: 11px; }
+      .link-button { flex: 0 0 auto; margin-top: 10px; padding: 0; background: transparent; color: #80b1f5; font-size: 11px; }
+      .link-button:hover { color: #a8caff; }
+      .link-button:focus-visible { outline: 2px solid #73a5ff; outline-offset: 2px; }
+      .status { margin: 8px 0 0; color: #8f9db0; font-size: 11px; line-height: 1.5; }
       .status:empty { display: none; }
-      .license-device-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-      .license-device-row .status { margin: 0; }
+      .head-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+      .head-row .label, .head-row .status { margin: 0; }
       .auth-status { flex: 0 0 auto; color: #8f9db0; font-size: 11px; font-weight: 700; }
       .auth-status.authenticated { color: #78d99a; }
-      .license-key-field { position: relative; }
-      .license-key-field input { width: 100%; box-sizing: border-box; min-height: 36px; padding: 8px 40px 8px 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
-      select, .purchase-field input { width: 100%; box-sizing: border-box; min-height: 36px; padding: 0 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
-      .purchase-field input { padding: 8px 10px; }
-      .address-value { word-break: break-all; }
+      .key-field { position: relative; }
+      .key-field input { width: 100%; box-sizing: border-box; min-height: 36px; padding: 8px 40px 8px 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
+      select, input[type="text"] { box-sizing: border-box; width: 100%; min-height: 36px; padding: 0 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
+      #purchase-order { margin-top: 10px; padding: 10px; border: 1px solid #2a3444; border-radius: 8px; background: #131a25; }
+      #purchase-order[hidden] { display: none; }
+      .pay-line { margin: 0 0 6px; color: #c3cede; font-size: 11px; line-height: 1.5; word-break: break-all; }
       .input-icon-button { position: absolute; top: 0; right: 0; width: 36px; height: 36px; flex: none; min-height: 0; padding: 0; border: 0; border-radius: 0 8px 8px 0; background: transparent; color: #8f9db0; cursor: pointer; font-size: 0; }
       .input-icon-button:hover, .input-icon-button:focus-visible { background: rgba(255, 255, 255, .06); color: #fff; }
       .input-icon-button:focus-visible { outline: 2px solid #73a5ff; outline-offset: -2px; }
@@ -37,12 +41,12 @@
   </head>
   <body>
     <section id="license-section">
-      <p class="label" data-i18n="settings.license">Pro license</p>
-      <div class="license-device-row">
-        <span id="license-device-status" class="status" role="status" aria-live="polite"></span>
+      <div class="head-row">
+        <p class="label" data-i18n="settings.license">Pro license</p>
         <span id="license-auth-status" class="auth-status" role="status" aria-live="polite"></span>
       </div>
-      <div class="license-key-field">
+      <p id="license-device-status" class="status" role="status" aria-live="polite"></p>
+      <div class="key-field">
         <input id="license-key" type="text" data-i18n-placeholder="settings.keyPlaceholder" placeholder="AM-XXXX…" autocomplete="off" />
         <button id="license-copy" class="input-icon-button" type="button" data-i18n-label="settings.copyKey" aria-label="Copy key" title="Copy key">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -51,46 +55,36 @@
           </svg>
         </button>
       </div>
+      <div class="row">
+        <button id="license-activate" class="primary block" type="button" data-i18n="settings.activateKey">Register key</button>
+      </div>
       <p id="license-status" class="status" role="status" aria-live="polite" data-i18n="settings.checking">Checking…</p>
-      <div class="buttons">
-        <button id="license-activate" class="primary" type="button" data-i18n="settings.activateKey">Register key</button>
-      </div>
-    </section>
-    <section id="purchase-section">
-      <p class="label" data-i18n="settings.purchase">Buy Pro · USDT</p>
-      <p class="desc" data-i18n="settings.purchaseDesc">Pay with USDT-TRC20 and the license key is issued immediately.</p>
-      <label class="label" for="purchase-period" data-i18n="settings.period">Period</label>
-      <select id="purchase-period">
-        <option value="month" data-i18n="settings.periodMonth">1 month · $5.99 USDT</option>
-        <option value="year" data-i18n="settings.periodYear">1 year · $49 USDT</option>
-      </select>
-      <div class="buttons">
-        <button id="purchase-create" class="primary" type="button" data-i18n="settings.createOrder">Create order</button>
-      </div>
-      <div id="purchase-order" hidden>
-        <p id="purchase-address" class="status address-value"></p>
-        <p id="purchase-amount" class="status"></p>
-        <div class="purchase-field">
-          <input id="purchase-tx" type="text" data-i18n-placeholder="settings.txPlaceholder" placeholder="Enter the transaction hash (TxID) after sending" autocomplete="off" />
+      <button id="purchase-toggle" class="link-button" type="button" aria-expanded="false" aria-controls="purchase-panel" data-i18n="settings.buyPro">Buy Pro</button>
+      <div id="purchase-panel" hidden>
+        <div class="row">
+          <select id="purchase-period" data-i18n-label="settings.period" aria-label="Period">
+            <option value="month" data-i18n="settings.periodMonth">1 month · $5.99 USDT</option>
+            <option value="year" data-i18n="settings.periodYear">1 year · $49 USDT</option>
+          </select>
+          <button id="purchase-create" class="primary" type="button" data-i18n="settings.createOrder">Order</button>
         </div>
-        <div class="buttons">
-          <button id="purchase-verify" class="primary" type="button" data-i18n="settings.verifyPayment">Verify payment</button>
+        <div id="purchase-order" hidden>
+          <p id="purchase-address" class="pay-line"></p>
+          <p id="purchase-amount" class="pay-line"></p>
+          <input id="purchase-tx" type="text" data-i18n-placeholder="settings.txPlaceholder" placeholder="Transaction hash (TxID)" autocomplete="off" />
+          <div class="row">
+            <button id="purchase-verify" class="primary block" type="button" data-i18n="settings.verifyPayment">Verify payment</button>
+          </div>
         </div>
+        <p id="purchase-status" class="status" role="status" aria-live="polite"></p>
       </div>
-      <p id="purchase-status" class="status" role="status" aria-live="polite"></p>
     </section>
     <section>
       <p class="label" data-i18n="settings.saveFolder">Save folder</p>
-      <p class="desc" data-i18n="settings.saveFolderDesc">Create a new folder and select it.</p>
       <p id="parallel-status" class="status" role="status" aria-live="polite" data-i18n="settings.checking">Checking…</p>
-      <div class="buttons">
-        <button id="parallel-folder" class="ghost" type="button" data-i18n="settings.changeFolder">Change save folder</button>
+      <div class="row">
+        <button id="parallel-folder" class="ghost block" type="button" data-i18n="settings.changeFolder">Change save folder</button>
       </div>
-    </section>
-    <section>
-      <p class="label" data-i18n="settings.language">Display language</p>
-      <p class="desc" data-i18n="settings.languageDesc">Language used in the popup and settings.</p>
-      <select id="ui-locale" data-i18n-label="settings.language" aria-label="Display language"></select>
     </section>
     <script type="module" src="options.js"></script>
   </body>

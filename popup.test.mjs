@@ -235,11 +235,38 @@ test("popup and settings render every visible string through the locale table", 
       assert.match(line.trim(), /^\/\//, `${name} keeps Korean only in comments: ${line.trim()}`);
     }
   }
-  assert.match(optionsHtml, /id="ui-locale"/);
-  assert.match(optionsScript, /SUPPORTED_LOCALES/);
-  assert.match(optionsScript, /saveLocale\(next\)/);
   assert.match(popupScript, /applyLocale\(await loadLocale\(\)\)/);
   assert.match(popupScript, /changes\[LOCALE_STORAGE_KEY\]/);
+  assert.match(optionsScript, /changes\[LOCALE_STORAGE_KEY\]/);
+});
+
+test("language lives in a header globe menu, not inside settings", async () => {
+  const [popupHtml, popupScript, popupCss, optionsHtml] = await Promise.all([
+    readFile(new URL("./popup.html", import.meta.url), "utf8"),
+    readFile(new URL("./popup.js", import.meta.url), "utf8"),
+    readFile(new URL("./popup.css", import.meta.url), "utf8"),
+    readFile(new URL("./options.html", import.meta.url), "utf8"),
+  ]);
+  assert.match(popupHtml, /id="locale"[^>]*aria-haspopup="true"/);
+  assert.match(popupHtml, /id="locale-menu"[^>]*role="menu"/);
+  assert.match(popupScript, /renderLocaleMenu/);
+  assert.match(popupScript, /saveLocale\(locale\)/);
+  assert.match(popupScript, /closeLocaleMenu/);
+  assert.match(popupCss, /\.locale-menu\s*\{/);
+  assert.doesNotMatch(optionsHtml, /id="ui-locale"/);
+  assert.doesNotMatch(optionsHtml, /settings\.language/);
+});
+
+test("settings keeps the Pro purchase flow collapsed behind one action", async () => {
+  const [optionsHtml, optionsScript] = await Promise.all([
+    readFile(new URL("./options.html", import.meta.url), "utf8"),
+    readFile(new URL("./options.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(optionsHtml, /id="purchase-toggle"[^>]*aria-expanded="false"/);
+  assert.match(optionsHtml, /id="purchase-panel" hidden/);
+  assert.match(optionsScript, /purchasePanel\.hidden = !opening/);
+  // Three sections at most: license (with purchase inside) and the save folder.
+  assert.equal((optionsHtml.match(/<section/g) || []).length, 2);
 });
 
 test("the in-page download overlay follows the stored UI locale", async () => {

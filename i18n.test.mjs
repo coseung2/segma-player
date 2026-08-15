@@ -53,8 +53,8 @@ const PROBE_KEYS = [
   "tab.detect", "tab.link", "detect.rescan", "detect.empty", "jobs.collapse", "jobs.clear",
   "media.progressive", "media.stream", "action.download", "action.cancel", "action.retry",
   "quality.label", "link.addressLabel", "save.path", "status.queued", "status.completed",
-  "stage.saving", "msg.savingSegments", "overlay.heading", "settings.language", "settings.license",
-  "settings.activateKey", "settings.saveFolder", "settings.changeFolder",
+  "stage.saving", "msg.savingSegments", "overlay.heading", "app.language", "settings.license",
+  "settings.activateKey", "settings.saveFolder", "settings.changeFolder", "settings.buyPro",
 ];
 
 test("interpolates placeholders and falls back to English for unknown locales", () => {

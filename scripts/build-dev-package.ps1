@@ -17,6 +17,8 @@ $archiveName = if ($Edition -eq 'pro') {
 } else {
   "aura-media-downloader-$repoVersion.zip"
 }
+$stagingRoot = Join-Path $ProjectRoot 'artifacts\chrome-web-store'
+$stagingDirectory = Join-Path $stagingRoot $(if ($Edition -eq 'pro') { 'staging-pro' } else { 'staging' })
 
 $tempRoot = Join-Path $env:TEMP ("aura-dev-pkg-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
@@ -97,10 +99,22 @@ try {
     $fileStream.Dispose()
   }
 
+  $projectPrefix = $ProjectRoot.TrimEnd('\') + '\'
+  $resolvedStagingDirectory = [System.IO.Path]::GetFullPath($stagingDirectory).TrimEnd('\')
+  if (-not $resolvedStagingDirectory.StartsWith($projectPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to replace a staging directory outside the project: $resolvedStagingDirectory"
+  }
+  New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+  if (Test-Path -LiteralPath $resolvedStagingDirectory) {
+    Remove-Item -LiteralPath $resolvedStagingDirectory -Recurse -Force
+  }
+  Copy-Item -LiteralPath $stage -Destination $resolvedStagingDirectory -Recurse -Force
+
   Write-Output "DEV_PACKAGE_OK"
   Write-Output "VERSION=$repoVersion"
   Write-Output "EDITION=$Edition"
   Write-Output "ZIP=$outputZip"
+  Write-Output "STAGING=$resolvedStagingDirectory"
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

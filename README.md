@@ -16,9 +16,16 @@ The development checkout uses the Pro profile in `edition.js`. The Chrome Web St
 
 ## Architecture
 
-- `content.js` and `background.js` detect compatible progressive and HLS resources.
-- `download-worker.js` keeps accepted downloads running in an offscreen document.
-- `hls-download.js` streams data and enforces the active edition limits.
+- `page-media-observer.js` collects bounded MAIN-world evidence from hls.js,
+  video.js, Plyr, JWPlayer, Level5, Fetch, and XHR without patching MSE buffers.
+- `content.js` reports exact frame playback state and structured iframe layout;
+  `candidate-ranking.js` combines that evidence into primary/alternate/ad scores.
+- `background.js` owns candidate state, short-lived playback sessions, exact
+  request-context leases, and source-frame token refresh.
+- `download-worker.js` keeps accepted downloads running in an offscreen document
+  and `hls-download.js` refreshes short-lived manifests after 401/403 responses.
+- `contextual-hls-loader.js` applies the captured iframe Referer/Origin/Cookie
+  context to each manifest, segment, and key request made by the browser player.
 - `save-directory.js` keeps a one-time File System Access folder handle so the
   extension writes files itself with 6-way parallel reception
   (`parallel-download.js`) — no native helper is involved.
@@ -34,9 +41,16 @@ The store ZIP excludes private page-key code, static site-specific redirect rule
 
 ```powershell
 rtk npm test
+rtk npm run test:media-sites
 rtk cargo test --manifest-path native-host/Cargo.toml
 rtk cargo fmt --check --manifest-path native-host/Cargo.toml
 ```
+
+The deterministic media-site fixtures cover the MissAV ad-iframe priority and
+AV19/Level5 token-session regressions. An opt-in live smoke probe is available
+with `npm run monitor:media-sites`; it writes only redacted candidate URLs to
+`artifacts/live-media-smoke.json`. See `MEDIA_PIPELINE_TECHNICAL_REVIEW.md` for
+the architecture review, remaining risks, and phased roadmap.
 
 Load the repository root as an unpacked extension for development. No
 companion installation is needed; the first download asks for a save folder

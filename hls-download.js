@@ -1,3 +1,4 @@
+import { canonicalHttpUrl, normalizeOriginPath } from "./candidate.js";
 import {
   activeKeyForSegment,
   chooseHlsVariant,
@@ -102,6 +103,7 @@ export function createDownloadContext({
   paceBytes = null,
   totalBytes = null,
   signal = null,
+  candidate = null,
 } = {}) {
   return {
     onStatus: typeof onStatus === "function" ? onStatus : null,
@@ -111,6 +113,9 @@ export function createDownloadContext({
     signal: signal && typeof signal === "object" ? signal : null,
     frameId: Number.isInteger(frameId) ? frameId : null,
     tabId: Number.isInteger(tabId) ? tabId : null,
+    candidate: candidate && typeof candidate === "object" ? candidate : null,
+    refreshPromise: null,
+    lastRefreshAt: 0,
     recordedHeadersByUrl: new Map(),
   };
 }
@@ -483,6 +488,88 @@ async function fetchArrayBuffer(url, referrer, label, context = defaultDownloadC
   return data;
 }
 
+function refreshableHttpFailure(error) {
+  return error?.httpStatus === 401 || error?.httpStatus === 403;
+}
+
+async function requestFreshDownloadCandidate(context = defaultDownloadContext) {
+  const candidate = context.candidate;
+  if (!candidate || typeof candidate.resourceUrl !== "string") return null;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "refresh-download-candidate",
+      candidate,
+    });
+    const refreshed = response?.ok && response.candidate && typeof response.candidate === "object"
+      ? response.candidate
+      : null;
+    const resourceUrl = refreshed ? canonicalHttpUrl(refreshed.resourceUrl)?.href : null;
+    if (!resourceUrl || refreshed.mediaType !== candidate.mediaType) return null;
+    return { ...refreshed, resourceUrl };
+  } catch {
+    return null;
+  }
+}
+
+function sameHlsShape(current, fresh) {
+  if (!Array.isArray(current?.segments) || !Array.isArray(fresh?.segments)
+    || current.segments.length !== fresh.segments.length || current.segments.length === 0) return false;
+  if (Number(current.mediaSequence || 0) !== Number(fresh.mediaSequence || 0)) return false;
+  let matchingPaths = 0;
+  for (let index = 0; index < current.segments.length; index += 1) {
+    try {
+      const left = new URL(current.segments[index]);
+      const right = new URL(fresh.segments[index]);
+      if (left.pathname === right.pathname) matchingPaths += 1;
+    } catch {
+      return false;
+    }
+  }
+  return matchingPaths >= Math.max(1, Math.floor(current.segments.length * 0.8));
+}
+
+async function refreshHlsMedia(media, referrer, videoTabId, context = defaultDownloadContext) {
+  if (!context.candidate || !Number.isInteger(videoTabId) || videoTabId <= 0) return false;
+  if (context.refreshPromise) return context.refreshPromise;
+  const now = Date.now();
+  if (now - Number(context.lastRefreshAt || 0) < 5_000) return false;
+  context.lastRefreshAt = now;
+  context.refreshPromise = (async () => {
+    setStatus("만료된 영상 주소를 원본 플레이어에서 갱신하는 중…", false, context);
+    const refreshedCandidate = await requestFreshDownloadCandidate(context);
+    if (!refreshedCandidate) return false;
+    const refreshedReferrer = refreshedCandidate.pageUrl || referrer;
+    const freshMedia = await loadMediaPlaylist(
+      refreshedCandidate.resourceUrl,
+      0,
+      refreshedReferrer,
+      context,
+    );
+    if (!sameHlsShape(media, freshMedia)) {
+      const error = new Error("갱신된 영상 목록 구성이 달라 이어받을 수 없습니다. 처음부터 다시 시도해 주세요.");
+      error.code = "media-refresh-shape-changed";
+      throw error;
+    }
+    for (const key of media.keys || []) keyMaterialCache.delete(key.uri);
+    Object.assign(media, {
+      initUrl: freshMedia.initUrl,
+      initByterange: freshMedia.initByterange,
+      segments: [...freshMedia.segments],
+      byteranges: [...(freshMedia.byteranges || [])],
+      keys: [...(freshMedia.keys || [])],
+      variants: [...(freshMedia.variants || [])],
+      mediaSequence: freshMedia.mediaSequence,
+      baseUrl: freshMedia.baseUrl,
+    });
+    Object.assign(context.candidate, refreshedCandidate);
+    setStatus("영상 주소를 갱신했습니다. 다운로드를 계속합니다…", false, context);
+    return true;
+  })().finally(() => {
+    context.refreshPromise = null;
+  });
+  return context.refreshPromise;
+}
+
 function abortError() {
   const error = new Error("사용자가 다운로드를 취소했습니다.");
   error.name = "AbortError";
@@ -658,7 +745,6 @@ export async function prepareHlsKeys(media, referrer, videoTabId = null, context
 }
 
 async function fetchSegment(index, media, referrer, videoTabId = null, context = defaultDownloadContext) {
-  const activeKey = activeKeyForSegment(media.keys, index);
   let lastError = null;
   for (let attempt = 0; attempt < SEGMENT_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
@@ -669,6 +755,7 @@ async function fetchSegment(index, media, referrer, videoTabId = null, context =
         context,
         media.byteranges?.[index] || null,
       );
+      const activeKey = activeKeyForSegment(media.keys, index);
       if (activeKey) {
         const { keyBytes, importedKey } = await keyMaterial(activeKey, referrer, videoTabId, context);
         const iv = ivForSegment(activeKey, media.mediaSequence, index);
@@ -678,6 +765,10 @@ async function fetchSegment(index, media, referrer, videoTabId = null, context =
     } catch (error) {
       lastError = error;
       if (context.signal?.aborted) throw error;
+      if (refreshableHttpFailure(error)) {
+        const refreshed = await refreshHlsMedia(media, referrer, videoTabId, context);
+        if (refreshed) continue;
+      }
       const permanentStatus = Number.isInteger(error?.httpStatus)
         && !SEGMENT_RETRY_STATUSES.has(error.httpStatus);
       if (permanentStatus) throw error;
@@ -1402,6 +1493,7 @@ export async function prepareDownloadCandidate(candidate, {
     signal,
     frameId: candidate.frameId,
     tabId: candidate.tabId,
+    candidate,
   });
   await loadRecordedHeaders(context);
   const progressive = candidate.mediaType === "PROGRESSIVE";
@@ -1474,7 +1566,17 @@ export async function prepareDownloadCandidate(candidate, {
     throw new Error("unsupported-media");
   }
   setStatus("영상 정보를 확인하는 중…", false, context);
-  const media = await loadMediaPlaylist(candidate.resourceUrl, 0, candidate.pageUrl, context);
+  let media;
+  try {
+    media = await loadMediaPlaylist(candidate.resourceUrl, 0, candidate.pageUrl, context);
+  } catch (error) {
+    if (!refreshableHttpFailure(error)) throw error;
+    const refreshedCandidate = await requestFreshDownloadCandidate(context);
+    if (!refreshedCandidate) throw error;
+    Object.assign(candidate, refreshedCandidate);
+    Object.assign(context.candidate, refreshedCandidate);
+    media = await loadMediaPlaylist(candidate.resourceUrl, 0, candidate.pageUrl, context);
+  }
   const extension = hlsFileExtension(media.initUrl, media.segments);
   const filename = filenameFromTemplate(
     await configuredFilenameTemplate(),

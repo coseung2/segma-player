@@ -314,6 +314,13 @@ async function runParallelSave(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "download-worker-state" && sender.id === chrome.runtime.id) {
+    sendResponse({
+      ok: true,
+      activeJobIds: [...new Set([...acceptedJobIds, ...runningJobs.keys()])],
+    });
+    return false;
+  }
   if (message?.type === "download-worker-heartbeat" && sender.id === chrome.runtime.id) {
     syncWorkerHeartbeat();
     sendResponse({ ok: true, active: workerHasActiveWork() });

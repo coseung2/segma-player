@@ -40,6 +40,7 @@ try {
   foreach ($relative in @(
     'popup-play.html',
     'playback-addon.js',
+    'contextual-hls-loader.js',
     'collection.js',
     'player.html',
     'player.js',

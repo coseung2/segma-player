@@ -12,7 +12,11 @@
   const DOOD_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   const PAGE_MEDIA_EVENT_TYPE = "aura-media-observer-event-v1";
   const LEVEL5_MEDIA_DISCOVERY_REQUEST = "aura-level5-media-discovery-request-v1";
+  const PAGE_MEDIA_SNAPSHOT_REQUEST_TYPE = "aura-media-observer-snapshot-request-v1";
+  const MAX_RECENT_REPORTS = 256;
   const seen = new Map();
+  const recentReports = new Map();
+  const pendingSnapshots = new Map();
   let scanTimer = null;
   let scanScheduled = false;
   let lastMainFrames = "";
@@ -27,6 +31,8 @@
   let cachedEmbeddedUrls = null;
   let performanceCursorEntry = null;
   let performanceObserverActive = false;
+  let lastFrameStateSignature = "";
+  let lastFrameStateAt = 0;
 
   function send(message) {
     try {
@@ -73,22 +79,68 @@
     doodRetryTimer?.unref?.();
   }
 
-  function report(resourceUrl, contentType = "", main = false, fromMediaElement = false) {
+  function safeMetadataToken(value, fallback = "") {
+    return typeof value === "string" && /^[a-z0-9][a-z0-9._:-]{0,127}$/i.test(value)
+      ? value
+      : fallback;
+  }
+
+  function reportKey(resourceUrl, metadata = {}) {
+    return [
+      resourceUrl,
+      safeMetadataToken(metadata.detectionSource, "unknown"),
+      safeMetadataToken(metadata.player, ""),
+      safeMetadataToken(metadata.sessionId, ""),
+      safeMetadataToken(metadata.requestType, ""),
+    ].join("|");
+  }
+
+  function rememberReport(record) {
+    const key = reportKey(record.resourceUrl, record);
+    recentReports.delete(key);
+    recentReports.set(key, record);
+    while (recentReports.size > MAX_RECENT_REPORTS) {
+      recentReports.delete(recentReports.keys().next().value);
+    }
+  }
+
+  function report(resourceUrl, contentType = "", main = false, fromMediaElement = false, metadata = {}) {
     if (typeof resourceUrl !== "string" || resourceUrl.length === 0 || resourceUrl.length > MAX_URL_BYTES
       || typeof contentType !== "string" || contentType.length > 128) return;
-    const previousType = seen.get(resourceUrl) || "";
-    if (previousType && (!contentType || previousType === contentType)) return;
-    seen.set(resourceUrl, contentType || previousType);
+    const detectionSource = safeMetadataToken(
+      metadata.detectionSource,
+      fromMediaElement ? "media-element" : "unknown",
+    );
+    const player = safeMetadataToken(metadata.player, "");
+    const sessionId = safeMetadataToken(metadata.sessionId, "");
+    const requestType = safeMetadataToken(metadata.requestType, "");
+    const confidence = Number.isFinite(metadata.confidence)
+      ? Math.max(0, Math.min(100, Math.round(metadata.confidence)))
+      : (fromMediaElement ? 80 : 50);
+    const observedAt = Number.isFinite(metadata.observedAt) ? metadata.observedAt : Date.now();
+    const key = reportKey(resourceUrl, { detectionSource, player, sessionId, requestType });
+    const previousType = seen.get(key) || "";
+    if (previousType && (!contentType || previousType === contentType) && metadata.force !== true) return;
+    seen.set(key, contentType || previousType);
     while (seen.size > MAX_SEEN) seen.delete(seen.keys().next().value);
-    send({
+    const record = {
       type: "resource",
       resourceUrl,
       contentType,
       main,
+      explicitMain: Boolean(main),
       fromMediaElement,
+      detectionSource,
+      player,
+      sessionId,
+      requestType,
+      confidence,
+      observedAt,
       frameUrl: currentFrameUrl(),
       pageTitle: [...document.title].slice(0, MAX_TITLE_CHARACTERS).join(""),
-    });
+    };
+    rememberReport(record);
+    send(record);
   }
 
   function visibleArea(element) {
@@ -110,14 +162,61 @@
       } catch { /* keep browser-owned blob sources */ }
       const host = element.tagName === "SOURCE" ? element.parentElement : element;
       const area = visibleArea(host);
+      const playing = Boolean(area > 0 && host && "paused" in host && !host.paused);
+      const durationSeconds = Number(host?.duration);
       result.push({
         url,
         type: element.type || "",
         area,
-        playing: Boolean(area > 0 && host && "paused" in host && !host.paused),
+        playing,
+        muted: Boolean(host?.muted),
+        durationMs: Number.isFinite(durationSeconds) && durationSeconds > 0
+          ? Math.min(24 * 60 * 60 * 1000, Math.round(durationSeconds * 1000))
+          : 0,
       });
     }
     return result;
+  }
+
+  function viewportArea() {
+    const width = Number(globalThis.innerWidth || document.documentElement?.clientWidth || 0);
+    const height = Number(globalThis.innerHeight || document.documentElement?.clientHeight || 0);
+    return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+      ? width * height
+      : 0;
+  }
+
+  function reportFrameMediaState(elements) {
+    const strongest = [...elements].sort((left, right) =>
+      (Number(right.playing) - Number(left.playing)) || (right.area - left.area))[0] || null;
+    const area = strongest?.area || 0;
+    const viewport = viewportArea();
+    const state = {
+      type: "frame-media-state",
+      frameUrl: currentFrameUrl(),
+      playing: Boolean(strongest?.playing),
+      muted: Boolean(strongest?.muted),
+      visibleArea: Math.max(0, Math.round(area)),
+      viewportRatio: viewport > 0 ? Math.max(0, Math.min(1, area / viewport)) : 0,
+      durationMs: strongest?.durationMs || 0,
+      topFrame: window === window.top,
+      hasBlobSource: elements.some((item) => /^blob:/i.test(item.url)),
+      observedAt: Date.now(),
+    };
+    const signature = JSON.stringify([
+      state.frameUrl,
+      state.playing,
+      state.muted,
+      Math.round(state.visibleArea / 10_000),
+      Math.round(state.viewportRatio * 100),
+      Math.round(state.durationMs / 1000),
+      state.hasBlobSource,
+    ]);
+    const now = Date.now();
+    if (signature === lastFrameStateSignature && now - lastFrameStateAt < 15_000) return;
+    lastFrameStateSignature = signature;
+    lastFrameStateAt = now;
+    send(state);
   }
 
   function embeddedPlayerUrls() {
@@ -145,21 +244,34 @@
   function reportMainFrames() {
     if (window.top !== window) return;
     const frames = [];
+    const viewport = viewportArea();
     let order = 0;
     for (const iframe of document.querySelectorAll("iframe")) {
       const src = iframe.src && !iframe.src.startsWith("about:") ? iframe.src : (iframe.dataset?.src || "");
       if (!/^https?:\/\//i.test(src)) continue;
       const area = visibleArea(iframe);
       if (area <= 0) continue;
-      frames.push({ src, area, order });
+      const hint = `${src} ${iframe.title || ""} ${iframe.name || ""} ${iframe.id || ""}`;
+      frames.push({
+        src,
+        area: Math.round(area),
+        viewportRatio: viewport > 0 ? Math.max(0, Math.min(1, area / viewport)) : 0,
+        adHint: /(?:^|[\W_])(?:ads?|advert|banner|preroll|vast|vpaid)(?:[\W_]|$)/i.test(hint),
+        order,
+      });
       order += 1;
     }
     if (!frames.length) return;
-    const top = [...frames].sort((a, b) => (b.area - a.area) || (a.order - b.order))[0];
-    const url = top.src;
-    if (!url || url === lastMainFrames) return;
-    lastMainFrames = url;
-    send({ type: "main-frame", urls: [url] });
+    const sorted = [...frames].sort((a, b) => (b.area - a.area) || (a.order - b.order));
+    const signature = JSON.stringify(sorted.map((frame) => [
+      frame.src,
+      Math.round(frame.area / 10_000),
+      Math.round(frame.viewportRatio * 100),
+      frame.adHint,
+    ]));
+    if (signature === lastMainFrames) return;
+    lastMainFrames = signature;
+    send({ type: "main-frame", urls: [sorted[0].src], frames: sorted });
   }
 
   async function resolveDoodDirectOnce(force) {
@@ -288,11 +400,97 @@
     return direct.href;
   }
 
+  function sameOriginPath(left, right) {
+    try {
+      const leftUrl = new URL(left);
+      const rightUrl = new URL(right);
+      return leftUrl.origin === rightUrl.origin && leftUrl.pathname === rightUrl.pathname;
+    } catch {
+      return false;
+    }
+  }
+
+  function refreshRecordScore(record, request) {
+    let score = Number(record.observedAt) || 0;
+    if (request.sessionId && record.sessionId === request.sessionId) score += 1_000_000_000_000_000;
+    if (request.player && record.player === request.player) score += 500_000_000_000_000;
+    if (sameOriginPath(record.resourceUrl, request.resourceUrl)) score += 250_000_000_000_000;
+    if (record.detectionSource === "player-adapter") score += 100_000_000_000_000;
+    if (/^blob:/i.test(record.resourceUrl)) score -= 2_000_000_000_000_000;
+    return score;
+  }
+
+  function bestRefreshRecord(request, collected = []) {
+    const pool = [...recentReports.values(), ...collected]
+      .filter((record) => typeof record?.resourceUrl === "string" && /^https?:/i.test(record.resourceUrl));
+    return pool.sort((left, right) => refreshRecordScore(right, request) - refreshRecordScore(left, request))[0] || null;
+  }
+
+  function finishSnapshot(requestId) {
+    const pending = pendingSnapshots.get(requestId);
+    if (!pending) return;
+    pendingSnapshots.delete(requestId);
+    clearTimeout(pending.timer);
+    const best = bestRefreshRecord(pending.request, pending.collected);
+    pending.sendResponse(best ? {
+      ok: true,
+      url: best.resourceUrl,
+      frameUrl: currentFrameUrl(),
+      player: best.player || "",
+      sessionId: best.sessionId || "",
+      observedAt: best.observedAt || Date.now(),
+    } : { ok: false, error: "media-source-unavailable" });
+  }
+
   function handlePageMediaEvent(event) {
     if (event.source !== window || event.data?.type !== PAGE_MEDIA_EVENT_TYPE) return;
     const data = event.data;
-    if (data.kind === "manifest") report(data.url, data.contentType || "", false, false);
-    if (data.kind === "media") report(data.url, data.contentType || "application/octet-stream", false, true);
+    if (data.kind === "snapshot-complete" && typeof data.requestId === "string") {
+      finishSnapshot(data.requestId);
+      return;
+    }
+    if (!["manifest", "media", "player-source"].includes(data.kind)) return;
+    const detectionSource = data.kind === "player-source"
+      ? "player-adapter"
+      : data.source === "fetch" ? "main-fetch" : data.source === "xhr" ? "main-xhr" : "unknown";
+    const record = {
+      resourceUrl: data.url,
+      contentType: data.contentType || (data.kind === "media" ? "application/octet-stream" : ""),
+      detectionSource,
+      player: safeMetadataToken(data.player, ""),
+      sessionId: safeMetadataToken(data.sessionId, ""),
+      requestType: safeMetadataToken(data.source, ""),
+      confidence: Number.isFinite(data.confidence)
+        ? data.confidence
+        : (data.kind === "player-source" ? 95 : data.kind === "media" ? 90 : 85),
+      observedAt: Number.isFinite(data.observedAt) ? data.observedAt : Date.now(),
+    };
+    if (typeof data.requestId === "string") {
+      const pending = pendingSnapshots.get(data.requestId);
+      if (pending) pending.collected.push(record);
+    }
+    report(record.resourceUrl, record.contentType, false, data.kind === "media", record);
+  }
+
+  function handleRefreshMediaSource(message, sendResponse) {
+    if (message?.type !== "refresh-media-source" || typeof message.resourceUrl !== "string") return false;
+    const request = {
+      resourceUrl: message.resourceUrl,
+      player: safeMetadataToken(message.player, ""),
+      sessionId: safeMetadataToken(message.sessionId, ""),
+    };
+    const requestId = crypto.randomUUID();
+    const timer = setTimeout(() => finishSnapshot(requestId), 1_500);
+    pendingSnapshots.set(requestId, { request, collected: [], sendResponse, timer });
+    scheduleScan(true);
+    window.postMessage({
+      type: PAGE_MEDIA_SNAPSHOT_REQUEST_TYPE,
+      requestId,
+      resourceUrl: request.resourceUrl,
+      player: request.player,
+      sessionId: request.sessionId,
+    }, "*");
+    return true;
   }
 
   function handleLevel5KeyRequest(message, sendResponse) {
@@ -312,7 +510,11 @@
   async function reportDoodPlayer() {
     const resolved = await resolveDoodDirect();
     if (!resolved) return;
-    report(resolved.url, "video/mp4", false, true);
+    report(resolved.url, "video/mp4", false, true, {
+      detectionSource: "player-adapter",
+      player: "dood",
+      confidence: 100,
+    });
     send({ type: "dood-direct", url: resolved.url, frameUrl: resolved.frameUrl });
   }
 
@@ -348,6 +550,7 @@
       scheduleScan(true);
       return false;
     }
+    if (handleRefreshMediaSource(message, sendResponse)) return true;
     if (handleLevel5KeyRequest(message, sendResponse)) return true;
     if (handleDoodRequest(message, sendResponse)) return true;
     return handleDirectDownload(message, sendResponse);
@@ -550,8 +753,15 @@
       // behind the popover's main-only filter, so blob sources are never main.
       if (!/^blob:/i.test(main.url)) mainUrl = main.url;
     }
-    for (const item of elements) report(item.url, item.type, item.url === mainUrl, true);
-    for (const url of embeddedPlayerUrls()) report(url, "video/mp4", true, true);
+    for (const item of elements) report(item.url, item.type, item.url === mainUrl, true, {
+      detectionSource: "media-element",
+      confidence: item.playing ? 96 : 80,
+    });
+    for (const url of embeddedPlayerUrls()) report(url, "video/mp4", true, true, {
+      detectionSource: "inline-config",
+      confidence: 82,
+    });
+    reportFrameMediaState(elements);
     if (!performanceObserverActive) {
       const entries = performance.getEntriesByType("resource");
       let start = 0;
@@ -562,7 +772,10 @@
         // every earlier entry is evicted too, so re-reading the remaining
         // buffer is bounded and `seen` deduplicates already-reported URLs.
       }
-      for (let i = start; i < entries.length; i++) report(entries[i].name);
+      for (let i = start; i < entries.length; i++) report(entries[i].name, "", false, false, {
+        detectionSource: "performance",
+        confidence: 35,
+      });
       if (entries.length) performanceCursorEntry = entries[entries.length - 1];
     }
     reportMainFrames();
@@ -629,7 +842,10 @@
   if (globalThis.PerformanceObserver) {
     try {
       const observer = new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) report(entry.name);
+        for (const entry of list.getEntries()) report(entry.name, "", false, false, {
+          detectionSource: "performance",
+          confidence: 35,
+        });
       });
       observer.observe({ type: "resource", buffered: true });
       performanceObserverActive = true;
@@ -654,5 +870,11 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => handleMessage(message, sendResponse));
   window.addEventListener("message", handlePageMediaEvent);
   window.postMessage({ type: LEVEL5_MEDIA_DISCOVERY_REQUEST }, "*");
+  try {
+    const frameStateHeartbeat = setInterval(() => reportFrameMediaState(mediaElements()), 15_000);
+    frameStateHeartbeat?.unref?.();
+  } catch {
+    // Some test or embedded realms do not expose interval timers.
+  }
   scan();
 })();

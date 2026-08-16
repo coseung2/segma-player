@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 
 const runtimeId = "test-extension-id";
 const workerUrl = `chrome-extension://${runtimeId}/download-worker.html`;
+const popupSender = { id: runtimeId, url: `chrome-extension://${runtimeId}/popup.html` };
 const runtimeListeners = { onMessage: [], onConnect: [] };
 const tabsListeners = { onUpdated: [], onRemoved: [] };
 const webRequestListeners = { onBeforeRedirect: [] };
@@ -512,11 +513,108 @@ test("YouTube transport resources stay out of media detection candidates", async
     frameId: 0,
   }, () => {});
 
-  const listed = await runtimeMessage({ type: "list-candidates" }, {});
+  const listed = await runtimeMessage({ type: "list-candidates" }, popupSender);
   assert.equal(listed.response.candidates.some((candidate) => candidate.previewUrl?.includes("googlevideo.com")), false);
   assert.equal(listed.response.candidates.some((candidate) => candidate.previewUrl === "https://cdn.example/normal-video.mp4"), true);
   assert.equal(listed.response.candidates.find((candidate) => candidate.previewUrl === "https://cdn.example/normal-video.mp4")?.sourceUrl,
     "https://outer.example/watch");
+});
+
+test("trusted popup tooling can inspect an explicit target tab without making it active", async () => {
+  const handler = runtimeListeners.onMessage[0];
+  handler({ type: "clear-tab", tabId: 2 }, {}, () => {});
+  handler({
+    type: "resource",
+    resourceUrl: "https://cdn.example/tab-two.mp4",
+    contentType: "video/mp4",
+    frameUrl: "https://two.example/watch",
+  }, {
+    id: runtimeId,
+    tab: { id: 2, url: "https://two.example/watch", title: "Tab two" },
+    url: "https://two.example/watch",
+    frameId: 0,
+  }, () => {});
+
+  const listed = await runtimeMessage({ type: "list-candidates", tabId: 2 }, popupSender);
+  assert.equal(listed.response.type, "candidates");
+  assert.equal(listed.response.candidates.length, 1);
+  assert.equal(listed.response.candidates[0].tabId, 2);
+  assert.equal(listed.response.candidates[0].previewUrl, "https://cdn.example/tab-two.mp4");
+});
+
+test("playback sessions bind exact token URLs to the trusted player tab", async () => {
+  const handler = runtimeListeners.onMessage[0];
+  handler({ type: "clear-tab", tabId: 1 }, {}, () => {});
+  const tokenUrl = "https://cdn.example/master.m3u8?token=opaque-value";
+  handler({
+    type: "resource",
+    resourceUrl: tokenUrl,
+    contentType: "application/vnd.apple.mpegurl",
+    frameUrl: "https://player.example/embed/1",
+    detectionSource: "player-adapter",
+    player: "hls.js",
+    sessionId: "hls.js:1",
+    confidence: 100,
+  }, {
+    id: runtimeId,
+    tab: { id: 1, url: "https://outer.example/watch", title: "Video" },
+    url: "https://player.example/embed/1",
+    frameId: 4,
+  }, () => {});
+
+  const listed = await runtimeMessage({ type: "list-candidates" }, popupSender);
+  const candidate = listed.response.candidates.find((item) =>
+    item.mediaType?.startsWith("HLS") && item.player === "hls.js");
+  assert.ok(candidate);
+  assert.equal(candidate.previewUrl, null, "tokenized streams must not issue popup preview requests");
+
+  const created = await runtimeMessage({
+    type: "create-playback-session",
+    candidateId: candidate.id,
+    sourceUrl: "https://outer.example/watch",
+  }, {
+    id: runtimeId,
+    url: `chrome-extension://${runtimeId}/popup-play.html`,
+  });
+  assert.equal(created.response.ok, true);
+  assert.equal("resourceUrl" in created.response, false, "launcher response must not expose the token URL");
+  const sessionId = created.response.sessionId;
+
+  const wrongPlayer = await runtimeMessage({
+    type: "resolve-playback-session",
+    sessionId,
+  }, {
+    id: runtimeId,
+    tab: { id: 91 },
+    url: `chrome-extension://${runtimeId}/player.html?session=another-session-id`,
+  });
+  assert.equal(wrongPlayer.keepAlive, false);
+
+  const playerSender = {
+    id: runtimeId,
+    tab: { id: 91 },
+    url: `chrome-extension://${runtimeId}/player.html?session=${sessionId}`,
+  };
+  const resolved = await runtimeMessage({
+    type: "resolve-playback-session",
+    sessionId,
+  }, playerSender);
+  assert.equal(resolved.response.ok, true);
+  assert.equal(resolved.response.session.resourceUrl, tokenUrl);
+  assert.equal(resolved.response.session.referrer, "https://player.example/embed/1");
+
+  const lease = await runtimeMessage({
+    type: "prepare-media-fetch",
+    url: tokenUrl,
+    referrer: "https://player.example/embed/1",
+    sourceContext: { tabId: 1, frameId: 4, initiator: "https://player.example/embed/1" },
+  }, playerSender);
+  assert.equal(lease.response.ok, true);
+  const released = await runtimeMessage({
+    type: "release-media-fetch",
+    leaseId: lease.response.leaseId,
+  }, playerSender);
+  assert.equal(released.response.ok, true);
 });
 
 test("license activation flips the background plan without reinstalling", async () => {

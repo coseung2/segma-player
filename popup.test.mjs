@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { chromium } from "playwright";
+
+let chromium = null;
+try {
+  ({ chromium } = await import("playwright"));
+} catch {
+  // Browser layout coverage is optional in lightweight Node-only environments.
+}
 
 test("popover exposes detection and link input without development test mode", async () => {
   const [html, script] = await Promise.all([
@@ -151,8 +157,18 @@ test("free plan UI gates paid work while keeping Pro benefits visible", async ()
   assert.match(script, /\^https:\\\/\\\//);
 });
 
-test("link panel is compact by default and expands only when activity appears", async () => {
-  const browser = await launchPopupLayoutBrowser();
+test("link panel is compact by default and expands only when activity appears", async (context) => {
+  if (!chromium) {
+    context.skip("Playwright is not installed in this environment");
+    return;
+  }
+  let browser;
+  try {
+    browser = await launchPopupLayoutBrowser();
+  } catch {
+    context.skip("Chrome or Edge is not available for the optional layout probe");
+    return;
+  }
   try {
     const page = await browser.newPage({ viewport: { width: 380, height: 700 } });
     await page.goto(new URL("./popup.html", import.meta.url).href, { waitUntil: "domcontentloaded" });
@@ -300,6 +316,7 @@ async function launchPopupLayoutBrowser() {
   const launchers = [
     () => chromium.launch({ channel: "chrome", headless: true }),
     () => chromium.launch({ channel: "msedge", headless: true }),
+    () => chromium.launch({ headless: true }),
     () => chromium.launch({
       headless: true,
       executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -316,8 +333,18 @@ async function launchPopupLayoutBrowser() {
   throw lastError || new Error("no-browser-for-popup-layout");
 }
 
-test("long popup content stays vertically reachable on the document scroller", async () => {
-  const browser = await launchPopupLayoutBrowser();
+test("long popup content stays vertically reachable on the document scroller", async (context) => {
+  if (!chromium) {
+    context.skip("Playwright is not installed in this environment");
+    return;
+  }
+  let browser;
+  try {
+    browser = await launchPopupLayoutBrowser();
+  } catch {
+    context.skip("Chrome or Edge is not available for the optional layout probe");
+    return;
+  }
   try {
     const page = await browser.newPage({ viewport: { width: 380, height: 600 } });
     await page.goto(new URL("./popup.html", import.meta.url).href, {

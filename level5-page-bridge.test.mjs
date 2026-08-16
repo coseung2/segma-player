@@ -148,11 +148,18 @@ test("reports the real Level5 HLS manifest for isolated-world detection", async 
     on() {},
   };
   const response = await runBridgeFor({ requestUrl, playerSession: { hls } });
-  const manifests = response.posted.filter((message) => message.type === "aura-media-observer-event-v1");
-  assert.deepEqual(manifests.map((message) => message.url), [
+  const mediaEvents = response.posted.filter((message) =>
+    message.type === "aura-media-observer-event-v1");
+  const manifests = mediaEvents.filter((message) => message.kind === "manifest");
+  const playerSources = mediaEvents.filter((message) => message.kind === "player-source");
+  const expectedUrls = [
     "https://k.vdnext.com/cast2/id/master.m3u8?tok=secret",
     "https://k.vdnext.com/cast2/id/720p.m3u8?tok=secret",
-  ]);
+  ];
+  assert.deepEqual(manifests.map((message) => message.url), expectedUrls);
+  assert.deepEqual(playerSources.map((message) => message.url), expectedUrls);
+  assert.equal(playerSources.every((message) => message.player === "level5"), true);
+  assert.equal(new Set(playerSources.map((message) => message.sessionId)).size, 1);
 });
 
 test("Level5 bridge decodes session responses with the page runtime before loader fallback", () => {

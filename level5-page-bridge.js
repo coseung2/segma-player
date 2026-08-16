@@ -7,6 +7,9 @@
   let decoderPromise = null;
   const observedHlsSessions = new Set();
   const reportedManifestUrls = new Set();
+  const reportedPlayerSourceKeys = new Set();
+  const hlsSessionIds = new WeakMap();
+  let nextHlsSessionId = 1;
 
   function errorCode(error, fallback) {
     const code = typeof error?.message === "string" ? error.message : "";
@@ -25,11 +28,67 @@
     return btoa(binary);
   }
 
+  function hlsSessionId(hls) {
+    if (!hls || (typeof hls !== "object" && typeof hls !== "function")) return "";
+    const existing = hlsSessionIds.get(hls);
+    if (existing) return existing;
+    const id = `level5:${nextHlsSessionId++}`;
+    hlsSessionIds.set(hls, id);
+    return id;
+  }
+
+  function postLevel5Source(hls, value, confidence = 100) {
+    const values = Array.isArray(value) ? value : [value];
+    for (const item of values) {
+      const raw = typeof item === "string" ? item : item?.url || item?.uri || "";
+      if (typeof raw !== "string" || !raw) continue;
+      let url;
+      try {
+        url = new URL(raw, location.href);
+        url.hash = "";
+      } catch {
+        continue;
+      }
+      if (!/^https?:$/.test(url.protocol) || url.href.length > 4096) continue;
+      const sourceKey = `${hlsSessionId(hls)}\u0000${url.href}`;
+      if (reportedPlayerSourceKeys.has(sourceKey)) continue;
+      reportedPlayerSourceKeys.add(sourceKey);
+      window.postMessage({
+        type: MEDIA_EVENT,
+        kind: "player-source",
+        source: "player-adapter",
+        player: "level5",
+        sessionId: hlsSessionId(hls),
+        confidence,
+        contentType: "application/vnd.apple.mpegurl",
+        observedAt: Date.now(),
+        url: url.href,
+      }, "*");
+      while (reportedPlayerSourceKeys.size > 256) {
+        reportedPlayerSourceKeys.delete(reportedPlayerSourceKeys.values().next().value);
+      }
+    }
+  }
+
+  function reportLevel5Session(hls) {
+    if (!hls) return;
+    try { postLevel5Source(hls, hls.url); } catch { /* optional getter */ }
+    try { postLevel5Source(hls, hls.sourceUrl); } catch { /* optional getter */ }
+    try {
+      for (const level of hls.levels || []) {
+        postLevel5Source(hls, level?.url, 98);
+        postLevel5Source(hls, level?.details?.url, 98);
+      }
+    } catch { /* optional internals */ }
+    try { postLevel5Source(hls, hls.loadLevelObj?.url, 98); } catch { /* optional internals */ }
+  }
+
   function activeHlsSessions() {
     const sessions = [...observedHlsSessions];
     for (const video of document.querySelectorAll("video")) {
       if (video?._l5?.hls?.config?.loader && !sessions.includes(video._l5.hls)) sessions.push(video._l5.hls);
     }
+    for (const hls of sessions) reportLevel5Session(hls);
     return sessions;
   }
 
@@ -65,10 +124,18 @@
   }
 
   function rememberSession(session) {
-    if (session?.hls?.config?.loader) observedHlsSessions.add(session.hls);
+    if (session?.hls?.config?.loader) {
+      observedHlsSessions.add(session.hls);
+      reportLevel5Session(session.hls);
+    }
     reportSessionManifests(session?.hls);
     const manifestEvent = window.Hls?.Events?.MANIFEST_PARSED || "hlsManifestParsed";
-    try { session?.hls?.on?.(manifestEvent, () => reportSessionManifests(session.hls)); } catch { /* best effort */ }
+    try {
+      session?.hls?.on?.(manifestEvent, () => {
+        reportLevel5Session(session.hls);
+        reportSessionManifests(session.hls);
+      });
+    } catch { /* best effort */ }
     return session;
   }
 

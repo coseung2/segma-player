@@ -13,6 +13,7 @@ import {
   toTextOnlyRows,
   upsertCandidate,
 } from "./candidate.js";
+import { rankCandidates } from "./candidate-ranking.js";
 import { DOWNLOAD_MENU_ID } from "./download.js";
 import { candidateDownloadErrorCode } from "./download-errors.js";
 import {
@@ -57,6 +58,7 @@ import {
   isMobileUserAgentRuleId,
 } from "./mobile-user-agent.js";
 import { createPlayerGraphResolver, looksLikePlayerPage } from "./player-page-resolver.js";
+import { createPlaybackSessionStore } from "./playback-session.js";
 import { youtubeQualityAllowed } from "./product-plan.js";
 import { createRequestHeaderStore } from "./request-header-store.js";
 import {
@@ -85,12 +87,18 @@ const PROGRESSIVE_REDIRECT_TARGET_TTL_MS = 60_000;
 const requestHeaderStore = createRequestHeaderStore({ maxEntries: 1000, ttlMs: 10 * 60 * 1000 });
 const progressiveRedirectTargets = new Map();
 const mainFramesByTab = new Map();
+const frameLayoutsByTab = new Map();
+const frameStatesByTab = new Map();
 const doodDirectByTab = new Map();
 const nonPersistentCandidates = new WeakSet();
 const SESSION_CANDIDATES_KEY = "candidates";
 const tabTitleCache = new Map();
 const DOWNLOAD_JOBS_KEY = "downloadJobs";
+const DOWNLOAD_INTENTS_KEY = "downloadIntents";
+const PLAYBACK_SESSIONS_KEY = "playbackSessions";
 const downloadJobs = new Map();
+const downloadIntents = new Map();
+const playbackSessions = createPlaybackSessionStore();
 const youtubeBrowserDownloads = new Map();
 const youtubeJobControllers = new Map();
 const browserDownloadMonitor = createBrowserDownloadMonitor(chrome.downloads);
@@ -98,6 +106,15 @@ const MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWeb
 const mobileUaRulesByTab = new Map();
 let mobileUaRuleIds = null;
 const workerHeartbeatPorts = new Set();
+
+try {
+  const sessionAccess = chrome.storage.session.setAccessLevel?.({
+    accessLevel: "TRUSTED_CONTEXTS",
+  });
+  void sessionAccess?.catch?.(() => {});
+} catch {
+  // Chrome versions predating storage access levels keep the secure default.
+}
 
 function hasActiveDownloadJobs() {
   return [...downloadJobs.values()].some((job) => ["queued", "running", "paused"].includes(job.status));
@@ -184,15 +201,52 @@ const playerGraphResolver = createPlayerGraphResolver({
   getRedirectTarget: (url) => progressiveRedirectTargetFor(url),
 });
 
-const downloadJobsReady = chrome.storage.session.get({ [DOWNLOAD_JOBS_KEY]: [] }).then((stored) => {
+const downloadJobsReady = chrome.storage.session.get({
+  [DOWNLOAD_JOBS_KEY]: [],
+  [DOWNLOAD_INTENTS_KEY]: [],
+  [PLAYBACK_SESSIONS_KEY]: [],
+}).then((stored) => {
   for (const job of stored[DOWNLOAD_JOBS_KEY] || []) {
     if (job && typeof job.id === "string") downloadJobs.set(job.id, job);
   }
+  for (const intent of stored[DOWNLOAD_INTENTS_KEY] || []) {
+    if (intent && typeof intent.jobId === "string" && intent.candidate && typeof intent.candidate === "object") {
+      downloadIntents.set(intent.jobId, intent);
+    }
+  }
+  playbackSessions.restore(stored[PLAYBACK_SESSIONS_KEY]);
   syncWorkerLifecycleAlarm();
 }).catch(() => {});
 
 async function persistDownloadJobs() {
   await chrome.storage.session.set({ [DOWNLOAD_JOBS_KEY]: persistedDownloadJobs(downloadJobs.values()) });
+}
+
+async function persistDownloadIntents() {
+  await chrome.storage.session.set({
+    [DOWNLOAD_INTENTS_KEY]: [...downloadIntents.values()].slice(-30),
+  });
+}
+
+async function persistPlaybackSessions() {
+  await chrome.storage.session.set({
+    [PLAYBACK_SESSIONS_KEY]: playbackSessions.serialized(),
+  });
+}
+
+async function rememberDownloadIntent(jobId, candidate) {
+  downloadIntents.set(jobId, Object.freeze({
+    jobId,
+    candidate: structuredClone(candidate),
+    sourceTabId: Number.isInteger(candidate?.tabId) ? candidate.tabId : null,
+    createdAt: Date.now(),
+  }));
+  await persistDownloadIntents();
+}
+
+async function forgetDownloadIntent(jobId) {
+  if (!downloadIntents.delete(jobId)) return;
+  await persistDownloadIntents().catch(() => {});
 }
 
 function activeDownloadJobSignature() {
@@ -250,6 +304,9 @@ async function patchDownloadJob(jobId, patch) {
   if (!current) return null;
   const next = updateDownloadJob(current, patch);
   downloadJobs.set(jobId, next);
+  if (["completed", "failed", "cancelled"].includes(next.status)) {
+    await forgetDownloadIntent(jobId);
+  }
   void syncDownloadOverlayForActiveTab();
   await persistDownloadJobs().catch(() => {});
   void chrome.runtime.sendMessage({ type: "download-jobs-changed" }).catch(() => {});
@@ -571,9 +628,29 @@ function recordedReferrerForUrl(url, context = {}) {
   return operation?.value || "";
 }
 
+function exactExtensionPageSender(sender, pageName) {
+  if (sender?.id !== chrome.runtime.id || typeof sender.url !== "string") return false;
+  try {
+    const senderUrl = new URL(sender.url);
+    const expected = new URL(chrome.runtime.getURL(pageName));
+    return senderUrl.origin === expected.origin && senderUrl.pathname === expected.pathname;
+  } catch {
+    return false;
+  }
+}
+
+function validDownloadWorkerSender(sender) {
+  return exactExtensionPageSender(sender, "download-worker.html");
+}
+
+function validPlayerSender(sender) {
+  return exactExtensionPageSender(sender, "player.html")
+    && Number.isInteger(sender.tab?.id) && sender.tab.id > 0;
+}
+
 function mediaFetchSenderTabId(sender) {
-  if (sender?.id !== chrome.runtime.id) return null;
-  if (sender.url === chrome.runtime.getURL("download-worker.html")) return OFFSCREEN_DOCUMENT_TAB_ID;
+  if (validDownloadWorkerSender(sender)) return OFFSCREEN_DOCUMENT_TAB_ID;
+  if (validPlayerSender(sender)) return sender.tab.id;
   return null;
 }
 
@@ -582,7 +659,7 @@ function validMediaFetchSender(sender) {
 }
 
 function validMediaRouteSender(sender) {
-  return mediaFetchSenderTabId(sender) !== null;
+  return validDownloadWorkerSender(sender);
 }
 
 async function removeMediaFetchLease(lease) {
@@ -751,8 +828,24 @@ function isHlsCandidate(candidate) {
   return candidate?.mediaType === "HLS_MASTER" || candidate?.mediaType === "HLS_MEDIA";
 }
 
+async function hasDownloadWorkerDocument() {
+  if (typeof chrome.offscreen.hasDocument === "function") {
+    return chrome.offscreen.hasDocument();
+  }
+  const documentUrl = chrome.runtime.getURL("download-worker.html");
+  if (typeof chrome.runtime.getContexts === "function") {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [documentUrl],
+    });
+    return contexts.length > 0;
+  }
+  const matchedClients = await globalThis.clients?.matchAll?.();
+  return Boolean(matchedClients?.some?.((client) => client?.url === documentUrl));
+}
+
 async function ensureDownloadWorker() {
-  if (await chrome.offscreen.hasDocument()) return;
+  if (await hasDownloadWorkerDocument()) return;
   if (!offscreenCreatePromise) {
     offscreenCreatePromise = chrome.offscreen.createDocument({
       url: "download-worker.html",
@@ -766,10 +859,17 @@ async function ensureDownloadWorker() {
 async function dispatchMediaDownload(jobId, candidate) {
   try {
     if (terminalDownloadJob(downloadJobs.get(jobId))) return;
+    const transferCandidate = await refreshCandidateFromSourceFrame(candidate);
     await ensureDownloadWorker();
     if (terminalDownloadJob(downloadJobs.get(jobId))) return;
-    const accepted = await chrome.runtime.sendMessage({ type: "run-download-job", jobId, candidate });
-    if (!accepted?.ok) throw new Error(accepted?.error || "worker-unavailable");
+    const accepted = await chrome.runtime.sendMessage({
+      type: "run-download-job",
+      jobId,
+      candidate: transferCandidate,
+    });
+    if (!accepted?.ok && accepted?.error !== "duplicate-download-job") {
+      throw new Error(accepted?.error || "worker-unavailable");
+    }
   } catch (error) {
     await patchDownloadJob(jobId, {
       status: "failed",
@@ -784,6 +884,52 @@ async function dispatchMediaDownload(jobId, candidate) {
 // offscreen document cannot access chrome.tabs / chrome.windows. The worker
 // only receives pause-state messages over chrome.runtime.
 const jobSourceTabs = new Map();
+let downloadRecoveryStarted = false;
+
+async function recoverInterruptedMediaDownloads() {
+  if (downloadRecoveryStarted) return;
+  downloadRecoveryStarted = true;
+  await downloadJobsReady;
+  const recoverable = [...downloadJobs.values()].filter((job) =>
+    ["queued", "running", "paused"].includes(job.status) && downloadIntents.has(job.id));
+  if (!recoverable.length) return;
+  let activeJobIds = new Set();
+  try {
+    await ensureDownloadWorker();
+    const state = await chrome.runtime.sendMessage({ type: "download-worker-state" });
+    if (state?.ok && Array.isArray(state.activeJobIds)) activeJobIds = new Set(state.activeJobIds);
+  } catch {
+    activeJobIds = new Set();
+  }
+  const plan = await resolvePlan();
+  for (const job of recoverable) {
+    const intent = downloadIntents.get(job.id);
+    const candidate = intent?.candidate;
+    if (!candidate) continue;
+    const sourceTabId = Number.isInteger(intent.sourceTabId) ? intent.sourceTabId : candidate.tabId;
+    if (!plan.backgroundDownloads && Number.isInteger(sourceTabId)) {
+      try {
+        await chrome.tabs.get(sourceTabId);
+        jobSourceTabs.set(job.id, sourceTabId);
+      } catch {
+        await patchDownloadJob(job.id, {
+          status: "failed",
+          statusText: "원래 탭이 닫혀 다운로드를 복구하지 못했습니다.",
+          error: "source-tab-closed",
+        });
+        continue;
+      }
+    }
+    if (activeJobIds.has(job.id)) continue;
+    await patchDownloadJob(job.id, {
+      status: "queued",
+      statusText: "중단된 다운로드를 복구하는 중…",
+    });
+    await dispatchMediaDownload(job.id, candidate);
+  }
+}
+
+void downloadJobsReady.then(recoverInterruptedMediaDownloads).catch(() => {});
 
 function sendPauseState(jobId, paused, sourceClosed = false) {
   void chrome.runtime.sendMessage({ type: "download-pause-state", jobId, paused, sourceClosed })
@@ -856,7 +1002,10 @@ async function queueMediaDownload(candidate) {
   if (!plan.backgroundDownloads && Number.isInteger(candidate?.tabId) && candidate.tabId > 0) {
     jobSourceTabs.set(jobId, candidate.tabId);
   }
-  await persistDownloadJobs();
+  await Promise.all([
+    persistDownloadJobs(),
+    rememberDownloadIntent(jobId, candidate).catch(() => {}),
+  ]);
   syncWorkerLifecycleAlarm();
   if (Number.isInteger(candidate?.tabId) && candidate.tabId > 0) {
     void syncDownloadOverlayForTab(candidate.tabId);
@@ -940,11 +1089,15 @@ async function clearDownloadJobs(surface = "all") {
     const jobSurface = job.candidateId ? "detect" : "link";
     if (!terminalDownloadJob(job) || (surface !== "all" && surface !== jobSurface)) continue;
     downloadJobs.delete(jobId);
+    downloadIntents.delete(jobId);
     jobSourceTabs.delete(jobId);
     cleared += 1;
   }
   if (cleared) {
-    await persistDownloadJobs().catch(() => {});
+    await Promise.all([
+      persistDownloadJobs().catch(() => {}),
+      persistDownloadIntents().catch(() => {}),
+    ]);
     void chrome.runtime.sendMessage({ type: "download-jobs-changed" }).catch(() => {});
   }
   return { ok: true, cleared };
@@ -970,7 +1123,12 @@ async function sniffMediaContentType(url) {
 
 function popupCandidate(candidate) {
   const projection = redactCandidateForUi(candidate);
-  const previewUrl = canonicalHttpUrl(candidate.resourceUrl)?.href || null;
+  // Popup previews are optional and must not make unsolicited requests with a
+  // short-lived token. HLS/DASH and tokenized progressive media use the
+  // session-bound browser player instead.
+  const previewUrl = candidate.mediaType === MEDIA_TYPES.PROGRESSIVE && !candidate.tokenized
+    ? canonicalHttpUrl(candidate.resourceUrl)?.href || null
+    : null;
   const sourceUrl = canonicalHttpUrl(candidate.pageUrl)?.href || null;
   return { ...projection, previewUrl, sourceUrl };
 }
@@ -980,10 +1138,21 @@ function playerCandidateHasQuery(candidate) {
   try { return Boolean(new URL(candidate.resourceUrl).search); } catch { return false; }
 }
 
+function rerankTabCandidates(tabId) {
+  if (!Number.isInteger(tabId) || tabId <= 0) return [];
+  const tabCandidates = [...candidates.values()].filter((candidate) => candidate.tabId === tabId);
+  return rankCandidates(tabCandidates, {
+    frameStates: frameStatesByTab.get(tabId) || null,
+    frameLayouts: frameLayoutsByTab.get(tabId) || null,
+    now: Date.now(),
+  });
+}
+
 function observeCandidate(candidate, { nonPersistent = false } = {}) {
   if (!candidate || isYouTubeDetectionCandidate(candidate)) return null;
   const stored = upsertCandidate(candidates, candidate, LIMITS.candidates);
-  if (nonPersistent || playerCandidateHasQuery(stored)) nonPersistentCandidates.add(stored);
+  if (nonPersistent || stored.tokenized || playerCandidateHasQuery(stored)) nonPersistentCandidates.add(stored);
+  if (Number.isInteger(stored.tabId)) rerankTabCandidates(stored.tabId);
   persistCandidates();
   return stored;
 }
@@ -1041,6 +1210,198 @@ async function tabTitle(tabId) {
   }
 }
 
+function candidateContentType(candidate) {
+  if (candidate?.mediaType === MEDIA_TYPES.DASH) return "application/dash+xml";
+  if (candidate?.mediaType === MEDIA_TYPES.HLS_MASTER || candidate?.mediaType === MEDIA_TYPES.HLS_MEDIA) {
+    return "application/vnd.apple.mpegurl";
+  }
+  return candidate?.mediaType === MEDIA_TYPES.PROGRESSIVE ? "video/mp4" : "";
+}
+
+async function refreshCandidateFromSourceFrame(candidate, { force = false } = {}) {
+  if (!candidate || !Number.isInteger(candidate.tabId) || candidate.tabId <= 0
+    || !Number.isInteger(candidate.frameId) || candidate.frameId < 0) return candidate;
+  const shouldRefresh = force || candidate.tokenized
+    || (Number.isFinite(candidate.refreshAfter) && candidate.refreshAfter <= Date.now())
+    || Boolean(candidate.player)
+    || (Array.isArray(candidate.evidence)
+      && candidate.evidence.some((item) => item?.source === "player-adapter"));
+  if (!shouldRefresh) return candidate;
+  const response = await sendTabMessageWithTimeout(candidate.tabId, {
+    type: "refresh-media-source",
+    resourceUrl: candidate.resourceUrl,
+    player: candidate.player || "",
+    sessionId: candidate.sessionId || "",
+  }, 3_000, { frameId: candidate.frameId });
+  const resourceUrl = response?.ok ? canonicalHttpUrl(response.url)?.href : null;
+  if (!resourceUrl) return candidate;
+  const pageUrl = canonicalHttpUrl(response.frameUrl)?.href || candidate.pageUrl;
+  const refreshed = makeCandidate({
+    pageTitle: candidate.pageTitle,
+    pageUrl,
+    resourceUrl,
+    contentType: candidateContentType(candidate),
+    variants: candidate.variants || [],
+    main: candidate.main,
+    explicitMain: candidate.explicitMain,
+    tabId: candidate.tabId,
+    frameId: candidate.frameId,
+    evidence: [
+      ...(Array.isArray(candidate.evidence) ? candidate.evidence : []),
+      {
+        source: "refresh",
+        player: response.player || candidate.player || "",
+        sessionId: response.sessionId || candidate.sessionId || "",
+        confidence: 100,
+        at: response.observedAt || Date.now(),
+      },
+    ],
+    player: response.player || candidate.player || "",
+    sessionId: response.sessionId || candidate.sessionId || "",
+    detectionSource: "refresh",
+    confidence: 100,
+    observedAt: response.observedAt || Date.now(),
+  });
+  if (!refreshed || refreshed.mediaType !== candidate.mediaType) return candidate;
+  refreshed.id = candidate.id;
+  for (const [key, item] of candidates) {
+    if (item === candidate || item.id === candidate.id) candidates.delete(key);
+  }
+  return observeCandidate(refreshed, { nonPersistent: true }) || refreshed;
+}
+
+function playbackLauncherSender(sender) {
+  return exactExtensionPageSender(sender, "popup-play.html")
+    || exactExtensionPageSender(sender, "popup.html");
+}
+
+function playerOwnsPlaybackSession(sender, sessionId) {
+  if (!validPlayerSender(sender) || typeof sessionId !== "string") return false;
+  try {
+    return new URL(sender.url).searchParams.get("session") === sessionId;
+  } catch {
+    return false;
+  }
+}
+
+function playbackMediaFamily(mediaType) {
+  if (mediaType === MEDIA_TYPES.HLS_MASTER || mediaType === MEDIA_TYPES.HLS_MEDIA) return "HLS";
+  return mediaType;
+}
+
+function bestPlaybackCandidateForTab(tabId, previousCandidate = null) {
+  rerankTabCandidates(tabId);
+  const family = playbackMediaFamily(previousCandidate?.mediaType);
+  const ranked = [...candidates.values()]
+    .filter((candidate) => candidate.tabId === tabId
+      && isDownloadableMediaType(candidate.mediaType)
+      && !candidate.likelyAdvertisement
+      && !isLikelyHlsSegmentUrl(candidate.resourceUrl))
+    .sort((left, right) => {
+      const leftFamily = family && playbackMediaFamily(left.mediaType) === family ? 1 : 0;
+      const rightFamily = family && playbackMediaFamily(right.mediaType) === family ? 1 : 0;
+      return (rightFamily - leftFamily)
+        || (Number(right.main) - Number(left.main))
+        || (Number(right.score) - Number(left.score))
+        || (Number(right.lastObservedAt) - Number(left.lastObservedAt));
+    });
+  return ranked[0] || null;
+}
+
+function playbackSessionPayload(session) {
+  const candidate = session?.candidate;
+  if (!candidate || !canonicalHttpUrl(candidate.resourceUrl) || !canonicalHttpUrl(candidate.pageUrl)) return null;
+  return Object.freeze({
+    sessionId: session.id,
+    candidateId: candidate.id,
+    resourceUrl: candidate.resourceUrl,
+    referrer: candidate.pageUrl,
+    pageTitle: candidate.pageTitle || "",
+    mediaType: candidate.mediaType,
+    tabId: Number.isInteger(candidate.tabId) ? candidate.tabId : null,
+    frameId: Number.isInteger(candidate.frameId) ? candidate.frameId : null,
+    player: candidate.player || "",
+    playerSessionId: candidate.sessionId || "",
+    tokenized: Boolean(candidate.tokenized),
+    expiresAt: Number.isFinite(candidate.expiresAt) ? candidate.expiresAt : null,
+    sourceUrl: session.sourceUrl || "",
+  });
+}
+
+async function createPlaybackSessionForCandidate(candidateId, sourceUrl = "") {
+  await downloadJobsReady;
+  const candidate = [...candidates.values()].find((item) => item.id === candidateId);
+  if (!candidate || !isDownloadableMediaType(candidate.mediaType)
+    || isLikelyHlsSegmentUrl(candidate.resourceUrl) || candidate.likelyAdvertisement) {
+    return { ok: false, error: "candidate-not-found" };
+  }
+  const fresh = await refreshCandidateFromSourceFrame(candidate);
+  const session = playbackSessions.create(fresh, { sourceUrl });
+  if (!session) return { ok: false, error: "playback-session-unavailable" };
+  await persistPlaybackSessions().catch(() => {});
+  const payload = playbackSessionPayload(session);
+  return payload ? {
+    ok: true,
+    sessionId: session.id,
+    pageTitle: payload.pageTitle,
+    mediaType: payload.mediaType,
+    tokenized: payload.tokenized,
+  } : { ok: false, error: "playback-session-unavailable" };
+}
+
+async function createPlaybackSessionFromTab(sourceTabId, sourceUrl = "", previousMediaType = "") {
+  await downloadJobsReady;
+  if (!Number.isInteger(sourceTabId) || sourceTabId <= 0) {
+    return { ok: false, error: "invalid-source-tab" };
+  }
+  const previousCandidate = previousMediaType ? { mediaType: previousMediaType } : null;
+  const candidate = bestPlaybackCandidateForTab(sourceTabId, previousCandidate);
+  if (!candidate) return { ok: false, error: "source-media-not-detected" };
+  const session = playbackSessions.create(candidate, { sourceUrl });
+  if (!session) return { ok: false, error: "playback-session-unavailable" };
+  await persistPlaybackSessions().catch(() => {});
+  const payload = playbackSessionPayload(session);
+  return payload ? { ok: true, session: payload } : { ok: false, error: "playback-session-invalid" };
+}
+
+async function resolvePlaybackSession(sessionId, { forceRefresh = false, sourceTabId = null } = {}) {
+  await downloadJobsReady;
+  let session = playbackSessions.get(sessionId);
+  if (!session) return { ok: false, error: "playback-session-expired" };
+  let candidate = session.candidate;
+  if (Number.isInteger(sourceTabId) && sourceTabId > 0) {
+    const replacement = bestPlaybackCandidateForTab(sourceTabId, candidate);
+    if (!replacement) return { ok: false, error: "source-media-not-detected" };
+    let sourceUrl = session.sourceUrl;
+    try {
+      const tab = await chrome.tabs.get(sourceTabId);
+      sourceUrl = canonicalHttpUrl(tab?.url)?.href || sourceUrl;
+    } catch {
+      // Keep the original source URL when the newly opened tab already closed.
+    }
+    session = playbackSessions.updateCandidate(sessionId, replacement, { sourceUrl });
+  } else {
+    const nearExpiry = candidate.tokenized
+      && Number.isFinite(candidate.expiresAt)
+      && candidate.expiresAt <= Date.now() + 30_000;
+    if (forceRefresh || nearExpiry) {
+      candidate = await refreshCandidateFromSourceFrame(candidate, { force: true });
+      session = playbackSessions.updateCandidate(sessionId, candidate);
+    }
+  }
+  if (!session) return { ok: false, error: "playback-session-expired" };
+  await persistPlaybackSessions().catch(() => {});
+  const payload = playbackSessionPayload(session);
+  return payload ? { ok: true, session: payload } : { ok: false, error: "playback-session-invalid" };
+}
+
+async function closePlaybackSession(sessionId) {
+  await downloadJobsReady;
+  const removed = playbackSessions.remove(sessionId);
+  if (removed) await persistPlaybackSessions().catch(() => {});
+  return { ok: true, removed };
+}
+
 function recordRequestHeaders(details) {
   requestHeaderStore.record({
     url: details?.url,
@@ -1072,13 +1433,19 @@ chrome.webRequest.onSendHeaders.addListener(
   (details) => {
     recordRequestHeaders(details);
   },
-  { urls: ["http://*/*", "https://*/*"] },
+  {
+    urls: ["http://*/*", "https://*/*"],
+    types: ["media", "xmlhttprequest", "other"],
+  },
   ["requestHeaders", "extraHeaders"],
 );
 
 chrome.webRequest.onBeforeRedirect.addListener(
   recordProgressiveRedirect,
-  { urls: ["http://*/*", "https://*/*"] },
+  {
+    urls: ["http://*/*", "https://*/*"],
+    types: ["media", "xmlhttprequest", "other"],
+  },
 );
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -1105,6 +1472,8 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   mainFramesByTab.delete(tabId);
+  frameLayoutsByTab.delete(tabId);
+  frameStatesByTab.delete(tabId);
   tabTitleCache.delete(tabId);
   doodDirectByTab.delete(tabId);
   void releaseMediaFetchLeasesForTab(tabId);
@@ -1113,6 +1482,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "loading" || !changeInfo.url) return;
   mainFramesByTab.delete(tabId);
+  frameLayoutsByTab.delete(tabId);
+  frameStatesByTab.delete(tabId);
   tabTitleCache.delete(tabId);
   doodDirectByTab.delete(tabId);
   void releaseMediaFetchLeasesForTab(tabId);
@@ -1141,6 +1512,8 @@ chrome.contextMenus.onClicked.addListener((info) => {
     pageUrl: url.href,
     resourceUrl: url.href,
     contentType: "video/mp4",
+    detectionSource: "context-menu",
+    confidence: 100,
   });
   if (fallback) void beginCandidateDownload(fallback).catch(() => {});
 });
@@ -1156,10 +1529,17 @@ chrome.webRequest.onBeforeRequest.addListener(
         resourceUrl: details.url,
         contentType: details.type || "",
         fromMediaElement: details.type === "media" || isLikelyDoodMediaHost(details.url),
+        detectionSource: "web-request",
+        requestType: details.type || "other",
+        confidence: details.type === "media" ? 78 : 45,
+        observedAt: details.timeStamp,
       }, details.tabId);
     });
   },
-  { urls: ["http://*/*", "https://*/*"] },
+  {
+    urls: ["http://*/*", "https://*/*"],
+    types: ["media", "xmlhttprequest", "other"],
+  },
 );
 
 // Many video sites hide playlists behind tokenized proxy URLs that do not end
@@ -1178,6 +1558,10 @@ chrome.webRequest.onHeadersReceived.addListener(
         resourceUrl: details.url,
         contentType,
         fromMediaElement: details.type === "media" || isLikelyDoodMediaHost(details.url),
+        detectionSource: "web-response",
+        requestType: details.type || "other",
+        confidence: /mpegurl|dash\+xml|^video\//i.test(contentType) ? 88 : 65,
+        observedAt: details.timeStamp,
       }, details.tabId);
     });
   },
@@ -1258,17 +1642,69 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "list-candidates" && !sender.tab) {
+  if (message?.type === "create-playback-session" && playbackLauncherSender(sender)) {
+    createPlaybackSessionForCandidate(message.candidateId, message.sourceUrl).then(
+      sendResponse,
+      () => sendResponse({ ok: false, error: "playback-session-unavailable" }),
+    );
+    return true;
+  }
+
+  if (message?.type === "create-playback-session-from-tab" && validPlayerSender(sender)) {
+    createPlaybackSessionFromTab(
+      message.sourceTabId,
+      message.sourceUrl,
+      typeof message.previousMediaType === "string" ? message.previousMediaType : "",
+    ).then(
+      sendResponse,
+      () => sendResponse({ ok: false, error: "playback-session-unavailable" }),
+    );
+    return true;
+  }
+
+  if (message?.type === "resolve-playback-session"
+    && playerOwnsPlaybackSession(sender, message.sessionId)) {
+    resolvePlaybackSession(message.sessionId).then(
+      sendResponse,
+      () => sendResponse({ ok: false, error: "playback-session-unavailable" }),
+    );
+    return true;
+  }
+
+  if (message?.type === "refresh-playback-session"
+    && playerOwnsPlaybackSession(sender, message.sessionId)) {
+    const sourceTabId = Number.isInteger(message.sourceTabId) ? message.sourceTabId : null;
+    resolvePlaybackSession(message.sessionId, { forceRefresh: sourceTabId === null, sourceTabId }).then(
+      sendResponse,
+      () => sendResponse({ ok: false, error: "playback-session-refresh-failed" }),
+    );
+    return true;
+  }
+
+  if (message?.type === "close-playback-session"
+    && playerOwnsPlaybackSession(sender, message.sessionId)) {
+    closePlaybackSession(message.sessionId).then(sendResponse, () => sendResponse({ ok: false }));
+    return true;
+  }
+
+  if (message?.type === "list-candidates" && playbackLauncherSender(sender)) {
     (async () => {
-      let activeTabId = null;
-      try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        activeTabId = tab?.id ?? null;
-      } catch { /* popup may open before tabs API is ready */ }
+      let activeTabId = Number.isInteger(message.tabId) && message.tabId > 0
+        ? message.tabId
+        : null;
+      if (activeTabId === null) {
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          activeTabId = tab?.id ?? null;
+        } catch { /* popup may open before tabs API is ready */ }
+      }
+      if (Number.isInteger(activeTabId)) rerankTabCandidates(activeTabId);
       const all = [...candidates.values()]
         .filter((candidate) => isDownloadableMediaType(candidate.mediaType)
           && !isLikelyHlsSegmentUrl(candidate.resourceUrl)
           && !isYouTubeDetectionCandidate(candidate))
+        .sort((left, right) => (Number(right.score) - Number(left.score))
+          || (Number(right.lastObservedAt) - Number(left.lastObservedAt)))
         .map(popupCandidate);
       const filtered = activeTabId == null ? all : all.filter((candidate) => candidate.tabId === activeTabId);
       sendResponse({
@@ -1305,6 +1741,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "refresh-download-candidate" && validMediaRouteSender(sender)) {
+    const requested = message.candidate && typeof message.candidate === "object" ? message.candidate : null;
+    const candidate = requested?.id
+      ? [...candidates.values()].find((item) => item.id === requested.id) || requested
+      : requested;
+    if (!candidate || !canonicalHttpUrl(candidate.resourceUrl)) {
+      sendResponse({ ok: false, error: "invalid-refresh-candidate" });
+      return false;
+    }
+    refreshCandidateFromSourceFrame(candidate, { force: true }).then(
+      (refreshed) => sendResponse({
+        ok: true,
+        refreshed: refreshed.resourceUrl !== candidate.resourceUrl,
+        candidate: refreshed,
+      }),
+      () => sendResponse({ ok: false, error: "media-source-refresh-failed" }),
+    );
+    return true;
+  }
+
   if (message?.type === "prepare-media-fetch") {
     prepareMediaFetchLease(sender, message.url, message.referrer, message.sourceContext).then(sendResponse);
     return true;
@@ -1335,7 +1791,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  if (message?.type === "decode-hls-key" && validMediaFetchSender(sender)) {
+  if (message?.type === "decode-hls-key" && validMediaRouteSender(sender)) {
     const tabId = Number(message.tabId);
     const frameId = Number(message.frameId);
     const url = canonicalMediaFetchUrl(message.url);
@@ -1351,7 +1807,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "download-in-source-frame" && validMediaFetchSender(sender)) {
+  if (message?.type === "download-in-source-frame" && validMediaRouteSender(sender)) {
     const tabId = Number(message.tabId);
     const frameId = message.frameId == null ? null : Number(message.frameId);
     const url = canonicalMediaFetchUrl(message.url);
@@ -1385,7 +1841,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "cancel-browser-download" && validMediaFetchSender(sender)) {
+  if (message?.type === "cancel-browser-download" && validMediaRouteSender(sender)) {
     const requestId = typeof message.requestId === "string" ? message.requestId : "";
     void browserDownloadMonitor.cancel(requestId).then((cancelled) => sendResponse({ ok: true, cancelled }));
     return true;
@@ -1403,12 +1859,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "get-request-headers" && validMediaFetchSender(sender)) {
+  if (message?.type === "get-request-headers" && validMediaRouteSender(sender)) {
     sendResponse({ ok: true, headers: {}, capability: "dnr-contextual-replay-v1" });
     return false;
   }
 
-  if (message?.type === "ping-media-stream" && validMediaFetchSender(sender)) {
+  if (message?.type === "ping-media-stream" && validMediaRouteSender(sender)) {
     sendResponse({
       ok: true,
       version: chrome.runtime.getManifest().version,
@@ -1547,8 +2003,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     for (const [key, item] of candidates) {
       if (item.tabId === message.tabId) candidates.delete(key);
     }
+    mainFramesByTab.delete(message.tabId);
+    frameLayoutsByTab.delete(message.tabId);
+    frameStatesByTab.delete(message.tabId);
     persistCandidates();
     sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === "frame-media-state" && sender.tab?.id
+    && Number.isInteger(sender.frameId) && sender.frameId >= 0) {
+    const visibleArea = Number(message.visibleArea);
+    const viewportRatio = Number(message.viewportRatio);
+    const durationMs = Number(message.durationMs);
+    const state = Object.freeze({
+      playing: message.playing === true,
+      muted: message.muted === true,
+      visibleArea: Number.isFinite(visibleArea) ? Math.max(0, Math.min(100_000_000, visibleArea)) : 0,
+      viewportRatio: Number.isFinite(viewportRatio) ? Math.max(0, Math.min(1, viewportRatio)) : 0,
+      durationMs: Number.isFinite(durationMs) ? Math.max(0, Math.min(24 * 60 * 60 * 1000, durationMs)) : 0,
+      topFrame: message.topFrame === true || sender.frameId === 0,
+      hasBlobSource: message.hasBlobSource === true,
+      observedAt: Number.isFinite(message.observedAt) ? message.observedAt : Date.now(),
+    });
+    if (!frameStatesByTab.has(sender.tab.id)) frameStatesByTab.set(sender.tab.id, new Map());
+    frameStatesByTab.get(sender.tab.id).set(sender.frameId, state);
+    rerankTabCandidates(sender.tab.id);
+    persistCandidates();
     return false;
   }
 
@@ -1560,16 +2041,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const key = normalizeOriginPath(url);
       if (key) frames.add(key);
     }
-    let changed = false;
-    for (const candidate of candidates.values()) {
-      if (candidate.tabId !== sender.tab.id || candidate.main || !isDownloadableMediaType(candidate.mediaType)) continue;
-      const key = normalizeOriginPath(candidate.pageUrl);
-      if (key && frames.has(key)) {
-        candidate.main = true;
-        changed = true;
-      }
+    const layouts = new Map();
+    for (const frame of Array.isArray(message.frames) ? message.frames.slice(0, 64) : []) {
+      const key = normalizeOriginPath(frame?.src);
+      if (!key) continue;
+      const visibleArea = Number(frame.area);
+      const viewportRatio = Number(frame.viewportRatio);
+      layouts.set(key, Object.freeze({
+        visibleArea: Number.isFinite(visibleArea) ? Math.max(0, Math.min(100_000_000, visibleArea)) : 0,
+        viewportRatio: Number.isFinite(viewportRatio) ? Math.max(0, Math.min(1, viewportRatio)) : 0,
+        adHint: frame.adHint === true,
+        order: Number.isInteger(frame.order) ? Math.max(0, frame.order) : 0,
+      }));
     }
-    if (changed) persistCandidates();
+    frameLayoutsByTab.set(sender.tab.id, layouts);
+    rerankTabCandidates(sender.tab.id);
+    persistCandidates();
     return false;
   }
 
@@ -1626,7 +2113,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       || "",
   });
   if (sanitized) sanitized.tabId = sender.tab.id;
-  if (sanitized && Number.isInteger(sender.frameId) && sender.frameId >= 0) sanitized.frameId = sender.frameId;
+  if (sanitized && Number.isInteger(sender.frameId) && sender.frameId >= 0) {
+    sanitized.frameId = sender.frameId;
+    sanitized.refreshable = true;
+  }
   if (sanitized && isMainFrame(sender.tab.id, sender.url)) sanitized.main = true;
   observeCandidate(sanitized);
   return false;
@@ -1643,7 +2133,7 @@ chrome.runtime.onConnect.addListener((port) => {
     });
     return;
   }
-  if (port.name === "media-stream" && validMediaFetchSender(port.sender)) {
+  if (port.name === "media-stream" && validMediaRouteSender(port.sender)) {
     async function resolveFreshUrl(message, signal) {
       let url = message.url;
       let referrer = typeof message.pageUrl === "string" ? message.pageUrl : "";

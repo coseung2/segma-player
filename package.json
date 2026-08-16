@@ -3,6 +3,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
+    "test:media-sites": "node --test candidate-ranking.test.mjs site-regression.test.mjs",
+    "monitor:media-sites": "node scripts/live-media-smoke.mjs",
     "deploy": "wrangler deploy",
     "preview": "wrangler dev"
   },

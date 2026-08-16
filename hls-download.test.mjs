@@ -244,6 +244,89 @@ test("mediaChunks resumes from a segment checkpoint", async () => {
   }
 });
 
+test("403 segment failures refresh the exact Level5 manifest from the source frame and continue", async () => {
+  const requested = [];
+  let refreshRequests = 0;
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: async (message) => {
+        if (message.type === "ensure-media-routes") return { ok: true };
+        if (message.type === "prepare-media-fetch") return { ok: true, leaseId: crypto.randomUUID() };
+        if (message.type === "release-media-fetch" || message.type === "touch-media-fetch") return { ok: true };
+        if (message.type === "refresh-download-candidate") {
+          refreshRequests += 1;
+          return {
+            ok: true,
+            candidate: {
+              ...message.candidate,
+              resourceUrl: "https://media.nnvivi.site/video/master.m3u8?token=fresh",
+              pageUrl: "https://p.nnvivi.site/embed/39141",
+              player: "level5",
+              sessionId: "level5:1",
+            },
+          };
+        }
+        return { ok: true };
+      },
+    },
+  };
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    requested.push(value);
+    if (value.includes("master.m3u8?token=fresh")) {
+      return new Response(
+        "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4,\ns0.ts?token=fresh\n#EXTINF:4,\ns1.ts?token=fresh\n",
+        { status: 200, headers: { "content-type": "application/vnd.apple.mpegurl" } },
+      );
+    }
+    if (value.includes("token=stale")) return new Response(new Uint8Array(), { status: 403 });
+    if (value.includes("s0.ts?token=fresh")) return new Response(new Uint8Array([1]), { status: 200 });
+    if (value.includes("s1.ts?token=fresh")) return new Response(new Uint8Array([2]), { status: 200 });
+    throw new Error(`unexpected fetch: ${value}`);
+  };
+
+  try {
+    const candidate = {
+      id: "candidate-level5",
+      resourceUrl: "https://media.nnvivi.site/video/master.m3u8?token=stale",
+      pageUrl: "https://p.nnvivi.site/embed/39141",
+      pageTitle: "Level5",
+      tabId: 7,
+      frameId: 3,
+      mediaType: "HLS_MEDIA",
+      player: "level5",
+      sessionId: "level5:1",
+    };
+    const media = {
+      initUrl: null,
+      initByterange: null,
+      segments: [
+        "https://media.nnvivi.site/video/s0.ts?token=stale",
+        "https://media.nnvivi.site/video/s1.ts?token=stale",
+      ],
+      keys: [],
+      variants: [],
+      mediaSequence: 0,
+      byteranges: [null, null],
+      baseUrl: candidate.resourceUrl,
+    };
+    const context = createDownloadContext({ tabId: 7, frameId: 3, candidate });
+    const chunks = [];
+    for await (const chunk of mediaChunks(media, candidate.pageUrl, 7, context)) {
+      chunks.push([...new Uint8Array(chunk)]);
+    }
+
+    assert.deepEqual(chunks, [[1], [2]]);
+    assert.equal(refreshRequests, 1);
+    assert.equal(media.segments.every((url) => url.includes("token=fresh")), true);
+    assert.equal(context.candidate.resourceUrl.includes("token=fresh"), true);
+    assert.equal(requested.some((url) => url.includes("master.m3u8?token=fresh")), true);
+  } finally {
+    delete globalThis.fetch;
+    delete globalThis.chrome;
+  }
+});
+
 test("source-frame download requests are relayed through the background worker", async () => {
   let captured = null;
   globalThis.chrome = {

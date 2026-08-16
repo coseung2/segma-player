@@ -22,6 +22,7 @@ const MESSAGES = {
     collectionNote: "브라우저 즐겨찾기 'Aura Media' 폴더와 연동됩니다.",
     collectionRemove: "삭제",
     collectionLocked: "컬렉션은 Pro 전용 기능입니다.",
+    playbackUnavailable: "안전한 재생 세션을 만들지 못했습니다. 원본 페이지에서 다시 감지해 주세요.",
   },
   en: {
     playBrowser: "Play",
@@ -41,6 +42,7 @@ const MESSAGES = {
     collectionNote: "Synced with the 'Aura Media' browser bookmarks folder.",
     collectionRemove: "Remove",
     collectionLocked: "The collection is a Pro feature.",
+    playbackUnavailable: "Could not create a secure playback session. Detect the media again on its source page.",
   },
   ja: {
     playBrowser: "再生",
@@ -60,6 +62,7 @@ const MESSAGES = {
     collectionNote: "ブラウザーのブックマーク「Aura Media」フォルダーと同期されます。",
     collectionRemove: "削除",
     collectionLocked: "コレクションは Pro 専用機能です。",
+    playbackUnavailable: "安全な再生セッションを作成できませんでした。元のページでもう一度検出してください。",
   },
   zh: {
     playBrowser: "播放",
@@ -79,6 +82,7 @@ const MESSAGES = {
     collectionNote: "与浏览器书签“Aura Media”文件夹同步。",
     collectionRemove: "删除",
     collectionLocked: "收藏是 Pro 专属功能。",
+    playbackUnavailable: "无法创建安全播放会话。请在来源页面重新检测媒体。",
   },
 };
 
@@ -99,19 +103,6 @@ let proActive = false;
 
 function byId(id) {
   return document.getElementById(id);
-}
-
-function playableMediaUrl(value) {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  try {
-    const url = new URL(trimmed);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    return url.href;
-  } catch {
-    return null;
-  }
 }
 
 function showToast(message) {
@@ -173,18 +164,18 @@ async function activePageUrl() {
   }
 }
 
-async function playInBrowser(mediaUrl, title, button, sourceUrl = "") {
-  const sessionId = proActive ? crypto.randomUUID() : null;
+async function playInBrowser(candidateId, title, button, sourceUrl = "", mediaHint = "") {
+  const subtitleSessionId = proActive ? crypto.randomUUID() : null;
   let subtitleLoaded = false;
   if (proActive) {
     const handle = await getStoredSubtitleDirectory();
     if (handle) try {
-      const found = await findSubtitleFile(handle, title, mediaUrl);
+      const found = await findSubtitleFile(handle, title, mediaHint);
       if (found) {
         const bytes = new Uint8Array(await found.file.arrayBuffer());
         const text = await decodeSubtitleBytes(bytes);
         await chrome.storage.local.set({
-          [`auraSubtitleSession:${sessionId}`]: { text, at: Date.now() },
+          [`auraSubtitleSession:${subtitleSessionId}`]: { text, at: Date.now() },
         });
         subtitleLoaded = true;
       }
@@ -194,10 +185,23 @@ async function playInBrowser(mediaUrl, title, button, sourceUrl = "") {
   }
   if (!proActive) showToast(t("subtitlePro"));
   else if (!subtitleLoaded) showToast(t("noSubtitle"));
-  const params = new URLSearchParams({ url: mediaUrl });
+  let playbackSession;
+  try {
+    playbackSession = await chrome.runtime.sendMessage({
+      type: "create-playback-session",
+      candidateId,
+      sourceUrl,
+    });
+  } catch {
+    playbackSession = null;
+  }
+  if (!playbackSession?.ok || typeof playbackSession.sessionId !== "string") {
+    showToast(t("playbackUnavailable"));
+    return;
+  }
+  const params = new URLSearchParams({ session: playbackSession.sessionId });
   if (title) params.set("title", title.slice(0, 240));
-  if (sourceUrl) params.set("source", sourceUrl);
-  if (sessionId && subtitleLoaded) params.set("sub", sessionId);
+  if (subtitleSessionId && subtitleLoaded) params.set("sub", subtitleSessionId);
   if (proActive) params.set("pro", "1");
   chrome.tabs.create({ url: chrome.runtime.getURL(`player.html?${params.toString()}`) });
   button.textContent = t("browserOpening");
@@ -224,9 +228,9 @@ function enhanceCandidateCard(card) {
   if (!(card instanceof HTMLElement) || card.dataset.playbackEnhanced === "true") return;
   card.dataset.playbackEnhanced = "true";
 
+  const candidateId = card.dataset.candidateId || "";
   const urlText = card.dataset.mediaUrl || card.querySelector(".candidate-url")?.textContent || "";
-  const mediaUrl = playableMediaUrl(urlText);
-  if (!mediaUrl) return;
+  if (!candidateId) return;
 
   const meta = card.querySelector(".candidate-meta");
   if (!meta) return;
@@ -240,7 +244,13 @@ function enhanceCandidateCard(card) {
   button.setAttribute("aria-label", t("playBrowserTitle"));
   button.addEventListener("click", async () => {
     const origin = card.querySelector(".candidate-origin")?.textContent?.trim() || "";
-    playInBrowser(mediaUrl, title, button, card.dataset.sourceUrl || origin || await activePageUrl());
+    await playInBrowser(
+      candidateId,
+      title,
+      button,
+      card.dataset.sourceUrl || origin || await activePageUrl(),
+      urlText,
+    );
   });
   meta.append(button);
 }

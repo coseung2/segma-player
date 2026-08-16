@@ -18,6 +18,33 @@ function regexLiteral(value) {
   return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 }
 
+function normalizedRequestHeaderOperations(requestHeaders, referrer) {
+  const operations = new Map();
+  for (const operation of Array.isArray(requestHeaders) ? requestHeaders : []) {
+    const header = typeof operation?.header === "string" ? operation.header.trim() : "";
+    const name = header.toLowerCase();
+    if (!name || !["set", "remove", "append"].includes(operation?.operation)) continue;
+    operations.delete(name);
+    operations.set(name, { ...operation, header });
+  }
+  const recordedReferrer = operations.get("referer") || null;
+  const recordedOrigin = operations.get("origin") || null;
+  operations.delete("referer");
+  operations.delete("origin");
+  const result = [];
+  if (referrer) result.push({ header: "Referer", operation: "set", value: referrer });
+  else if (recordedReferrer) result.push(recordedReferrer);
+  if (recordedOrigin) result.push(recordedOrigin);
+  else {
+    // Prevent chrome-extension:// from leaking as Origin. When the original
+    // page request did carry Origin, the contextual header store supplies its
+    // exact value and that value wins instead of this removal operation.
+    result.push({ header: "Origin", operation: "remove" });
+  }
+  result.push(...operations.values());
+  return result;
+}
+
 export function exactMediaFetchRule({ ruleId, tabId, url, referrer = "", requestHeaders = [] }) {
   if (!Number.isInteger(ruleId) || ruleId <= 0 || ruleId > MAX_RULE_ID) {
     throw new Error("invalid-media-fetch-rule-id");
@@ -29,10 +56,7 @@ export function exactMediaFetchRule({ ruleId, tabId, url, referrer = "", request
   if (referrer && !canonicalMediaFetchReferrer(referrer)) {
     throw new Error("invalid-media-fetch-referrer");
   }
-  const headers = [];
-  if (referrer) headers.push({ header: "Referer", operation: "set", value: referrer });
-  headers.push({ header: "Origin", operation: "remove" });
-  headers.push(...requestHeaders);
+  const headers = normalizedRequestHeaderOperations(requestHeaders, referrer);
   const condition = {
     isUrlFilterCaseSensitive: true,
     resourceTypes: [...MEDIA_FETCH_RESOURCE_TYPES],

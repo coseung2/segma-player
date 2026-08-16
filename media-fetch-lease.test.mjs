@@ -33,6 +33,27 @@ test("media lease rules match one complete URL, including its query token", () =
   ]);
 });
 
+test("recorded Origin is replayed exactly and duplicate context headers are collapsed", () => {
+  const rule = exactMediaFetchRule({
+    ruleId: 103,
+    tabId: OFFSCREEN_DOCUMENT_TAB_ID,
+    url: "https://media.nnvivi.site/level5/master.m3u8?token=fresh",
+    referrer: "https://p.nnvivi.site/embed/39141",
+    requestHeaders: [
+      { header: "referer", operation: "set", value: "https://stale.example/" },
+      { header: "Origin", operation: "set", value: "https://p.nnvivi.site" },
+      { header: "origin", operation: "set", value: "https://p.nnvivi.site" },
+      { header: "Cookie", operation: "set", value: "session=opaque" },
+    ],
+  });
+
+  assert.deepEqual(rule.action.requestHeaders, [
+    { header: "Referer", operation: "set", value: "https://p.nnvivi.site/embed/39141" },
+    { header: "origin", operation: "set", value: "https://p.nnvivi.site" },
+    { header: "Cookie", operation: "set", value: "session=opaque" },
+  ]);
+});
+
 test("long tokenized URLs avoid the compiled-regex size limit", () => {
   const url = `https://cdn.example/video/file?token=${"a".repeat(1900)}`;
   const rule = exactMediaFetchRule({ ruleId: 101, tabId: 18, url });

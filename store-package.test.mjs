@@ -11,11 +11,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repositoryRoot = path.dirname(fileURLToPath(import.meta.url));
 const packager = path.join(repositoryRoot, "scripts", "build-store-package.ps1");
 const powershell = process.env.PWSH || "powershell.exe";
+const powershellAvailable = spawnSync(
+  powershell,
+  ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+  { encoding: "utf8" },
+).status === 0;
 const expectedFiles = [
   "aes-cbc.js",
   "background.js",
   "browser-download-monitor.js",
   "candidate.js",
+  "candidate-ranking.js",
   "content.js",
   "dash.js",
   "download-checkpoint.js",
@@ -45,6 +51,7 @@ const expectedFiles = [
   "options.js",
   "parallel-download.js",
   "page-media-observer.js",
+  "playback-session.js",
   "player-page-resolver.js",
   "popup.css",
   "popup.html",
@@ -104,7 +111,11 @@ function sha256(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
-test("store packager builds and audits the exact free-edition ZIP", async () => {
+test("store packager builds and audits the exact free-edition ZIP", async (context) => {
+  if (!powershellAvailable) {
+    context.skip("PowerShell is not installed in this environment");
+    return;
+  }
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "aura-store-package-"));
   try {
     const first = runPackager(temporaryRoot);
@@ -120,6 +131,7 @@ test("store packager builds and audits the exact free-edition ZIP", async () => 
 
     const manifest = JSON.parse(await readFile(path.join(extracted, "manifest.json"), "utf8"));
     assert.equal(manifest.manifest_version, 3);
+    assert.equal(manifest.minimum_chrome_version, "111");
     assert.equal(manifest.name, "Aura Media Downloader");
     assert.equal("key" in manifest, false);
     assert.equal("declarative_net_request" in manifest, false);
@@ -232,7 +244,11 @@ test("store packager builds and audits the exact free-edition ZIP", async () => 
   }
 });
 
-test("store packager builds and audits the Pro test ZIP", async () => {
+test("store packager builds and audits the Pro test ZIP", async (context) => {
+  if (!powershellAvailable) {
+    context.skip("PowerShell is not installed in this environment");
+    return;
+  }
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "aura-store-pro-"));
   try {
     const first = runPackager(temporaryRoot, null, "pro");
@@ -253,6 +269,7 @@ test("store packager builds and audits the Pro test ZIP", async () => {
 
     const manifest = JSON.parse(await readFile(path.join(extracted, "manifest.json"), "utf8"));
     assert.equal(manifest.manifest_version, 3);
+    assert.equal(manifest.minimum_chrome_version, "111");
     assert.equal(manifest.name, "Aura Media Downloader");
     assert.equal("key" in manifest, false);
     assert.equal("declarative_net_request" in manifest, false);

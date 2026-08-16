@@ -1,0 +1,111 @@
+[
+  {
+    "id": "missav-simd-012-ad-iframe-priority",
+    "liveUrl": "https://missav123.com/ko/simd-012",
+    "settleMs": 12000,
+    "expected": {
+      "primaryHost": "surrit.com",
+      "rejectedAdvertisementHost": "ads.example"
+    },
+    "candidates": [
+      {
+        "pageTitle": "Advertisement",
+        "pageUrl": "https://ads.example/preroll/frame",
+        "resourceUrl": "https://ads.example/preroll/master.m3u8?token=fixture-ad",
+        "frameId": 2,
+        "source": "web-response",
+        "confidence": 90,
+        "main": true
+      },
+      {
+        "pageTitle": "SIMD-012",
+        "pageUrl": "https://missav123.com/ko/simd-012",
+        "resourceUrl": "https://surrit.com/hls/simd-012/master.m3u8?token=fixture-feature",
+        "frameId": 0,
+        "source": "player-adapter",
+        "player": "hls.js",
+        "sessionId": "hls.js:fixture-1",
+        "confidence": 100
+      }
+    ],
+    "frameStates": {
+      "0": {
+        "playing": true,
+        "muted": false,
+        "visibleArea": 921600,
+        "viewportRatio": 0.7,
+        "durationMs": 2700000,
+        "topFrame": true
+      },
+      "2": {
+        "playing": true,
+        "muted": true,
+        "visibleArea": 921600,
+        "viewportRatio": 0.7,
+        "durationMs": 8000,
+        "topFrame": false
+      }
+    },
+    "frameLayouts": [
+      {
+        "pageUrl": "https://ads.example/preroll/frame",
+        "viewportRatio": 0.7,
+        "adHint": true
+      }
+    ]
+  },
+  {
+    "id": "av19-level5-iframe-session",
+    "liveUrl": "https://av19t.com/bj/39141",
+    "settleMs": 15000,
+    "expected": {
+      "primaryHost": "media.nnvivi.site",
+      "primaryPlayer": "level5"
+    },
+    "candidates": [
+      {
+        "pageTitle": "BJ 39141",
+        "pageUrl": "https://av19t.com/bj/39141",
+        "resourceUrl": "https://metrics.example/assets/live.m3u8",
+        "frameId": 0,
+        "source": "performance",
+        "confidence": 35
+      },
+      {
+        "pageTitle": "BJ 39141",
+        "pageUrl": "https://p.nnvivi.site/embed/39141",
+        "resourceUrl": "https://media.nnvivi.site/level5/master.m3u8?token=fixture-fresh",
+        "frameId": 7,
+        "source": "player-adapter",
+        "player": "level5",
+        "sessionId": "level5:fixture-1",
+        "confidence": 100
+      }
+    ],
+    "frameStates": {
+      "0": {
+        "playing": false,
+        "muted": false,
+        "visibleArea": 0,
+        "viewportRatio": 0,
+        "durationMs": 0,
+        "topFrame": true
+      },
+      "7": {
+        "playing": true,
+        "muted": false,
+        "visibleArea": 640000,
+        "viewportRatio": 0.5,
+        "durationMs": 1800000,
+        "topFrame": false
+      }
+    },
+    "frameLayouts": [
+      {
+        "pageUrl": "https://p.nnvivi.site/embed/39141",
+        "viewportRatio": 0.5,
+        "adHint": false
+      }
+    ]
+  }
+]

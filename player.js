@@ -1,4 +1,5 @@
 import Hls from "./vendor/hls.min.mjs";
+import { createContextualHlsLoader } from "./contextual-hls-loader.js";
 import { decodeSubtitleBytes, findSubtitleFile, cuesAt, parseSubtitle } from "./player-subtitle.js";
 import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
 import {
@@ -82,12 +83,22 @@ const COLLECTION_MESSAGES = {
 };
 
 const params = new URLSearchParams(location.search);
-const mediaUrl = params.get("url") || "";
-const title = params.get("title") || "";
+const requestedTitle = params.get("title") || "";
 const subtitleSession = params.get("sub") || "";
-const sourceUrl = params.get("source") || "";
+const legacyCollection = params.get("collection") === "1";
+let playbackSessionId = params.get("session") || "";
+let mediaUrl = safeHttpUrl(params.get("url")) || "";
+let sourceUrl = safeHttpUrl(params.get("source")) || "";
+let pageTitle = requestedTitle;
+let mediaType = "";
+let sourceTabId = null;
+let sourceFrameId = null;
+let exactReferrer = sourceUrl;
+let tokenized = hasTokenQuery(mediaUrl);
 let proActive = false;
 let refreshInProgress = false;
+let automaticRefreshUsed = false;
+let recoveryInProgress = false;
 let noSubtitleMessage = NO_SUBTITLE_MESSAGES.ko;
 let collectionMessages = COLLECTION_MESSAGES.ko;
 let autoSubtitleMessages = AUTO_SUBTITLE_MESSAGES.ko;
@@ -95,6 +106,9 @@ let subtitleUpdate = null;
 let playbackTabId = null;
 let playbackLeaseId = "";
 let playbackLeaseTimer = null;
+let hls = null;
+let directLeaseId = null;
+let directLeaseHeartbeat = null;
 
 const video = document.getElementById("video");
 const titleElement = document.getElementById("title");
@@ -113,6 +127,32 @@ const collectionCreateFolderButton = document.getElementById("collection-create-
 const collectionCancelButton = document.getElementById("collection-cancel");
 const collectionConfirmButton = document.getElementById("collection-confirm");
 saveButton.hidden = true;
+
+function safeHttpUrl(value) {
+  if (typeof value !== "string" || !value) return "";
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) return "";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function hasTokenQuery(value) {
+  try {
+    const url = new URL(value);
+    for (const name of url.searchParams.keys()) {
+      if (/(?:^|[-_])(?:auth|authorization|expires?|expiry|hdnts?|jwt|key|policy|session|sig|signature|ticket|token)(?:$|[-_])/i.test(name)) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
 
 function showToast(text) {
   const toast = document.createElement("p");
@@ -204,17 +244,87 @@ function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function findFreshCandidate() {
-  for (let attempt = 0; attempt < 15; attempt += 1) {
-    const response = await chrome.runtime.sendMessage({ type: "list-candidates" });
-    const candidates = Array.isArray(response?.candidates) ? response.candidates : [];
-    const fresh = candidates
-      .filter((candidate) => /^https?:\/\//i.test(candidate?.previewUrl || ""))
-      .sort((left, right) => Number(right.main) - Number(left.main))[0];
-    if (fresh) return fresh;
-    await wait(1000);
+function playbackPayload(response) {
+  const payload = response?.ok && response.session && typeof response.session === "object"
+    ? response.session
+    : null;
+  const resourceUrl = safeHttpUrl(payload?.resourceUrl);
+  const referrer = safeHttpUrl(payload?.referrer);
+  if (!payload || !resourceUrl || !referrer) return null;
+  return {
+    ...payload,
+    resourceUrl,
+    referrer,
+    sourceUrl: safeHttpUrl(payload.sourceUrl),
+  };
+}
+
+function applyPlaybackPayload(payload) {
+  playbackSessionId = typeof payload.sessionId === "string" ? payload.sessionId : playbackSessionId;
+  mediaUrl = payload.resourceUrl;
+  exactReferrer = payload.referrer;
+  sourceUrl = payload.sourceUrl || sourceUrl;
+  pageTitle = requestedTitle || payload.pageTitle || pageTitle;
+  mediaType = typeof payload.mediaType === "string" ? payload.mediaType : "";
+  sourceTabId = Number.isInteger(payload.tabId) ? payload.tabId : null;
+  sourceFrameId = Number.isInteger(payload.frameId) ? payload.frameId : null;
+  tokenized = Boolean(payload.tokenized || hasTokenQuery(mediaUrl));
+  if (pageTitle) titleElement.textContent = pageTitle;
+  saveButton.hidden = tokenized;
+}
+
+function replaceAddressWithSession() {
+  if (!playbackSessionId) return;
+  const next = new URLSearchParams({ session: playbackSessionId });
+  if (requestedTitle) next.set("title", requestedTitle.slice(0, 240));
+  if (subtitleSession) next.set("sub", subtitleSession);
+  if (proActive) next.set("pro", "1");
+  history.replaceState(null, "", `${location.pathname}?${next.toString()}`);
+}
+
+async function resolveInitialPlayback() {
+  if (!playbackSessionId) return Boolean(mediaUrl);
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: "resolve-playback-session",
+      sessionId: playbackSessionId,
+    });
+  } catch {
+    return false;
   }
-  return null;
+  const payload = playbackPayload(response);
+  if (!payload) return false;
+  applyPlaybackPayload(payload);
+  return true;
+}
+
+async function refreshExistingSession(sourceTab = null) {
+  if (!playbackSessionId) return null;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "refresh-playback-session",
+      sessionId: playbackSessionId,
+      ...(Number.isInteger(sourceTab) ? { sourceTabId: sourceTab } : {}),
+    });
+    return playbackPayload(response);
+  } catch {
+    return null;
+  }
+}
+
+async function createSessionFromSourceTab(sourceTab) {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "create-playback-session-from-tab",
+      sourceTabId: sourceTab,
+      sourceUrl,
+      previousMediaType: mediaType,
+    });
+    return playbackPayload(response);
+  } catch {
+    return null;
+  }
 }
 
 async function refreshFromSource(button) {
@@ -223,36 +333,41 @@ async function refreshFromSource(button) {
   button.disabled = true;
   button.textContent = "원본에서 다시 감지하는 중…";
   let sourceTab = null;
+  const previousMediaUrl = mediaUrl;
   try {
     sourceTab = await chrome.tabs.create({ url: sourceUrl, active: true });
-    const fresh = await findFreshCandidate();
-    if (!fresh?.previewUrl) {
+    let fresh = null;
+    for (let attempt = 0; attempt < 20 && !fresh; attempt += 1) {
+      await wait(attempt === 0 ? 1_500 : 1_000);
+      fresh = playbackSessionId
+        ? await refreshExistingSession(sourceTab?.id)
+        : await createSessionFromSourceTab(sourceTab?.id);
+    }
+    if (!fresh) {
       fail("원본 페이지에서 새 미디어 주소를 찾지 못했습니다.");
       return;
     }
-    const nextTitle = title || fresh.pageTitle || "";
-    await replaceInCollection(mediaUrl, {
-      url: fresh.previewUrl,
-      title: nextTitle,
-      sourceUrl,
-    });
-    const nextParams = new URLSearchParams({
-      collection: "1",
-      url: fresh.previewUrl,
-      source: sourceUrl,
-    });
-    if (nextTitle) nextParams.set("title", nextTitle.slice(0, 240));
-    if (proActive) nextParams.set("pro", "1");
+    applyPlaybackPayload(fresh);
+    replaceAddressWithSession();
+    if (legacyCollection && !tokenized && previousMediaUrl) {
+      await replaceInCollection(previousMediaUrl, {
+        url: mediaUrl,
+        title: pageTitle,
+        sourceUrl,
+      }).catch(() => {});
+    }
     if (sourceTab?.id) await chrome.tabs.remove(sourceTab.id).catch(() => {});
-    location.replace(chrome.runtime.getURL(`player.html?${nextParams.toString()}`));
+    automaticRefreshUsed = false;
+    await startPlayback();
   } catch {
     fail("원본 페이지를 다시 확인하지 못했습니다.");
   } finally {
     refreshInProgress = false;
+    button.disabled = false;
   }
 }
 
-function cleanupSessions() {
+function cleanupSubtitleSessions() {
   chrome.storage.local.get(null, (all) => {
     const now = Date.now();
     const stale = Object.keys(all || {}).filter(
@@ -271,12 +386,10 @@ async function loadSubtitles() {
       const session = stored[`auraSubtitleSession:${subtitleSession}`];
       await chrome.storage.local.remove(`auraSubtitleSession:${subtitleSession}`);
       text = session?.text || "";
-    } else if (params.get("collection") === "1") {
+    } else if (legacyCollection) {
       const handle = await getStoredSubtitleDirectory();
-      const found = await findSubtitleFile(handle, title, mediaUrl);
-      if (found) {
-        text = await decodeSubtitleBytes(new Uint8Array(await found.file.arrayBuffer()));
-      }
+      const found = await findSubtitleFile(handle, pageTitle, mediaUrl);
+      if (found) text = await decodeSubtitleBytes(new Uint8Array(await found.file.arrayBuffer()));
     }
     const cues = parseSubtitle(text);
     if (!cues.length) {
@@ -291,7 +404,7 @@ async function loadSubtitles() {
 
 async function refreshPlanGate() {
   proActive = (await resolveEdition()) === "pro";
-  saveButton.hidden = false;
+  saveButton.hidden = tokenized;
   generateSubtitleButton.hidden = !proActive;
 }
 
@@ -362,7 +475,14 @@ async function createCollectionFolderFromPicker() {
 async function saveSelectedCollection() {
   collectionConfirmButton.disabled = true;
   try {
-    const saved = await addToCollection({ title, url: mediaUrl, sourceUrl }, collectionFolder.value || null);
+    if (tokenized) {
+      showToast("만료되는 인증 주소는 컬렉션에 저장하지 않습니다.");
+      return;
+    }
+    const saved = await addToCollection(
+      { title: pageTitle, url: mediaUrl, sourceUrl },
+      collectionFolder.value || null,
+    );
     if (!saved) {
       showToast(collectionMessages.saveFailed);
       return;
@@ -375,36 +495,136 @@ async function saveSelectedCollection() {
   }
 }
 
+async function acquireMediaLease(url) {
+  const response = await chrome.runtime.sendMessage({
+    type: "prepare-media-fetch",
+    url,
+    referrer: exactReferrer,
+    sourceContext: {
+      tabId: sourceTabId,
+      frameId: sourceFrameId,
+      initiator: exactReferrer,
+    },
+  });
+  if (!response?.ok || response.leaseId == null) {
+    throw new Error(response?.error || "media-context-unavailable");
+  }
+  return response.leaseId;
+}
+
+async function releaseMediaLease(leaseId) {
+  if (leaseId == null) return;
+  await chrome.runtime.sendMessage({ type: "release-media-fetch", leaseId }).catch(() => {});
+}
+
+async function releaseDirectLease() {
+  if (directLeaseHeartbeat !== null) {
+    clearInterval(directLeaseHeartbeat);
+    directLeaseHeartbeat = null;
+  }
+  const leaseId = directLeaseId;
+  directLeaseId = null;
+  await releaseMediaLease(leaseId);
+}
+
+async function stopPlayback() {
+  video.onerror = null;
+  if (hls) {
+    try { hls.destroy(); } catch { /* best effort */ }
+    hls = null;
+  }
+  await releaseDirectLease();
+  try {
+    video.removeAttribute("src");
+    video.load();
+  } catch {
+    // The media element may already be detached during page shutdown.
+  }
+}
+
+async function attemptAutomaticRefresh() {
+  if (!playbackSessionId || automaticRefreshUsed) return false;
+  automaticRefreshUsed = true;
+  const fresh = await refreshExistingSession();
+  if (!fresh) return false;
+  applyPlaybackPayload(fresh);
+  await startPlayback();
+  return true;
+}
+
+async function handlePlaybackFailure() {
+  if (recoveryInProgress) return;
+  recoveryInProgress = true;
+  try {
+    if (await attemptAutomaticRefresh()) return;
+    fail("재생에 실패했습니다. 주소가 만료되었거나 서버에서 거부했습니다.", {
+      refresh: Boolean(sourceUrl),
+    });
+  } finally {
+    recoveryInProgress = false;
+  }
+}
+
+function hlsMedia() {
+  return mediaType === "HLS_MASTER" || mediaType === "HLS_MEDIA"
+    || /\.m3u8(?:[?#]|$)/i.test(mediaUrl);
+}
+
+async function startHlsPlayback() {
+  if (!Hls.isSupported()) {
+    fail("이 브라우저는 HLS 재생을 지원하지 않습니다.");
+    return;
+  }
+  const Loader = createContextualHlsLoader(Hls.DefaultConfig.loader, {
+    acquire: (url) => acquireMediaLease(url),
+    release: (leaseId) => releaseMediaLease(leaseId),
+  });
+  hls = new Hls({
+    loader: Loader,
+    xhrSetup(xhr) {
+      xhr.withCredentials = true;
+    },
+  });
+  hls.on(Hls.Events.ERROR, (_event, data) => {
+    if (data?.fatal) void handlePlaybackFailure();
+  });
+  hls.loadSource(mediaUrl);
+  hls.attachMedia(video);
+}
+
+async function startProgressivePlayback() {
+  try {
+    directLeaseId = await acquireMediaLease(mediaUrl);
+  } catch {
+    await handlePlaybackFailure();
+    return;
+  }
+  directLeaseHeartbeat = setInterval(() => {
+    if (directLeaseId == null) return;
+    void chrome.runtime.sendMessage({
+      type: "touch-media-fetch",
+      leaseId: directLeaseId,
+    }).catch(() => {});
+  }, 60_000);
+  video.onerror = () => { void handlePlaybackFailure(); };
+  video.src = mediaUrl;
+  video.load();
+}
+
 async function startPlayback() {
+  await stopPlayback();
+  message.hidden = true;
   if (!mediaUrl) {
     fail("재생할 주소가 없습니다.");
     return;
   }
-  if (title) titleElement.textContent = title;
-  await preparePlaybackMedia();
-
-  const hlsCandidate = /\.m3u8(\?|#|$)/i.test(mediaUrl) || mediaUrl.includes(".m3u8");
-  if (hlsCandidate && Hls.isSupported()) {
-    const hls = new Hls();
-    hls.on(Hls.Events.ERROR, (_event, data) => {
-      if (data?.fatal) {
-        if (sourceUrl) {
-          fail("재생에 실패했습니다. 주소가 만료되었거나 서버에서 거부했습니다.", { refresh: true });
-          return;
-        }
-        fail("재생에 실패했습니다. 주소가 만료되었거나 지원하지 않는 스트림입니다.");
-      }
-    });
-    hls.loadSource(mediaUrl);
-    hls.attachMedia(video);
-  } else if (hlsCandidate) {
-    fail("이 브라우저는 HLS 재생을 지원하지 않습니다.");
-  } else {
-    video.addEventListener("error", () => {
-      fail("재생에 실패했습니다. 주소가 만료되었거나 서버에서 거부했습니다.", { refresh: Boolean(sourceUrl) });
-    }, { once: true });
-    video.src = mediaUrl;
+  if (pageTitle) titleElement.textContent = pageTitle;
+  if (mediaType === "DASH" || /\.mpd(?:[?#]|$)/i.test(mediaUrl)) {
+    fail("DASH 브라우저 재생은 아직 지원하지 않습니다. 다운로드 기능을 이용해 주세요.");
+    return;
   }
+  if (hlsMedia()) await startHlsPlayback();
+  else await startProgressivePlayback();
 }
 
 function subtitleGenerationErrorMessage(error) {
@@ -419,7 +639,7 @@ async function generateSubtitles() {
   if (!proActive || generateSubtitleButton.disabled || !mediaUrl) return;
   generateSubtitleButton.disabled = true;
   generateSubtitleButton.textContent = autoSubtitleMessages.generating;
-  const input = { mediaUrl, sourceUrl, title };
+  const input = { mediaUrl, sourceUrl, title: pageTitle };
   try {
     const cached = await loadGeneratedSubtitle(input);
     const generated = cached || await requestGeneratedSubtitle(input);
@@ -437,7 +657,13 @@ async function generateSubtitles() {
   }
 }
 
-saveButton.addEventListener("click", openCollectionPicker);
+saveButton.addEventListener("click", () => {
+  if (tokenized) {
+    showToast("만료되는 인증 주소는 컬렉션에 저장하지 않습니다.");
+    return;
+  }
+  void openCollectionPicker();
+});
 generateSubtitleButton.addEventListener("click", generateSubtitles);
 window.addEventListener("pagehide", releasePlaybackMedia, { once: true });
 collectionNewFolderButton.addEventListener("click", () => {
@@ -451,16 +677,31 @@ collectionNewFolderInput.addEventListener("keydown", (event) => {
 collectionCancelButton.addEventListener("click", closeCollectionPicker);
 collectionConfirmButton.addEventListener("click", saveSelectedCollection);
 
+window.addEventListener("pagehide", () => {
+  if (hls) {
+    try { hls.destroy(); } catch { /* best effort */ }
+    hls = null;
+  }
+  void releaseDirectLease();
+});
+
 async function init() {
   const locale = await loadLocale();
   setCollectionLocale(locale);
   noSubtitleMessage = NO_SUBTITLE_MESSAGES[locale] || NO_SUBTITLE_MESSAGES.ko;
   autoSubtitleMessages = AUTO_SUBTITLE_MESSAGES[locale] || AUTO_SUBTITLE_MESSAGES.ko;
   generateSubtitleButton.textContent = autoSubtitleMessages.generate;
-  cleanupSessions();
+  cleanupSubtitleSessions();
+  await refreshPlanGate();
+  if (!await resolveInitialPlayback()) {
+    fail("안전한 재생 세션이 만료되었거나 재생 주소가 올바르지 않습니다.", {
+      refresh: Boolean(sourceUrl),
+    });
+    return;
+  }
   await refreshPlanGate();
   await loadSubtitles();
-  startPlayback();
+  await startPlayback();
 }
 
 init();

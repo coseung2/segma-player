@@ -13,6 +13,7 @@ function createEnvironment({
   manifestText = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n",
   contentType = "application/vnd.apple.mpegurl",
   responseUrl = null,
+  Hls = null,
 } = {}) {
   const messages = [];
   const listeners = new Map();
@@ -165,6 +166,7 @@ function createEnvironment({
   windowObject.XMLHttpRequest = FakeXMLHttpRequest;
   windowObject.MediaSource = FakeMediaSource;
   windowObject.SourceBuffer = FakeSourceBuffer;
+  if (Hls) windowObject.Hls = Hls;
 
   const context = vm.createContext({
     window: windowObject,
@@ -262,7 +264,7 @@ test("manifest observations stay bounded and non-manifest text is ignored", asyn
   await flush();
   const [manifest] = eventMessages(env, env.protocol.events.manifest);
   assert.ok(manifest);
-  assert.equal(manifest.text.length, env.protocol.limits.maxManifestTextBytes);
+  assert.equal("text" in manifest, false);
   assert.equal(manifest.truncated, true);
   assert.equal(manifest.url.length <= env.protocol.limits.maxUrlBytes, true);
   assert.equal(manifest.contentType.length <= env.protocol.limits.maxContentTypeBytes, true);
@@ -293,6 +295,47 @@ test("manifest observation leaves MediaSource and SourceBuffer methods untouched
   assert.equal(env.appendCalls.length, 1);
   assert.equal(env.endCalls.length, 1);
   assert.deepEqual(env.messages.filter(({ message }) => message.kind !== "manifest"), []);
+});
+
+test("hls.js adapter reports the loadSource manifest and serves bounded refresh snapshots", () => {
+  class FakeHls {
+    loadSource(url) {
+      this.url = url;
+      return "loaded";
+    }
+
+    startLoad() {
+      return "started";
+    }
+  }
+
+  const env = createEnvironment({ Hls: FakeHls });
+  const hls = new env.windowObject.Hls();
+  const manifestUrl = "https://surrit.com/hls/simd-012/master.m3u8?token=fresh";
+  assert.equal(hls.loadSource(manifestUrl), "loaded");
+
+  const sources = eventMessages(env, env.protocol.events.playerSource);
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].url, manifestUrl);
+  assert.equal(sources[0].player, "hls.js");
+  assert.match(sources[0].sessionId, /^hls\.js:/);
+  assert.equal(sources[0].confidence, 100);
+
+  env.dispatchMessage({
+    type: "aura-media-observer-snapshot-request-v1",
+    requestId: "refresh-request-0001",
+    resourceUrl: manifestUrl,
+    player: "hls.js",
+    sessionId: sources[0].sessionId,
+  });
+
+  const snapshots = eventMessages(env, env.protocol.events.playerSource)
+    .filter((message) => message.requestId === "refresh-request-0001");
+  const completed = eventMessages(env, env.protocol.events.snapshotComplete)
+    .find((message) => message.requestId === "refresh-request-0001");
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].snapshot, true);
+  assert.equal(completed?.count, 1);
 });
 
 test("the observer does not replace JSON or Array prototype behavior and avoids forbidden capabilities", () => {

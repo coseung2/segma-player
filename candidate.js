@@ -7,6 +7,7 @@ export const LIMITS = Object.freeze({
   contentTypeBytes: 128,
   candidates: 500,
   variants: 128,
+  evidence: 16,
 });
 
 export const MEDIA_TYPES = Object.freeze({
@@ -17,9 +18,90 @@ export const MEDIA_TYPES = Object.freeze({
   UNKNOWN: "UNKNOWN",
 });
 
+const TOKEN_QUERY_NAME_RE = /(?:^|[-_])(?:auth|authorization|expires?|expiry|hdnts?|jwt|key|policy|session|sig|signature|ticket|token)(?:$|[-_])/i;
+const EXPIRY_QUERY_NAME_RE = /^(?:e|exp|expires?|expiry|token_expiry)$/i;
+const SAFE_METADATA_TOKEN_RE = /^[a-z0-9][a-z0-9._:-]{0,127}$/i;
+
 export function isDownloadableMediaType(value) {
   return value === MEDIA_TYPES.PROGRESSIVE || value === MEDIA_TYPES.HLS_MASTER
     || value === MEDIA_TYPES.HLS_MEDIA || value === MEDIA_TYPES.DASH;
+}
+
+function finiteTimestamp(value) {
+  if (Number.isFinite(value) && value > 0) return value;
+  if (typeof value !== "string" || !value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function queryExpiryTimestamp(value) {
+  if (typeof value !== "string" || !value) return null;
+  if (/^\d{10,16}$/.test(value)) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return null;
+    return value.length <= 10 ? number * 1000 : number;
+  }
+  return finiteTimestamp(value);
+}
+
+function amazonExpiryTimestamp(url) {
+  const date = url.searchParams.get("X-Amz-Date") || url.searchParams.get("x-amz-date");
+  const lifetime = Number(url.searchParams.get("X-Amz-Expires") || url.searchParams.get("x-amz-expires"));
+  if (!date || !Number.isFinite(lifetime) || lifetime <= 0 || lifetime > 7 * 24 * 60 * 60) return null;
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(date);
+  if (!match) return null;
+  const issuedAt = Date.UTC(
+    Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+    Number(match[4]), Number(match[5]), Number(match[6]),
+  );
+  return Number.isFinite(issuedAt) ? issuedAt + lifetime * 1000 : null;
+}
+
+export function mediaUrlFreshness(resourceUrl, now = Date.now()) {
+  const url = canonicalHttpUrl(resourceUrl);
+  if (!url) return Object.freeze({ tokenized: false, expiresAt: null, refreshAfter: null });
+  let tokenized = false;
+  let expiresAt = null;
+  for (const [name, value] of url.searchParams) {
+    if (TOKEN_QUERY_NAME_RE.test(name) && value) tokenized = true;
+    if (!EXPIRY_QUERY_NAME_RE.test(name)) continue;
+    const parsed = queryExpiryTimestamp(value);
+    if (parsed && (!expiresAt || parsed < expiresAt)) expiresAt = parsed;
+  }
+  const amazonExpiry = amazonExpiryTimestamp(url);
+  if (amazonExpiry) {
+    tokenized = true;
+    expiresAt = expiresAt ? Math.min(expiresAt, amazonExpiry) : amazonExpiry;
+  }
+  const current = Number.isFinite(now) ? now : Date.now();
+  const refreshAfter = expiresAt
+    ? Math.max(current, expiresAt - Math.min(60_000, Math.max(15_000, (expiresAt - current) * 0.2)))
+    : null;
+  return Object.freeze({ tokenized, expiresAt, refreshAfter });
+}
+
+function safeMetadataToken(value, fallback = "") {
+  return typeof value === "string" && SAFE_METADATA_TOKEN_RE.test(value) ? value : fallback;
+}
+
+function normalizedEvidenceItem(value, fallback = {}) {
+  const source = safeMetadataToken(value?.source, safeMetadataToken(fallback.source, "unknown"));
+  const player = safeMetadataToken(value?.player, safeMetadataToken(fallback.player, ""));
+  const sessionId = safeMetadataToken(value?.sessionId, safeMetadataToken(fallback.sessionId, ""));
+  const requestType = safeMetadataToken(value?.requestType, safeMetadataToken(fallback.requestType, ""));
+  const confidenceValue = Number(value?.confidence ?? fallback.confidence);
+  const confidence = Number.isFinite(confidenceValue)
+    ? Math.max(0, Math.min(100, Math.round(confidenceValue)))
+    : 50;
+  const at = finiteTimestamp(value?.at ?? fallback.at) || Date.now();
+  return Object.freeze({ source, player, sessionId, requestType, confidence, at });
+}
+
+export function normalizeCandidateEvidence(value, fallback = {}) {
+  const incoming = Array.isArray(value) ? value : [];
+  const evidence = incoming.slice(0, LIMITS.evidence).map((item) => normalizedEvidenceItem(item, fallback));
+  if (!evidence.length) evidence.push(normalizedEvidenceItem({}, fallback));
+  return evidence;
 }
 
 function publicIpLiteral(hostname) {
@@ -174,8 +256,16 @@ export function pageOrigin(pageUrl) {
 }
 
 function secureId() {
-  if (!globalThis.crypto?.randomUUID) throw new Error("secure random UUID is unavailable");
-  return globalThis.crypto.randomUUID();
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else {
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
 function likelyAd(pageTitle, resourceUrl, pageUrl = "") {
@@ -214,8 +304,10 @@ export function variantIdentity(variant) {
 
 export function makeCandidate({
   pageTitle = "", pageUrl, resourceUrl, contentType = "", likelyAdvertisement = false,
-  detectedAt = new Date().toISOString(), variants = [], main = false, tabId = null,
-  frameId = null, fromMediaElement = false,
+  detectedAt = new Date().toISOString(), observedAt = null, variants = [], main = false,
+  explicitMain = main, tabId = null, frameId = null, fromMediaElement = false,
+  evidence = [], detectionSource = "", player = "", sessionId = "", requestType = "",
+  confidence = null,
 }) {
   if (typeof resourceUrl !== "string" || resourceUrl.length > LIMITS.urlBytes) return null;
   const blob = resourceUrl.startsWith("blob:");
@@ -250,6 +342,22 @@ export function makeCandidate({
       displayUrl: redactUrl(variantUrl.href),
     });
   }
+  const observationTime = finiteTimestamp(observedAt)
+    || finiteTimestamp(detectedAt)
+    || Date.now();
+  const normalizedEvidence = normalizeCandidateEvidence(evidence, {
+    source: detectionSource || (fromMediaElement ? "media-element" : "unknown"),
+    player,
+    sessionId,
+    requestType,
+    confidence: confidence ?? (fromMediaElement ? 80 : 50),
+    at: observationTime,
+  });
+  const evidencePlayer = normalizedEvidence.find((item) => item.player)?.player || "";
+  const evidenceSession = normalizedEvidence.find((item) => item.sessionId)?.sessionId || "";
+  const freshness = blob
+    ? Object.freeze({ tokenized: false, expiresAt: null, refreshAfter: null })
+    : mediaUrlFreshness(canonical, observationTime);
   return {
     id: secureId(),
     tabId: tabId === null ? null : tabId,
@@ -258,22 +366,38 @@ export function makeCandidate({
     pageOrigin: origin,
     pageUrl: pageCanonical ? pageCanonical.href : "",
     main: Boolean(main),
+    explicitMain: Boolean(explicitMain || main),
+    classification: "alternate",
+    score: 0,
+    scoreReasons: [],
     mediaType,
     resourceUrl: canonical,
     displayUrl: redactUrl(canonical),
-    detectedAt: String(detectedAt).slice(0, 64),
+    detectedAt: new Date(observationTime).toISOString(),
+    firstObservedAt: observationTime,
+    lastObservedAt: observationTime,
+    observationCount: 1,
     durationMs: null,
     live: false,
     protection: "UNKNOWN",
     support: "UNKNOWN",
     variants: normalizedVariants,
-    likelyAdvertisement: Boolean(likelyAdvertisement) || likelyAd(pageTitle, canonical, pageCanonical?.href || ""),
+    evidence: normalizedEvidence,
+    player: safeMetadataToken(player, evidencePlayer) || evidencePlayer,
+    sessionId: safeMetadataToken(sessionId, evidenceSession) || evidenceSession,
+    tokenized: freshness.tokenized,
+    expiresAt: freshness.expiresAt,
+    refreshAfter: freshness.refreshAfter,
+    refreshable: !blob && Number.isInteger(tabId) && Number.isInteger(frameId),
+    likelyAdvertisement: Boolean(likelyAdvertisement)
+      || likelyAd(pageTitle, canonical, pageCanonical?.href || ""),
   };
 }
 
 export function candidateKey(candidate) {
   const tab = candidate.tabId == null ? "" : String(candidate.tabId);
-  return `${tab}|${normalizeOriginPath(candidate.resourceUrl) || candidate.displayUrl}|${candidate.mediaType}`;
+  const frame = candidate.frameId == null ? "" : String(candidate.frameId);
+  return `${tab}|${frame}|${normalizeOriginPath(candidate.resourceUrl) || candidate.displayUrl}|${candidate.mediaType}`;
 }
 
 export function upsertCandidate(candidates, candidate, limit = LIMITS.candidates) {
@@ -286,8 +410,37 @@ export function upsertCandidate(candidates, candidate, limit = LIMITS.candidates
     if (candidate.tabId != null) existing.tabId = candidate.tabId;
     if (candidate.frameId != null) existing.frameId = candidate.frameId;
     if (candidate.pageTitle) existing.pageTitle = candidate.pageTitle;
-    if (candidate.pageUrl) existing.pageUrl = candidate.pageUrl;
-    if (candidate.main) existing.main = true;
+    if (candidate.pageUrl) {
+      existing.pageUrl = candidate.pageUrl;
+      existing.pageOrigin = candidate.pageOrigin;
+    }
+    existing.explicitMain = Boolean(existing.explicitMain || candidate.explicitMain || candidate.main);
+    existing.lastObservedAt = Math.max(
+      Number(existing.lastObservedAt) || 0,
+      Number(candidate.lastObservedAt) || Date.now(),
+    );
+    existing.firstObservedAt = Math.min(
+      Number(existing.firstObservedAt) || existing.lastObservedAt,
+      Number(candidate.firstObservedAt) || existing.lastObservedAt,
+    );
+    existing.observationCount = Math.min(1_000_000,
+      Math.max(1, Number(existing.observationCount) || 1) + Math.max(1, Number(candidate.observationCount) || 1));
+    existing.tokenized = Boolean(candidate.tokenized);
+    existing.expiresAt = candidate.expiresAt || null;
+    existing.refreshAfter = candidate.refreshAfter || null;
+    existing.refreshable = Boolean(existing.refreshable || candidate.refreshable);
+    existing.likelyAdvertisement = Boolean(existing.likelyAdvertisement || candidate.likelyAdvertisement);
+    if (candidate.player) existing.player = candidate.player;
+    if (candidate.sessionId) existing.sessionId = candidate.sessionId;
+    const evidenceByKey = new Map();
+    for (const item of [...(existing.evidence || []), ...(candidate.evidence || [])]) {
+      const evidenceKey = `${item.source}|${item.player}|${item.sessionId}|${item.requestType}`;
+      const current = evidenceByKey.get(evidenceKey);
+      if (!current || Number(item.at) >= Number(current.at)) evidenceByKey.set(evidenceKey, item);
+    }
+    existing.evidence = [...evidenceByKey.values()]
+      .sort((left, right) => Number(right.at) - Number(left.at))
+      .slice(0, LIMITS.evidence);
     for (const incoming of candidate.variants) {
       const identity = variantIdentity(incoming);
       const current = existing.variants.find((variant) => variantIdentity(variant) === identity);
@@ -327,6 +480,8 @@ export function redactCandidateForUi(candidate) {
     pageTitle,
     pageOrigin: candidate.pageOrigin,
     main: Boolean(candidate.main),
+    classification: typeof candidate.classification === "string" ? candidate.classification : "alternate",
+    score: Number.isFinite(candidate.score) ? candidate.score : 0,
     mediaType: candidate.mediaType,
     displayUrl: candidate.displayUrl,
     detectedAt: candidate.detectedAt,
@@ -335,6 +490,9 @@ export function redactCandidateForUi(candidate) {
     protection: candidate.protection,
     support: candidate.support,
     variants: candidate.variants.map(redactedVariant),
+    player: safeMetadataToken(candidate.player, ""),
+    tokenized: Boolean(candidate.tokenized),
+    expiresAt: Number.isFinite(candidate.expiresAt) ? candidate.expiresAt : null,
     likelyAdvertisement: candidate.likelyAdvertisement,
   };
 }
@@ -356,7 +514,15 @@ export function sanitizePageMessage(message) {
     resourceUrl: message.resourceUrl,
     contentType: message.contentType,
     main: message.main,
+    explicitMain: message.explicitMain,
     fromMediaElement: message.fromMediaElement,
+    observedAt: message.observedAt,
+    evidence: message.evidence,
+    detectionSource: message.detectionSource,
+    player: message.player,
+    sessionId: message.sessionId,
+    requestType: message.requestType,
+    confidence: message.confidence,
   });
   return candidate ? { ...candidate, type: "resource" } : null;
 }

@@ -385,9 +385,15 @@ function renderCandidates(candidates) {
   const downloadable = candidates.filter((candidate) => isDownloadableMediaType(candidate.mediaType)
     && !candidate.likelyAdvertisement);
   lastCandidates = downloadable;
-  const sorted = [...downloadable].reverse().sort((a, b) => Number(b.main) - Number(a.main));
-  const hasMain = sorted.some((item) => item.main && !String(item.displayUrl || "").startsWith("blob:"));
-  const shown = mainOnlyElement.checked && hasMain ? sorted.filter((item) => item.main) : sorted;
+  const sorted = [...downloadable].sort((a, b) =>
+    (Number(b.main) - Number(a.main))
+    || (Number(a.likelyAdvertisement) - Number(b.likelyAdvertisement))
+    || (Number(b.score || 0) - Number(a.score || 0)));
+  const hasMain = sorted.some((item) => item.main && !item.likelyAdvertisement
+    && !String(item.displayUrl || "").startsWith("blob:"));
+  const shown = mainOnlyElement.checked && hasMain
+    ? sorted.filter((item) => item.main && !item.likelyAdvertisement)
+    : sorted;
   summaryElement.textContent = t("detect.candidateCount", { count: shown.length });
   candidatesElement.replaceChildren();
   if (!shown.length) {
@@ -397,6 +403,7 @@ function renderCandidates(candidates) {
   for (const candidate of shown) {
     const card = document.createElement("article");
     card.className = "candidate-card";
+    card.dataset.candidateId = candidate.id;
     card.dataset.mediaUrl = candidate.previewUrl || "";
     card.dataset.sourceUrl = candidate.sourceUrl || "";
     const inlineJobs = document.createElement("section");

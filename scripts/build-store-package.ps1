@@ -48,6 +48,7 @@ $runtimeFiles = @(
   'background.js',
   'browser-download-monitor.js',
   'candidate.js',
+  'candidate-ranking.js',
   'content.js',
   'dash.js',
   'download-checkpoint.js',
@@ -75,6 +76,7 @@ $runtimeFiles = @(
   'options.js',
   'parallel-download.js',
   'page-media-observer.js',
+  'playback-session.js',
   'player-page-resolver.js',
   'popup.css',
   'popup.html',
@@ -167,6 +169,9 @@ function Write-AuditedManifest {
     'downloads', 'offscreen', 'scripting', 'storage', 'webRequest'
   )
   if ($auditedManifest.manifest_version -ne 3) { throw 'Store manifest must be Manifest V3.' }
+  if ([int]$auditedManifest.minimum_chrome_version -lt 111) {
+    throw 'Store manifest must require Chrome 111+ for MAIN-world content scripts.'
+  }
   if ($auditedManifest.PSObject.Properties.Name -contains 'key') { throw 'Store manifest must not contain a fixed key.' }
   if ($auditedManifest.PSObject.Properties.Name -contains 'declarative_net_request') {
     throw 'Store manifest must not contain a static site-specific redirect rule.'

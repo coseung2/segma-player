@@ -519,3 +519,64 @@ test("MAIN-world observations bridge detected manifests", async () => {
   assert.equal(countResource(env.sent, "https://media.example/hidden.mpd"), 1);
   assert.equal(env.sent.some((message) => /^mse-capture-/.test(message.type || "")), false);
 });
+
+test("player-adapter metadata is preserved and refresh snapshots return the latest token URL", async () => {
+  const env = baseEnvironment({ runtimeHandler: () => ({ ok: true }) });
+  await importFreshContent();
+  const dispatch = (data) => {
+    for (const handler of env.windowEventHandlers.message || []) handler({ source: globalThis, data });
+  };
+  const staleUrl = "https://media.nnvivi.site/level5/master.m3u8?token=stale";
+  dispatch({
+    type: "aura-media-observer-event-v1",
+    kind: "player-source",
+    source: "player-adapter",
+    url: staleUrl,
+    contentType: "application/vnd.apple.mpegurl",
+    player: "level5",
+    sessionId: "level5:1",
+    confidence: 100,
+    observedAt: 1_700_000_000_000,
+  });
+  const observed = env.sent.find((message) => message.resourceUrl === staleUrl);
+  assert.equal(observed?.detectionSource, "player-adapter");
+  assert.equal(observed?.player, "level5");
+  assert.equal(observed?.sessionId, "level5:1");
+
+  const responsePromise = new Promise((resolve) => {
+    const keepAlive = env.onMessage({
+      type: "refresh-media-source",
+      resourceUrl: staleUrl,
+      player: "level5",
+      sessionId: "level5:1",
+    }, {}, resolve);
+    assert.equal(keepAlive, true);
+  });
+  const request = env.posted.find((message) => message.type === "aura-media-observer-snapshot-request-v1");
+  assert.ok(request?.requestId);
+  const freshUrl = "https://media.nnvivi.site/level5/master.m3u8?token=fresh";
+  dispatch({
+    type: "aura-media-observer-event-v1",
+    kind: "player-source",
+    source: "player-adapter",
+    requestId: request.requestId,
+    snapshot: true,
+    url: freshUrl,
+    contentType: "application/vnd.apple.mpegurl",
+    player: "level5",
+    sessionId: "level5:1",
+    confidence: 100,
+    observedAt: 1_700_000_010_000,
+  });
+  dispatch({
+    type: "aura-media-observer-event-v1",
+    kind: "snapshot-complete",
+    requestId: request.requestId,
+    count: 1,
+  });
+
+  const refreshed = await responsePromise;
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.url, freshUrl);
+  assert.equal(refreshed.frameUrl, "https://page.example/watch");
+});

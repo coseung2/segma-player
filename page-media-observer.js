@@ -24,8 +24,11 @@
     maxContentTypeBytes: 128,
     maxManifestTextBytes: 1_048_576,
     maxManifestReports: 256,
+    maxPlayerReports: 256,
+    maxPlayerSourcesPerPass: 64,
   });
   const EVENT_TYPE = "aura-media-observer-event-v1";
+  const SNAPSHOT_REQUEST_TYPE = "aura-media-observer-snapshot-request-v1";
   try {
     Object.defineProperty(root, "__auraMediaObserverProtocolV1", {
       configurable: false,
@@ -33,7 +36,12 @@
       value: Object.freeze({
         version: 1,
         eventType: EVENT_TYPE,
-        events: Object.freeze({ manifest: "manifest", media: "media" }),
+        events: Object.freeze({
+          manifest: "manifest",
+          media: "media",
+          playerSource: "player-source",
+          snapshotComplete: "snapshot-complete",
+        }),
         limits: LIMITS,
       }),
       writable: false,
@@ -47,6 +55,12 @@
   const xhrState = new WeakMap();
   const reportedManifestKeys = new Set();
   const reportedManifestOrder = [];
+  const playerSessionIds = new WeakMap();
+  const playerSourceRecords = new Map();
+  const playerSourceOrder = [];
+  let nextPlayerSessionId = 1;
+  let playerDiscoveryPasses = 0;
+  let playerDiscoveryTimer = null;
 
   function isObject(value) {
     return (typeof value === "object" && value !== null) || typeof value === "function";
@@ -149,7 +163,9 @@
       source,
       url: boundedResourceUrl,
       contentType: boundedContentType,
-      text: boundedText,
+      // The isolated detector only needs the canonical URL and MIME type.
+      // Keeping playlist bodies out of the page bridge reduces message volume
+      // and avoids retaining media metadata longer than necessary.
       truncated: Boolean(truncated || (typeof text === "string" && text.length > boundedText.length)),
     });
   }
@@ -166,6 +182,123 @@
       url: boundedResourceUrl,
       contentType: boundedContentType,
     });
+  }
+
+  function safeToken(value, fallback = "") {
+    return typeof value === "string" && /^[a-z0-9][a-z0-9._:-]{0,127}$/i.test(value)
+      ? value
+      : fallback;
+  }
+
+  function playerSessionId(value, prefix = "player") {
+    if (!isObject(value)) return "";
+    const existing = playerSessionIds.get(value);
+    if (existing) return existing;
+    const sessionId = `${safeToken(prefix, "player")}:${nextPlayerSessionId++}`;
+    playerSessionIds.set(value, sessionId);
+    return sessionId;
+  }
+
+  function playerSourceKey(record) {
+    return `${record.player}\u0000${record.sessionId}\u0000${record.url}`;
+  }
+
+  function rememberPlayerSource(record) {
+    const key = playerSourceKey(record);
+    if (!playerSourceRecords.has(key)) playerSourceOrder.push(key);
+    playerSourceRecords.set(key, record);
+    while (playerSourceOrder.length > LIMITS.maxPlayerReports) {
+      const oldest = playerSourceOrder.shift();
+      playerSourceRecords.delete(oldest);
+    }
+  }
+
+  function emitPlayerSource(record, extra = {}) {
+    return postEvent({
+      kind: "player-source",
+      source: "player-adapter",
+      url: record.url,
+      contentType: record.contentType,
+      player: record.player,
+      sessionId: record.sessionId,
+      confidence: record.confidence,
+      observedAt: record.observedAt,
+      ...extra,
+    });
+  }
+
+  function reportPlayerSource(url, {
+    player = "generic",
+    session = null,
+    sessionId = "",
+    contentType = "",
+    confidence = 90,
+  } = {}) {
+    const boundedResourceUrl = boundedUrl(url);
+    if (!boundedResourceUrl) return false;
+    const normalizedPlayer = safeToken(player, "generic");
+    const normalizedSession = safeToken(sessionId, "")
+      || playerSessionId(session, normalizedPlayer);
+    const normalizedContentType = mimeType(contentType);
+    const normalizedConfidence = Number.isFinite(confidence)
+      ? Math.max(0, Math.min(100, Math.round(confidence)))
+      : 90;
+    const record = Object.freeze({
+      url: boundedResourceUrl,
+      contentType: normalizedContentType,
+      player: normalizedPlayer,
+      sessionId: normalizedSession,
+      confidence: normalizedConfidence,
+      observedAt: Date.now(),
+    });
+    const key = playerSourceKey(record);
+    const previous = playerSourceRecords.get(key);
+    rememberPlayerSource(record);
+    if (previous && previous.url === record.url && previous.contentType === record.contentType) return true;
+    return emitPlayerSource(record);
+  }
+
+  function sourceEntries(value, depth = 0, result = []) {
+    if (result.length >= LIMITS.maxPlayerSourcesPerPass || depth > 3 || value == null) return result;
+    if (typeof value === "string") {
+      result.push({ url: value, contentType: "" });
+      return result;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) sourceEntries(item, depth + 1, result);
+      return result;
+    }
+    if (!isObject(value)) return result;
+    let url = "";
+    let contentType = "";
+    try {
+      url = typeof value.src === "string" ? value.src
+        : typeof value.file === "string" ? value.file
+          : typeof value.url === "string" ? value.url : "";
+      contentType = typeof value.type === "string" ? value.type
+        : typeof value.mimeType === "string" ? value.mimeType : "";
+    } catch {
+      return result;
+    }
+    if (url) result.push({ url, contentType });
+    for (const name of ["source", "sources", "playlist", "levels", "tracks", "media", "config"]) {
+      try {
+        if (value[name] !== undefined && value[name] !== value) sourceEntries(value[name], depth + 1, result);
+      } catch {
+        // A player-owned getter must not affect playback.
+      }
+    }
+    return result;
+  }
+
+  function reportSourceEntries(value, options) {
+    const seen = new Set();
+    for (const entry of sourceEntries(value)) {
+      const url = boundedUrl(entry.url);
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      reportPlayerSource(url, { ...options, contentType: entry.contentType || options?.contentType || "" });
+    }
   }
 
   async function readBoundedText(response) {
@@ -393,6 +526,190 @@
     });
   }
 
+  function reportHlsSession(hls, player = "hls.js", confidence = 98) {
+    if (!isObject(hls)) return;
+    const options = {
+      player,
+      session: hls,
+      contentType: "application/vnd.apple.mpegurl",
+      confidence,
+    };
+    try { reportPlayerSource(hls.url, options); } catch { /* player-owned getter */ }
+    try { reportPlayerSource(hls.sourceUrl, options); } catch { /* player-owned getter */ }
+    try { reportSourceEntries(hls.levels, options); } catch { /* player-owned getter */ }
+    try { reportSourceEntries(hls.audioTracks, { ...options, confidence: confidence - 4 }); } catch { /* player-owned getter */ }
+    try { reportSourceEntries(hls.subtitleTracks, { ...options, confidence: confidence - 10 }); } catch { /* player-owned getter */ }
+    try { reportSourceEntries(hls.loadLevelObj, options); } catch { /* player-owned getter */ }
+  }
+
+  function installHlsAdapter(Hls, player = "hls.js") {
+    const prototype = Hls?.prototype;
+    if (!prototype) return;
+    installOwnFunction(prototype, "loadSource", (original) => function auraObservedHlsLoadSource(...args) {
+      reportPlayerSource(args[0], {
+        player,
+        session: this,
+        contentType: "application/vnd.apple.mpegurl",
+        confidence: 100,
+      });
+      const result = original.apply(this, args);
+      reportHlsSession(this, player, 100);
+      return result;
+    });
+    installOwnFunction(prototype, "startLoad", (original) => function auraObservedHlsStartLoad(...args) {
+      reportHlsSession(this, player, 98);
+      return original.apply(this, args);
+    });
+  }
+
+  function inspectVideoJsPlayer(player) {
+    if (!isObject(player)) return;
+    const options = { player: "video.js", session: player, confidence: 95 };
+    try { reportSourceEntries(player.currentSources?.(), options); } catch { /* optional API */ }
+    try { reportSourceEntries(player.currentSource?.(), options); } catch { /* optional API */ }
+    try {
+      const source = player.src?.();
+      if (typeof source === "string") reportPlayerSource(source, options);
+      else reportSourceEntries(source, options);
+    } catch { /* optional API */ }
+    try {
+      const tech = player.tech?.({ IWillNotUseThisInPlugins: true });
+      reportHlsSession(tech?.vhs || tech?.hls, "video.js", 98);
+    } catch { /* optional API */ }
+  }
+
+  function inspectVideoJs() {
+    const videojs = root.videojs;
+    if (!videojs) return;
+    try {
+      const players = videojs.getPlayers?.();
+      for (const player of Object.values(players || {})) inspectVideoJsPlayer(player);
+    } catch {
+      // A custom videojs facade must not affect the page.
+    }
+  }
+
+  function inspectJwPlayer(player) {
+    if (!isObject(player)) return;
+    const options = { player: "jwplayer", session: player, confidence: 96 };
+    try { reportSourceEntries(player.getPlaylistItem?.(), options); } catch { /* optional API */ }
+    try { reportSourceEntries(player.getPlaylist?.(), options); } catch { /* optional API */ }
+    try { reportSourceEntries(player.getConfig?.(), options); } catch { /* optional API */ }
+    installOwnFunction(player, "setup", (original) => function auraObservedJwSetup(...args) {
+      reportSourceEntries(args[0], { player: "jwplayer", session: this, confidence: 98 });
+      const result = original.apply(this, args);
+      inspectJwPlayer(result || this);
+      return result;
+    });
+  }
+
+  function installJwPlayerAdapter() {
+    installOwnFunction(root, "jwplayer", (original) => function auraObservedJwPlayer(...args) {
+      const player = original.apply(this, args);
+      inspectJwPlayer(player);
+      return player;
+    });
+    try {
+      const players = root.jwplayer?.api?.players;
+      for (const player of Array.isArray(players) ? players : Object.values(players || {})) inspectJwPlayer(player);
+    } catch {
+      // Ignore nonstandard registries.
+    }
+  }
+
+  function inspectPlyr(player, media = null) {
+    if (!isObject(player)) return;
+    const options = { player: "plyr", session: player, confidence: 90 };
+    try { reportSourceEntries(player.source, options); } catch { /* optional API */ }
+    try { reportSourceEntries(player.config?.sources, options); } catch { /* optional API */ }
+    try { reportSourceEntries(player.media?.querySelectorAll?.("source"), options); } catch { /* optional API */ }
+    try {
+      const source = player.media?.currentSrc || player.media?.src || media?.currentSrc || media?.src;
+      reportPlayerSource(source, options);
+    } catch { /* optional API */ }
+  }
+
+  function inspectMediaElements() {
+    const documentObject = root.document;
+    if (!documentObject?.querySelectorAll) return;
+    let elements = [];
+    try { elements = [...documentObject.querySelectorAll("video, audio")]; } catch { return; }
+    for (const media of elements) {
+      try {
+        const level5Hls = media?._l5?.hls;
+        if (level5Hls) reportHlsSession(level5Hls, "level5", 100);
+      } catch { /* optional Level5 internals */ }
+      try {
+        const attachedHls = media?._hls || media?.hls || media?.__hls;
+        if (attachedHls) reportHlsSession(attachedHls, "hls.js", 98);
+      } catch { /* optional hls.js attachment */ }
+      try {
+        const plyr = media?.plyr || media?._plyr || media?.__plyr;
+        if (plyr) inspectPlyr(plyr, media);
+      } catch { /* optional Plyr attachment */ }
+    }
+  }
+
+  function discoverPlayerAdapters() {
+    playerDiscoveryPasses += 1;
+    try { installHlsAdapter(root.Hls, "hls.js"); } catch { /* optional player */ }
+    try { installHlsAdapter(root.hls?.constructor, "hls.js"); } catch { /* optional player */ }
+    try { inspectVideoJs(); } catch { /* optional player */ }
+    try { installJwPlayerAdapter(); } catch { /* optional player */ }
+    try { inspectMediaElements(); } catch { /* optional player */ }
+    if (playerDiscoveryPasses >= 60 && playerDiscoveryTimer !== null) {
+      try { root.clearInterval?.(playerDiscoveryTimer); } catch { /* ignore */ }
+      playerDiscoveryTimer = null;
+    }
+  }
+
+  function snapshotMatches(record, request) {
+    const player = safeToken(request?.player, "");
+    const sessionId = safeToken(request?.sessionId, "");
+    if (player && record.player !== player) return false;
+    // The same player session may rotate CDN hosts or manifest paths while
+    // refreshing a short-lived token. A stable session id is stronger than the
+    // old URL shape, so do not reject that rotation here.
+    if (sessionId) return record.sessionId === sessionId;
+    if (typeof request?.resourceUrl !== "string" || !request.resourceUrl) return true;
+    const requested = boundedUrl(request.resourceUrl);
+    if (!requested) return true;
+    try {
+      const left = new URL(record.url);
+      const right = new URL(requested);
+      return left.origin === right.origin && left.pathname === right.pathname;
+    } catch {
+      return true;
+    }
+  }
+
+  function handleSnapshotRequest(event) {
+    if (event.source !== root || event.data?.type !== SNAPSHOT_REQUEST_TYPE) return;
+    const requestId = safeToken(event.data.requestId, "");
+    if (!requestId) return;
+    discoverPlayerAdapters();
+    let count = 0;
+    for (const record of playerSourceRecords.values()) {
+      if (!snapshotMatches(record, event.data)) continue;
+      emitPlayerSource(record, { requestId, snapshot: true });
+      count += 1;
+      if (count >= LIMITS.maxPlayerSourcesPerPass) break;
+    }
+    postEvent({ kind: "snapshot-complete", requestId, count });
+  }
+
   installFetchHook();
   installXhrHook();
+  discoverPlayerAdapters();
+  try { root.addEventListener?.("message", handleSnapshotRequest); } catch { /* optional */ }
+  for (const eventName of ["DOMContentLoaded", "load", "play", "playing", "loadedmetadata"]) {
+    try { root.addEventListener?.(eventName, discoverPlayerAdapters, true); } catch { /* optional */ }
+  }
+  try {
+    if (typeof root.setInterval === "function") {
+      playerDiscoveryTimer = root.setInterval(discoverPlayerAdapters, 1_000);
+    }
+  } catch {
+    playerDiscoveryTimer = null;
+  }
 })();

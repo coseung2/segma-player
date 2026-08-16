@@ -13,8 +13,10 @@ Examples: `0.3.33` -> `0.3.34`, `0.3.99` -> `0.4.0`, and
 `0.9.99` -> `1.0.0`.
 
 Do not increment a development version for a verification-only rebuild with no
-source changes. Build with `scripts/build-dev-package.ps1` after the version is
-updated so the staging folder and served ZIP have the same version.
+source changes. When the user explicitly requests a development ZIP, build with
+`scripts/build-dev-package.ps1` after the version is updated so the staging folder
+and served ZIP have the same version. Otherwise run `npm run build:dev-staging`
+to refresh `artifacts/chrome-web-store/staging-pro` without creating a ZIP.
 
 ## Incident and regression policy
 

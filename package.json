@@ -5,6 +5,7 @@
     "test": "node --test",
     "test:media-sites": "node --test candidate-ranking.test.mjs site-regression.test.mjs",
     "monitor:media-sites": "node scripts/live-media-smoke.mjs",
+    "build:dev-staging": "node scripts/build-dev-staging.mjs --edition=pro",
     "deploy": "wrangler deploy",
     "preview": "wrangler dev"
   },

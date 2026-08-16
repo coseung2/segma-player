@@ -21,14 +21,22 @@ The development checkout uses the Pro profile in `edition.js`. The Chrome Web St
 - `content.js` reports exact frame playback state and structured iframe layout;
   `candidate-ranking.js` combines that evidence into primary/alternate/ad scores.
 - `background.js` owns candidate state, short-lived playback sessions, exact
-  request-context leases, and source-frame token refresh.
+  request-context leases, and source-frame token refresh. `media-request-context.js`
+  makes download and playback select the same observed source context and keeps
+  bounded diagnostics free of URL queries and header values.
 - `download-worker.js` keeps accepted downloads running in an offscreen document
   and `hls-download.js` refreshes short-lived manifests after 401/403 responses.
 - `contextual-hls-loader.js` applies the captured iframe Referer/Origin/Cookie
-  context to each manifest, segment, and key request made by the browser player.
+  context to each manifest, segment, and key request made by the browser player;
+  `hls-playback-recovery.js` separates network failures from nonfatal internal
+  aborts before consuming Aura's one-shot recovery.
 - `save-directory.js` keeps a one-time File System Access folder handle so the
   extension writes files itself with 6-way parallel reception
   (`parallel-download.js`) — no native helper is involved.
+- Subtitle generation prefers a separate HLS audio rendition when available,
+  uploads only that bounded audio input, normalizes it in a CPU Modal function,
+  and starts the GPU only for ASR and translation. Sources without a separate
+  audio rendition retain the URL-based fallback.
 - The notebook YouTube server accepts only HMAC capability tokens issued by the
   license worker (`/api/youtube-token`); free tokens are quota- and
   rate-limited, Pro tokens require an approved key, and the server enforces a
@@ -43,19 +51,22 @@ Bug fixes and regression history are tracked in [INCIDENTS.md](INCIDENTS.md).
 Read it before changing a failing path and update it after every handoff.
 Real site behavior by extension version, browser, and surface is tracked in
 [SITE_QA_LOG.md](SITE_QA_LOG.md); live detection is not treated as proof of
-download or subtitle success.
+download or subtitle success. The 0.3.76 implementation and validation record is
+in [MEDIA_RECOVERY_VALIDATION.md](MEDIA_RECOVERY_VALIDATION.md).
 
 ```powershell
 rtk npm test
 rtk npm run test:media-sites
+rtk npm run build:dev-staging
 rtk cargo test --manifest-path native-host/Cargo.toml
 rtk cargo fmt --check --manifest-path native-host/Cargo.toml
 ```
 
 The deterministic media-site fixtures cover the MissAV ad-iframe priority and
 AV19/Level5 token-session regressions. An opt-in live smoke probe is available
-with `npm run monitor:media-sites`; it writes only redacted candidate URLs to a
-versioned, timestamped report under `artifacts/`. The default live target set also permanently
+with `npm run monitor:media-sites`; it writes redacted candidate and request
+metadata to a versioned, timestamped report under `artifacts/`. Full URL queries,
+Cookie values, and Authorization values are never written. The default live target set also permanently
 includes the configured AsianPorn, OnlyJerk, Playmogo, and Beeg reproduction
 URLs; provider hosts are intentionally not pinned for these rotating live-only
 cases. See `MEDIA_PIPELINE_TECHNICAL_REVIEW.md` for the architecture review,
@@ -75,7 +86,9 @@ recorded recommendation; the other modes test full blocking, reduced page
 intervention, a per-site exception, or a global-off control. Add
 `--report=<path>` to keep each matrix result separately.
 Add `--autoplay` only for an explicit playback probe; normal monitoring remains
-detection-only.
+detection-only. `--allow-blocked` keeps scheduled monitoring green only when
+all non-passing results are explicitly environment-blocked; the JSON still
+records `rawOk: false`.
 
 For Cloudflare or Turnstile cases, `--headed --wait-for-challenge=180` brings
 the temporary browser forward and pauses for one user verification. It never
@@ -85,7 +98,9 @@ detection, and reporting resume automatically.
 Load the repository root as an unpacked extension for development. No
 companion installation is needed; the first download asks for a save folder
 once (create a new empty folder under Downloads) and every later download
-saves silently with parallel reception.
+saves silently with parallel reception. `npm run build:dev-staging` refreshes
+the audited Pro directory under `artifacts/chrome-web-store/staging-pro` on any
+Node-supported platform and intentionally creates no ZIP.
 
 ## Chrome Web Store package
 

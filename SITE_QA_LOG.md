@@ -257,3 +257,39 @@ version and browser for `detect`, `extension-download`, and `subtitle`; add
 - Evidence: `C:\Users\coseung2\AppData\Local\Temp\aura-mdownloader-054\artifacts\live-media-0.3.54-docp-259-package.json`
 - Incident: `INC-2026-08-17-006`
 - Notes: the actual 0.3.54 package fails under the same current URL and browser conditions, so the failure is not isolated to the latest extension source.
+
+### 2026-08-17 06:12 KST — v0.3.76 request-context and detection validation
+
+- Browser/channel: headed Playwright Chromium ARM64 under Xvfb
+- AdBlock/VPN mode: fixture recommendation through `--adblock=auto`; the local Aura AdBlock checkout lacked packaged icons, so a test-only copy supplied those static icons before loading the same runtime source
+- Test scope: live detection, candidate selection, progressive probe, Aura playback, native-page playback snapshot, challenge/access-restriction classification, and redacted media-request diagnostics
+- Report status: `BLOCKED` for all seven cases in this server environment; no case is recorded as a confirmed product failure from this run
+- Evidence: `artifacts/live-media-0.3.76-final-headed.json`
+- Extension download, subtitle, and overlay surfaces: `NOT_RUN`
+
+| Site ID | Overall | Surface results | Observation |
+| --- | --- | --- | --- |
+| `missav-simd-012-ad-iframe-priority` | `BLOCKED` | detect/playback/download/subtitle/overlay `NOT_RUN` | Top-level navigation returned HTTP 403 with a visible Cloudflare challenge |
+| `av19-level5-iframe-session` | `BLOCKED` | detect/playback/download/subtitle/overlay `NOT_RUN` | Outer page loaded, but the Level5 iframe displayed a Korean access-restriction page |
+| `asianporn-korean-bj-193189-live` | `BLOCKED` | detect `PASS`; progressive-probe `PASS`; playback `BLOCKED`; download/subtitle/overlay `NOT_RUN` | Authenticated range probe confirmed 101,508,754 bytes; ARM64 Chromium could not decode the media and returned media error 4 |
+| `onlyjerk-rikakodesu-airi-minami-live` | `BLOCKED` | detect `PASS`; playback `BLOCKED`; progressive/download/subtitle/overlay `NOT_RUN` | The new bounded JSON API observer found the actual HLS source; manifest requests returned HTTP 200, then hls.js reported `manifestIncompatibleCodecsError` in the ARM64 test browser |
+| `playmogo-j8k8xq9gilty-live` | `BLOCKED` | detect/playback/progressive/download/subtitle/overlay `NOT_RUN` | The previous RUM/CSS/font/player-page false candidates were removed; the embedded player currently shows a visible Turnstile/captcha challenge |
+| `missav-docp-259-live` | `BLOCKED` | detect/playback/download/subtitle/overlay `NOT_RUN` | Top-level navigation returned HTTP 403 with a visible Cloudflare challenge, so the user-reported player-only failure could not be reproduced from this server |
+| `beeg-0211503327065170-live` | `BLOCKED` | detect `PASS`; progressive-probe `PASS`; playback `BLOCKED`; download/subtitle/overlay `NOT_RUN` | Authenticated range probe confirmed 102,237,763 bytes. Request diagnostics selected the exact observed context and replayed the recorded Referer, Accept-Language, and Cookie header names; ARM64 Chromium returned media error 4 |
+
+This run distinguishes environment blocks from product failures. Scheduled monitoring may use `AURA_MONITOR_ALLOW_BLOCKED=1` so a report containing only explicit `BLOCKED` results uploads evidence without marking the workflow as a product regression; `rawOk` remains false in the JSON. A release still requires a Windows Chrome/Whale pass for the named user surfaces.
+
+#### User-observed MissAV baseline for v0.3.75 and earlier
+
+- Browser/channel: user Chrome environment; exact build artifact not captured in this log
+- Site ID: `missav-docp-259-live`
+- Surfaces:
+  - native site playback: `PASS`
+  - detect: `PASS`
+  - extension-download: `PASS`
+  - Aura playback: `FAIL`
+  - subtitle: `NOT_RUN`
+  - overlay: `NOT_RUN`
+- Evidence: direct user observation, no attached report artifact
+- Incident: `INC-2026-08-17-006`
+- Notes: this is the primary reproduction contract for 0.3.76 user-side verification. It narrows the issue to Aura Player request/media processing rather than a provider-wide outage, but it is not release proof without a versioned report.

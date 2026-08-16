@@ -41,11 +41,15 @@
 
 ### INC-2026-08-17-004 — 자막 생성 파이프라인 실패
 
-- 상태: `OPEN / 외부 서버 접근 제한`
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`
 - 영향: Modal에서 영상 서버 접근 차단 오류가 발생하고 자막 생성이 실패함
-- 원인: 브라우저에서 재생 가능한 추출 링크라도 Modal이 동일한 브라우저 세션·쿠키·Referer를 갖지 않아 영상 서버가 직접 음성 읽기를 차단함
-- 조치: 추출한 `mediaUrl`과 `sourceUrl`을 자막 서버까지 전달하고, Modal에서 curl 헤더·HLS materialization fallback을 추가
-- 남은 문제: 실제 사용자 영상에서 Modal 전사 성공을 아직 확인하지 못함. 영상 URL별로 인증/오디오 트랙 유무를 별도 기록해야 함
+- 확인된 원인: 브라우저에서 재생 가능한 추출 링크라도 원격 Modal 작업은 같은 브라우저 세션과 요청 문맥을 갖지 못해 미디어 입력 단계에서 차단될 수 있음. 기존 구조는 원격 다운로드와 ffmpeg 오디오 추출 시간에도 GPU 작업을 점유함
+- 0.3.76 조치: HLS master에 별도 audio rendition이 있으면 확장의 기존 인증된 fetch 경로로 오디오 트랙만 수집해 크기 제한이 있는 raw audio stream으로 업로드함. 별도 오디오 트랙이 없거나 준비가 실패하면 기존 URL 기반 입력 경로로 자동 fallback함
+- 서버 조치: Cloudflare Worker가 브라우저 오디오 업로드를 검증해 Modal의 `/submit-audio`로 전달함. Modal은 URL 다운로드와 업로드 정규화를 CPU 함수에서 수행하고, GPU class는 준비된 16 kHz mono WAV의 ASR·번역만 수행하도록 분리함
+- 회귀 테스트: HLS audio rendition 선택 시 video rendition을 요청하지 않는 테스트, raw audio streaming client/Worker proxy 테스트, 전체 `npm test` 398개 중 394 pass·0 fail·PowerShell 패키지 2건 및 선택적 브라우저 레이아웃 2건 skip
+- 정적 검증: `python3 -m py_compile modal/asr_app.py` 통과, 격리한 공식 Modal SDK 1.5.4 환경에서 모듈 데코레이터 로딩 통과
+- staging 버전: `0.3.76`
+- 남은 검증: Worker와 Modal을 배포한 뒤 실제 Pro 사용자 경로에서 audio upload, 진행률, 취소, SRT 저장을 확인해야 함. progressive 또는 muxed HLS처럼 별도 audio rendition이 없는 입력은 아직 URL fallback을 사용함
 
 ### INC-2026-08-17-005 — 감지탭 브라우저 재생 버튼 누락
 
@@ -59,20 +63,26 @@
 
 - 상태: `CODE-FIXED / LIVE-UNVERIFIED`
 - 재현: Chrome에서 `https://missav123.com/dm31/ko/docp-259`를 열고 감지된 후보의 브라우저 재생 실행
-- 확장 버전: `0.3.71`
 - 영향: Aura Media Player가 열리지만 영상이 시작되지 않고 `readyState=0`, 재생시간 0에서 멈춤
-- 확인된 경로: `surrit.com` HLS 매니페스트는 HTTP 200, 첫 조각 `video0.jpeg` 요청은 HTTP 403. HLS 진단은 `manifestParsed=true`, `fragmentLoading=true`, `fragLoadError`임
-- 재현 범위: live smoke의 headless와 headed Chrome 모두 동일. Referer와 Origin을 바꾼 직접 요청도 조각 서버에서 403
-- 현재 판단: 플레이어 화면 자체보다 해당 페이지에서 선택된 `surrit.com` 조각 경로가 Cloudflare/영상 서버에서 차단된 것이 직접 원인이다. 이전 버전의 성공 여부는 별도 artifact가 없어 아직 증명하지 못했다.
-- 조치: DOCP-259를 `media-site-regressions.json`의 별도 live QA 케이스로 추가하고, 실패 증거를 `SITE_QA_LOG.md`에 기록. 효과가 확인되지 않은 재생 rule 변경은 배포 상태에 남기지 않음
-- 회귀 가설: `0.3.71` 작업트리의 HLS 플레이어가 `pLoader`만 contextual loader로 감싸 fragment 요청을 기본 loader로 우회시켰을 가능성이 있음. manifest는 200이고 fragment만 403인 관측과 일치하지만, 실제 서버 응답 변화와의 구분은 live 재검증이 필요함
-- 조치: `player.js`의 HLS loader를 `loader` 전체 적용으로 수정해 manifest·playlist·fragment가 모두 동일한 media-fetch lease/context를 사용하도록 변경하고, 요청 종료 시 lease를 해제. `player-security.test.mjs`에 `pLoader` 회귀 방지 assertion 추가
-- 회귀 테스트: `node --test contextual-hls-loader.test.mjs player-security.test.mjs hls-download.test.mjs` — 30 pass, 0 fail
-- 추가 조치: fragment 오류(`fragLoadError`, timeout, aborted) 발생 시 같은 source tab의 동일 HLS 계열 alternate 후보로 1회 자동 전환하도록 playback session refresh 경로를 추가
-- 회귀 테스트: `node --test contextual-hls-loader.test.mjs player-security.test.mjs hls-download.test.mjs` — 30 pass, 0 fail
-- 추가 조치: source tab ID가 player payload에서 비어도 playback session의 후보 tab ID를 사용해 alternate 후보를 찾도록 보강
-- staging 버전: `0.3.74`
-- 남은 검증: `0.3.74`를 같은 Chrome/Whale 사용자 경로에서 재생하고, primary 실패 후 alternate 전환 및 `readyState`를 확인. 성공 후 다운로드·자막·overlay를 각각 별도 확인
+- 사용자 제공 기준선: 같은 시점에 사이트 자체 스트리밍 재생은 성공했고 Aura의 영상 감지와 다운로드도 성공했으며, Aura 브라우저 재생기만 실패함. 따라서 공급자 전체 장애보다 player 전용 request context 또는 HLS 처리 차이가 우선 조사 대상임
+- 기존 관측: 0.3.71~0.3.75의 일부 live run에서 manifest HTTP 200 이후 첫 fragment 403 또는 HTTP 200 뒤 `aborted`, `readyState=0`을 관측함. 실제 0.3.54 패키지도 같은 시점의 URL에서 Aura player 재생에 실패했으므로 최신 소스 한 커밋에 한정된 회귀는 아님
+- 0.3.76 조치: 다운로드와 재생이 동일한 source tab/frame·기록된 Referer·허용된 요청 헤더 선택기를 공유하도록 `media-request-context.js`를 추가함. 재생/다운로드 요청의 host, path hash, header name, HTTP status, redirect, cache, duration만 기록하고 URL query와 header value는 기록하지 않음
+- HLS 조치: `MEDIA_ATTACHED`, `MANIFEST_PARSED`, `FRAG_LOADING/LOADED/PARSED/BUFFERED`를 진단하고, nonfatal 내부 `aborted`는 hls.js 자체 처리에 맡겨 Aura의 1회 alternate recovery를 소비하지 않게 함. 실제 fragment load error/timeout과 fatal error만 Aura recovery 대상으로 분리함
+- 회귀 테스트: request-context 우선순위·비밀값 비노출·redirect 연속성·동일 URL 병렬 요청, HLS recovery decision, 기존 contextual loader와 player security 테스트 포함 전체 `npm test` 398개 중 394 pass·0 fail·PowerShell 패키지 2건 및 선택적 브라우저 레이아웃 2건 skip
+- 서버 live 결과: 0.3.76 Xvfb Chromium에서 MissAV 페이지가 HTTP 403/Cloudflare challenge로 차단되어 해당 환경에서는 제품 경로를 실행하지 못했으며 `BLOCKED`로 기록함
+- staging 버전: `0.3.76`
+- 남은 검증: 사용자 Windows Chrome과 Whale에서 DOCP-259 및 SIMD를 재검증해야 함. 사이트 자체 재생, Aura 다운로드, Aura player를 같은 시점에 실행하고 redacted request diagnostics와 HLS event 단계를 비교한 뒤에만 `RESOLVED`로 전환함
+
+### INC-2026-08-17-007 — 라이브 후보 오탐과 JSON player source 누락
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`
+- 영향: Playmogo의 Cloudflare RUM·CSS·font 및 `/d/` player page가 progressive media 후보로 승격됐고, OnlyJerk의 현재 player API가 JSON `streaming_url`로 돌려주는 실제 HLS는 후보에 나타나지 않았음
+- 확인된 원인: media-element/content-type 신호가 정적 자산과 player page에 과도하게 관대했고, MAIN-world observer는 manifest text만 검사해 구조화된 player API 응답의 URL 필드를 놓침
+- 0.3.76 조치: 알려진 Cloudflare telemetry, 정적 확장자, 일반 `/d/`·`/e/` player page를 media 후보에서 제외함. JSON API 응답에서는 bounded key matcher로 stream/playback/manifest URL만 추출하며 `eval`, page JSON parser 교체, 임의 객체 순회를 사용하지 않음
+- 회귀 테스트: 정적 자산·player page 거부, JSON `streaming_url` 검출, 기존 observer 보안 제약과 전체 회귀 통과
+- live 결과: Playmogo의 기존 false-positive 후보는 사라졌고 현재 페이지는 visible challenge 때문에 `BLOCKED`됨. OnlyJerk에서는 실제 HLS 후보와 manifest HTTP 200을 확인했지만 ARM64 test Chromium이 codec을 지원하지 않아 playback은 `BLOCKED`됨
+- staging 버전: `0.3.76`
+- 남은 검증: Windows Chrome/Whale에서 OnlyJerk 실제 frame 재생과 Playmogo challenge 통과 후 감지·다운로드를 확인해야 함
 
 ## 회귀 방지 체크리스트
 
@@ -96,10 +106,12 @@
 | 0.3.69 | 워커 권한 사전검사 복구 및 팝업 권한 갱신 추가 | 002, 003 |
 | 0.3.70 | 저장된 핸들이 있으면 폴더 선택창 반복 방지 | 002, 003 |
 | 0.3.71 | MissAV DOCP-259 live 재생 재현 및 외부 HLS 403 확인 | 006 |
+| 0.3.76 | 공통 media request context, HLS recovery 분리, JSON player source 감지, audio-first 자막 ingest | 004, 006, 007 |
+
 ### INC-2026-08-17-006 follow-up — 0.3.54 package recheck
 
-- The 0.3.54 package and current 0.3.75 old-playback-compatibility A/B were both tested against the same DOCP-259 URL in headed Chromium.
-- Both detected the HLS manifest with HTTP 200 but received HTTP 403 for the first `surrit.com` fragment and remained at `readyState=0`.
-- This confirms a current external HLS authorization/CDN rejection is present independently of the latest extension source. It does not prove what changed on the site; the site page and manifest still returned HTTP 200.
+- The 0.3.54 package and the 0.3.75 old-playback-compatibility A/B both failed in Aura Player against the same DOCP-259 URL at the time of the test.
+- Both observed manifest HTTP 200 and first-fragment HTTP 403 with `readyState=0`. This rules out a regression isolated to the latest source, but it does not prove a provider-wide outage.
+- The user later confirmed that the native site player and Aura download path succeeded while Aura Player failed. Treat the player-specific request or media pipeline as the primary remaining scope.
 - Evidence: `artifacts/live-media-0.3.75-docp-259-old-compat.json`; `C:\Users\coseung2\AppData\Local\Temp\aura-mdownloader-054\artifacts\live-media-0.3.54-docp-259-package.json`.
-- Status remains `CODE-FIXED / LIVE-UNVERIFIED`; do not mark resolved until a fresh source-page/native-player or alternate provider path is confirmed.
+- Status remains `CODE-FIXED / LIVE-UNVERIFIED`; do not mark resolved until the same Windows Chrome/Whale user path passes with 0.3.76 or later.

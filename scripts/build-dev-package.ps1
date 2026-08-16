@@ -41,6 +41,7 @@ try {
     'popup-play.html',
     'playback-addon.js',
     'contextual-hls-loader.js',
+    'hls-playback-recovery.js',
     'collection.js',
     'player.html',
     'player.js',

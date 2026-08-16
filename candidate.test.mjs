@@ -138,6 +138,49 @@ test("rejects browser chrome and Cloudflare challenge resources as media", () =>
   }
 });
 
+test("rejects Cloudflare telemetry and static assets even when observed as media", () => {
+  const resources = [
+    "https://playmogo.com/cdn-cgi/rum",
+    "https://playmogo.com/cdn-cgi/speculation",
+    "https://i.doodcdn.io/theme_2/css/style.css",
+    "https://i.doodcdn.io/theme_2/fonts/avertastd-bold-webfont.woff2",
+    "https://i.doodcdn.io/img/no_video_3.svg",
+  ];
+  for (const resourceUrl of resources) {
+    assert.equal(isKnownNonMediaResourceUrl(resourceUrl), true);
+    assert.equal(makeCandidate({
+      pageTitle: "Player",
+      pageUrl: "https://playmogo.com/d/example",
+      resourceUrl,
+      contentType: "application/octet-stream",
+      fromMediaElement: true,
+    }), null);
+  }
+});
+
+test("rejects generic /d/ and /e/ player pages as progressive media", () => {
+  for (const resourceUrl of [
+    "https://playmogo.com/d/example",
+    "https://playmogo.com/e/example",
+  ]) {
+    assert.equal(mediaTypeForResource(resourceUrl, "video/mp4"), MEDIA_TYPES.UNKNOWN);
+    assert.equal(makeCandidate({
+      pageTitle: "Player",
+      pageUrl: resourceUrl,
+      resourceUrl,
+      contentType: "application/octet-stream",
+      fromMediaElement: true,
+    }), null);
+  }
+});
+
+test("keeps an explicit media file under a player-like path", () => {
+  assert.equal(
+    mediaTypeForResource("https://cdn.example/d/movie.mp4", "video/mp4"),
+    MEDIA_TYPES.PROGRESSIVE,
+  );
+});
+
 test("canonical media URLs reject IPv6 forms that embed private IPv4", () => {
   for (const value of [
     "https://[64:ff9b::a00:1]/video.mp4",

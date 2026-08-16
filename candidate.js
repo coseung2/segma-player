@@ -1,4 +1,4 @@
-import { isStreamtapePlayerPage } from "./player-page-resolver.js";
+import { isStreamtapePlayerPage, looksLikePlayerPage } from "./player-page-resolver.js";
 
 export const LIMITS = Object.freeze({
   urlBytes: 4096,
@@ -183,7 +183,11 @@ export function isKnownNonMediaResourceUrl(value) {
   const url = canonicalHttpUrl(value);
   if (!url) return false;
   const pathname = url.pathname.toLowerCase();
-  return pathname === "/favicon.ico" || pathname.startsWith("/cdn-cgi/challenge-platform/");
+  return pathname === "/favicon.ico"
+    || pathname.startsWith("/cdn-cgi/challenge-platform/")
+    || pathname === "/cdn-cgi/rum"
+    || pathname === "/cdn-cgi/speculation"
+    || /\.(?:css|eot|html?|js|json|map|otf|svg|text|ttf|txt|woff2?|xml)$/i.test(pathname);
 }
 
 export function isLikelyHlsSegmentUrl(value) {
@@ -206,9 +210,12 @@ export function mediaTypeForResource(resourceUrl, contentType = "") {
   let pathname = "";
   try {
     const parsed = new URL(resourceUrl);
-    if (isStreamtapePlayerPage(parsed.href)) return MEDIA_TYPES.UNKNOWN;
-    if (isKnownNonMediaResourceUrl(parsed.href)) return MEDIA_TYPES.UNKNOWN;
     pathname = parsed.pathname.toLowerCase();
+    const explicitMediaPath = /\.(?:aac|flac|m3u8|m4a|m4v|mkv|mov|mp3|mp4|mpd|ogg|ogv|opus|ts|webm)$/i
+      .test(pathname);
+    if (isStreamtapePlayerPage(parsed.href)) return MEDIA_TYPES.UNKNOWN;
+    if (looksLikePlayerPage(parsed.href) && !explicitMediaPath) return MEDIA_TYPES.UNKNOWN;
+    if (isKnownNonMediaResourceUrl(parsed.href)) return MEDIA_TYPES.UNKNOWN;
   } catch {
     return MEDIA_TYPES.UNKNOWN;
   }
@@ -336,7 +343,7 @@ export function makeCandidate({
   // extension/content-type matching alone would drop.
   if (mediaType === MEDIA_TYPES.UNKNOWN && fromMediaElement && !blob
     && !isImageResourceUrl(canonical) && !isKnownNonMediaResourceUrl(canonical)
-    && !isStreamtapePlayerPage(canonical)) {
+    && !looksLikePlayerPage(canonical)) {
     mediaType = MEDIA_TYPES.PROGRESSIVE;
   }
   if (mediaType === MEDIA_TYPES.UNKNOWN && !blob) return null;

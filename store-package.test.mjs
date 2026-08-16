@@ -46,6 +46,7 @@ const expectedFiles = [
   "icons/icon128.png",
   "manifest.json",
   "media-fetch-lease.js",
+  "media-request-context.js",
   "mobile-user-agent.js",
   "options.html",
   "options.js",

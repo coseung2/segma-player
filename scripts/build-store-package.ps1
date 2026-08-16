@@ -71,6 +71,7 @@ $runtimeFiles = @(
   'icons/icon48.png',
   'icons/icon128.png',
   'media-fetch-lease.js',
+  'media-request-context.js',
   'mobile-user-agent.js',
   'options.html',
   'options.js',

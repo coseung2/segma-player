@@ -247,6 +247,30 @@ test("binary fetch responses expose media URLs without consuming their bodies", 
   assert.equal(media.contentType, "video/mp4");
 });
 
+test("JSON player APIs expose embedded stream URLs as refreshable player sources", async () => {
+  const streamUrl = "https://cdn.example/hls/session/master.m3u8?token=short-lived";
+  const env = createEnvironment({
+    manifestText: JSON.stringify({
+      filecode: "example",
+      streaming_url: streamUrl,
+      thumbnail: "https://cdn.example/thumb.jpg",
+    }),
+    contentType: "application/json",
+    responseUrl: "https://player.example/api/stream",
+  });
+  const response = await env.windowObject.fetch("https://player.example/api/stream", {
+    method: "POST",
+  });
+  assert.equal(response.bodyUsed, false);
+  await flush();
+
+  const sources = eventMessages(env, env.protocol.events.playerSource);
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].url, streamUrl);
+  assert.equal(sources[0].player, "api-json");
+  assert.equal(sources[0].confidence, 98);
+});
+
 test("manifest URLs are reported when the player hides the response type and body", async () => {
   const env = createEnvironment({ manifestText: "", contentType: "" });
   env.windowObject.fetch("https://surrit.example/stream/playlist.m3u8?token=short-lived");

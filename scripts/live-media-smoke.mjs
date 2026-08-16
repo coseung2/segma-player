@@ -1,4 +1,5 @@
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,9 @@ const caseFilter = new Set(String(process.env.AURA_MONITOR_CASES || commandLineC
   .filter(Boolean));
 const headless = !process.argv.includes("--headed") && process.env.AURA_MONITOR_HEADLESS !== "0";
 const autoplay = process.argv.includes("--autoplay") || process.env.AURA_MONITOR_AUTOPLAY === "1";
+const allowBlocked = process.argv.includes("--allow-blocked")
+  || process.env.AURA_MONITOR_ALLOW_BLOCKED === "1";
+const disableSandbox = process.env.AURA_MONITOR_NO_SANDBOX === "1";
 const challengeWaitArgument = process.argv.find((argument) => argument === "--wait-for-challenge"
   || argument.startsWith("--wait-for-challenge="));
 const challengeWaitSeconds = challengeWaitArgument
@@ -36,12 +40,20 @@ const adblockMode = ["auto", "on", "quiet", "site-allow", "off"].includes(reques
 const adblockRoot = String(process.env.AURA_ADBLOCK_ROOT
   || path.resolve(repositoryRoot, "..", "aura-vpn", "adblock-extension")).trim();
 const headlessChromeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
-const minimumProgressiveBytes = Math.max(1, Number(
-  process.argv.find((argument) => argument.startsWith("--min-progressive-bytes="))
-    ?.slice("--min-progressive-bytes=".length)
-    || process.env.AURA_MONITOR_MIN_PROGRESSIVE_BYTES
-    || 10 * 1024 * 1024,
-));
+const configuredMinimumProgressiveBytesValue = process.argv
+  .find((argument) => argument.startsWith("--min-progressive-bytes="))
+  ?.slice("--min-progressive-bytes=".length)
+  || process.env.AURA_MONITOR_MIN_PROGRESSIVE_BYTES
+  || "";
+const configuredMinimumProgressiveBytes = configuredMinimumProgressiveBytesValue
+  ? Math.max(0, Number(configuredMinimumProgressiveBytesValue) || 0)
+  : null;
+
+function minimumProgressiveBytesFor(fixture) {
+  if (configuredMinimumProgressiveBytes !== null) return configuredMinimumProgressiveBytes;
+  const fixtureMinimum = Number(fixture?.expected?.minimumProgressiveBytes);
+  return Number.isFinite(fixtureMinimum) && fixtureMinimum >= 0 ? fixtureMinimum : 0;
+}
 
 async function cachedChromiumExecutable() {
   const cacheRoots = [
@@ -165,23 +177,67 @@ function evaluateCase(fixture, candidates) {
   };
 }
 
-async function extensionWorkersByName(context, names) {
-  const pending = new Set(names);
-  const workers = new Map();
+async function extensionRootLoadable(root) {
+  try {
+    const manifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
+    const required = [
+      manifest.background?.service_worker,
+      ...Object.values(manifest.icons || {}),
+      ...Object.values(manifest.action?.default_icon || {}),
+    ].filter((value) => typeof value === "string" && value);
+    await Promise.all(required.map((relativePath) => access(path.join(root, relativePath))));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function unpackedExtensionId(root) {
+  const canonical = await realpath(root).catch(() => path.resolve(root));
+  const digest = createHash("sha256").update(canonical).digest().subarray(0, 16);
+  return [...digest].map((byte) => String.fromCharCode(
+    97 + (byte >> 4),
+    97 + (byte & 15),
+  )).join("");
+}
+
+async function extensionIdsByName(context, definitions) {
+  const pending = new Map(definitions.map((definition) => [definition.name, definition]));
+  const ids = new Map();
   const deadline = Date.now() + 15_000;
   while (pending.size && Date.now() < deadline) {
     for (const worker of context.serviceWorkers()) {
       let name = "";
       try { name = await worker.evaluate(() => chrome.runtime.getManifest().name); } catch {}
-      if (pending.has(name)) {
-        workers.set(name, worker);
-        pending.delete(name);
-      }
+      if (!pending.has(name)) continue;
+      ids.set(name, new URL(worker.url()).host);
+      pending.delete(name);
     }
     if (pending.size) await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  if (pending.size) throw new Error(`extension-workers-unavailable:${[...pending].join(",")}`);
-  return workers;
+
+  for (const [name, definition] of [...pending]) {
+    const extensionId = await unpackedExtensionId(definition.root);
+    const wakePage = await context.newPage();
+    try {
+      await wakePage.goto(`chrome-extension://${extensionId}/${definition.page || "popup.html"}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 10_000,
+      });
+      const loadedName = await wakePage.evaluate(() => chrome.runtime.getManifest().name);
+      if (loadedName === name) {
+        ids.set(name, extensionId);
+        pending.delete(name);
+      }
+    } catch {
+      // The service-worker discovery error below retains the expected name.
+    } finally {
+      await closePageBounded(wakePage);
+    }
+  }
+
+  if (pending.size) throw new Error(`extension-workers-unavailable:${[...pending.keys()].join(",")}`);
+  return ids;
 }
 
 async function configureAdblock(controlPage, fixture, mode) {
@@ -205,11 +261,32 @@ async function configureAdblock(controlPage, fixture, mode) {
 }
 
 async function challengeHint(page) {
-  return page.evaluate(() => {
-    const bodyText = String(document.body?.innerText || "").slice(0, 5000);
-    return /access denied|checking your browser|cloudflare|captcha|turnstile|verify you are human|just a moment/i
-      .test(`${document.title}\n${bodyText}`);
-  }).catch(() => false);
+  for (const frame of page.frames()) {
+    const detected = await frame.evaluate(() => {
+      const bodyText = String(document.body?.innerText || "").slice(0, 5000);
+      if (/access denied|access restricted|checking your browser|cloudflare|captcha|turnstile|verify you are human|just a moment|접속 제한|접근 제한|서비스 이용이 제한/i
+        .test(`${document.title}\n${bodyText}`)) return true;
+      const selectors = [
+        ".cf-turnstile",
+        "#turnstile-container",
+        "[name*=turnstile]",
+        "iframe[src*=challenges]",
+        ".captcha-player",
+        ".captcha_l",
+        "[class*=captcha]",
+        "iframe[src*=recaptcha]",
+      ];
+      const elements = selectors.flatMap((selector) => [...document.querySelectorAll(selector)]);
+      return [...new Set(elements)].some((element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden"
+          && Number(style.opacity || "1") > 0 && rect.width > 0 && rect.height > 0;
+      });
+    }).catch(() => false);
+    if (detected) return true;
+  }
+  return false;
 }
 
 async function waitForUserChallenge(page, navigationStatus) {
@@ -270,7 +347,43 @@ async function probeProgressiveCandidate(controlPage, candidateId) {
   }), candidateId);
 }
 
+async function nativePlaybackSnapshot(page) {
+  const frames = [];
+  for (const frame of page.frames()) {
+    try {
+      await frame.locator("video").evaluateAll((videos) => videos.slice(0, 8).forEach((video) => {
+        try {
+          video.muted = true;
+          void video.play().catch(() => {});
+        } catch {}
+      }));
+    } catch {}
+  }
+  await page.waitForTimeout(1_500);
+  for (const frame of page.frames()) {
+    try {
+      const states = await frame.locator("video").evaluateAll((videos) => videos.slice(0, 8).map((video) => ({
+        readyState: Number(video.readyState || 0),
+        paused: video.paused !== false,
+        currentTime: Number(video.currentTime || 0),
+        videoWidth: Number(video.videoWidth || 0),
+        videoHeight: Number(video.videoHeight || 0),
+        errorCode: Number(video.error?.code || 0),
+      })));
+      if (states.length) frames.push({ host: new URL(frame.url()).hostname, videos: states });
+    } catch {}
+  }
+  return {
+    ok: frames.some((entry) => entry.videos.some((video) => video.errorCode === 0
+      && video.readyState >= 2 && video.currentTime > 0.1 && video.videoWidth > 0 && !video.paused)),
+    frames,
+  };
+}
+
 async function verifyCandidatePlayback(controlPage, context, candidate) {
+  await controlPage.evaluate(async () => chrome.runtime.sendMessage({
+    type: "clear-media-request-diagnostics",
+  })).catch(() => null);
   const created = await controlPage.evaluate(async ({ candidateId, sourceUrl }) => chrome.runtime.sendMessage({
     type: "create-playback-session",
     candidateId,
@@ -351,9 +464,17 @@ async function verifyCandidatePlayback(controlPage, context, candidate) {
         ...state,
       };
     });
+    const requestDiagnostics = await controlPage.evaluate(async () => {
+      const response = await chrome.runtime.sendMessage({
+        type: "get-media-request-diagnostics",
+        limit: 100,
+      });
+      return response?.ok && Array.isArray(response.requests) ? response.requests : [];
+    }).catch(() => []);
     return {
       ...state,
       responses: [...new Map(playerResponses.map((item) => [`${item.host}|${item.status}|${item.type}`, item])).values()].slice(0, 30),
+      requestDiagnostics,
       consoleErrors: playerConsoleErrors.slice(0, 10),
     };
   } catch (error) {
@@ -404,6 +525,10 @@ async function main() {
   const allFixtures = JSON.parse(await readFile(fixturePath, "utf8"));
   const fixtures = allFixtures.filter((fixture) => !caseFilter.size || caseFilter.has(fixture.id));
   if (!fixtures.length) throw new Error("no-monitor-cases-selected");
+  const adblockAvailable = await extensionRootLoadable(adblockRoot);
+  const activeAdblockMode = adblockMode
+    || (adblockAvailable && fixtures.some((fixture) => fixture.recommendedAdblockMode) ? "auto" : "");
+  if (adblockMode && !adblockAvailable) throw new Error("requested-adblock-extension-unavailable");
 
   const profileDirectory = await mkdtemp(path.join(os.tmpdir(), "aura-media-monitor-"));
   const cachedExecutablePath = browserExecutablePath ? "" : await cachedChromiumExecutable();
@@ -412,8 +537,7 @@ async function main() {
   const results = [];
   try {
     if (challengeWaitSeconds && headless) throw new Error("challenge-wait-requires-headed");
-    if (adblockMode) await access(path.join(adblockRoot, "manifest.json"));
-    const extensionRoots = adblockMode ? [repositoryRoot, adblockRoot] : [repositoryRoot];
+    const extensionRoots = activeAdblockMode ? [repositoryRoot, adblockRoot] : [repositoryRoot];
     const extensionArgument = extensionRoots.join(",");
     context = await chromium.launchPersistentContext(profileDirectory, {
       ...(resolvedExecutablePath
@@ -430,6 +554,13 @@ async function main() {
         `--load-extension=${extensionArgument}`,
         ...(headless ? [`--user-agent=${headlessChromeUserAgent}`] : []),
         ...(autoplay ? ["--autoplay-policy=no-user-gesture-required"] : []),
+        ...(disableSandbox ? [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-crash-reporter",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+        ] : []),
       ],
     });
     const bootstrapPage = context.pages()[0] || await context.newPage();
@@ -437,11 +568,14 @@ async function main() {
       waitUntil: "domcontentloaded",
       timeout: 15_000,
     });
-    const expectedExtensionNames = adblockMode
-      ? ["Aura Media Downloader", "Aura AdBlock"]
-      : ["Aura Media Downloader"];
-    const workers = await extensionWorkersByName(context, expectedExtensionNames);
-    const extensionId = new URL(workers.get("Aura Media Downloader").url()).host;
+    const extensionDefinitions = [
+      { name: "Aura Media Downloader", root: repositoryRoot, page: "popup.html" },
+      ...(activeAdblockMode
+        ? [{ name: "Aura AdBlock", root: adblockRoot, page: "popup.html" }]
+        : []),
+    ];
+    const extensionIds = await extensionIdsByName(context, extensionDefinitions);
+    const extensionId = extensionIds.get("Aura Media Downloader");
     const controlPage = await context.newPage();
     await controlPage.goto(`chrome-extension://${extensionId}/popup.html`, {
       waitUntil: "domcontentloaded",
@@ -449,8 +583,8 @@ async function main() {
     });
     controlPage.setDefaultTimeout(10_000);
     let adblockControlPage = null;
-    if (adblockMode) {
-      const adblockExtensionId = new URL(workers.get("Aura AdBlock").url()).host;
+    if (activeAdblockMode) {
+      const adblockExtensionId = extensionIds.get("Aura AdBlock");
       adblockControlPage = await context.newPage();
       await adblockControlPage.goto(`chrome-extension://${adblockExtensionId}/popup.html`, {
         waitUntil: "domcontentloaded",
@@ -462,9 +596,22 @@ async function main() {
 
     for (const fixture of fixtures) {
       const startedAt = new Date().toISOString();
-      const fixtureAdblockMode = adblockMode === "auto"
+      const fixtureAdblockMode = activeAdblockMode === "auto"
         ? fixture.recommendedAdblockMode || "on"
-        : adblockMode;
+        : activeAdblockMode;
+      const progressiveMinimumBytes = minimumProgressiveBytesFor(fixture);
+      const recommendationSatisfiedWithoutExtension = !fixtureAdblockMode
+        && fixture.recommendedAdblockMode === "site-allow";
+      const environment = {
+        recommendedAdblockMode: fixture.recommendedAdblockMode || "",
+        appliedAdblockMode: fixtureAdblockMode || "not-loaded",
+        effectiveTrafficMode: recommendationSatisfiedWithoutExtension
+          ? "site-allow-equivalent"
+          : fixtureAdblockMode || "not-loaded",
+        matchesRecommendation: !fixture.recommendedAdblockMode
+          || fixture.recommendedAdblockMode === fixtureAdblockMode
+          || recommendationSatisfiedWithoutExtension,
+      };
       const mediaResponses = [];
       let page = null;
       const observeResponse = (response) => {
@@ -541,7 +688,7 @@ async function main() {
             controlPage,
             navigationResponse?.url() || fixture.liveUrl,
             startedAt,
-            minimumProgressiveBytes,
+            Math.max(1, progressiveMinimumBytes),
           );
         }
         const pageState = await page.evaluate(() => {
@@ -555,7 +702,7 @@ async function main() {
             videoCount: document.querySelectorAll("video").length,
             iframeHosts: [...new Set([...document.querySelectorAll("iframe")]
               .map((frame) => hostOf(frame.src)).filter(Boolean))].slice(0, 20),
-            challengeHint: /access denied|checking your browser|cloudflare|captcha|turnstile|verify you are human|just a moment/i
+            challengeHint: /access denied|access restricted|checking your browser|cloudflare|captcha|turnstile|verify you are human|just a moment|접속 제한|접근 제한|서비스 이용이 제한/i
               .test(`${document.title}\n${bodyText}`),
           };
         });
@@ -563,6 +710,7 @@ async function main() {
         pageState.navigationHost = (() => {
           try { return new URL(navigationResponse?.url() || "").hostname; } catch { return ""; }
         })();
+        pageState.challengeHint = pageState.challengeHint || await challengeHint(page);
         pageState.challenge = challenge;
         pageState.openPageHosts = [...new Set(context.pages().map((openPage) => {
           try { return new URL(openPage.url()).hostname; } catch { return ""; }
@@ -587,6 +735,7 @@ async function main() {
           } catch {}
         }
         pageState.mediaResponses = [...new Map(mediaResponses.map((item) => [`${item.host}|${item.resourceType}|${item.status}`, item])).values()];
+        pageState.nativePlayback = await nativePlaybackSnapshot(page);
         const snapshot = await candidateSnapshot(controlPage, caseTabId);
         const candidates = snapshot.candidates.map((candidate) => ({
           id: candidate.id,
@@ -603,6 +752,7 @@ async function main() {
         const reportedCandidates = candidates.map(({ displayUrl, sourceUrl, ...candidate }) => ({
           ...candidate,
           displayHost: displayHost({ displayUrl }),
+          displayPath: displayPath({ displayUrl }).slice(0, 160),
         }));
         const expectedFinalHosts = new Set([
           new URL(fixture.liveUrl).hostname,
@@ -618,6 +768,21 @@ async function main() {
               expected: [...expectedFinalHosts],
               actual: pageState.finalHost,
             };
+        if (pageState.challengeHint && !challenge.completed) {
+          evaluation = {
+            ok: false,
+            blocked: true,
+            reason: "site-challenge",
+          };
+        } else if (evaluation.ok && !environment.matchesRecommendation) {
+          evaluation = {
+            ok: false,
+            blocked: true,
+            reason: "environment-mismatch",
+            expectedAdblockMode: environment.recommendedAdblockMode,
+            actualAdblockMode: environment.appliedAdblockMode,
+          };
+        }
         const primary = candidates.find((candidate) => candidate.main && !candidate.likelyAdvertisement) || null;
         let progressiveProbe = null;
         if (evaluation.ok && primary?.mediaType === "PROGRESSIVE") {
@@ -629,23 +794,29 @@ async function main() {
             ? navigationDownloadBytes : null;
           const totalBytes = Number.isFinite(probe?.totalBytes) ? probe.totalBytes
             : downloadedFallback ?? navigationFallback;
+          const sourceFrameFallback = probe?.sourceFrameFallback === true;
           progressiveProbe = {
-            ok: totalBytes !== null && totalBytes > minimumProgressiveBytes,
+            ok: sourceFrameFallback || (totalBytes !== null && totalBytes > progressiveMinimumBytes),
             totalBytes,
-            minimumBytesExclusive: minimumProgressiveBytes,
-            source: Number.isFinite(probe?.totalBytes) ? "authenticated-range"
-              : downloadedFallback !== null ? "received-navigation-download"
-                : navigationFallback !== null ? "exact-navigation-response" : "inconclusive",
+            minimumBytesExclusive: progressiveMinimumBytes,
+            source: sourceFrameFallback ? "source-frame-fallback"
+              : Number.isFinite(probe?.totalBytes) ? "authenticated-range"
+                : downloadedFallback !== null ? "received-navigation-download"
+                  : navigationFallback !== null ? "exact-navigation-response" : "inconclusive",
+            sourceFrameFallback,
+            fallbackReason: sourceFrameFallback ? String(probe?.fallbackReason || "probe-unavailable") : "",
             rangeSupported: probe?.rangeSupported === true || Boolean(navigationContentRange),
             contentKind: probe?.contentKind
               || (navigationIsMedia || downloadedFallback !== null ? "media" : "unknown"),
-            error: totalBytes !== null ? "" : String(probe?.error || "progressive-probe-failed"),
+            error: totalBytes !== null || sourceFrameFallback
+              ? ""
+              : String(probe?.error || "progressive-probe-failed"),
           };
           if (!progressiveProbe.ok) {
             evaluation = {
               ok: false,
               reason: totalBytes === null ? "progressive-size-unknown" : "progressive-too-small",
-              expectedGreaterThanBytes: minimumProgressiveBytes,
+              expectedGreaterThanBytes: progressiveMinimumBytes,
               actualBytes: totalBytes,
             };
           }
@@ -654,7 +825,20 @@ async function main() {
         if (evaluation.ok && primary) {
           playback = await verifyCandidatePlayback(controlPage, context, primary);
           if (!playback.ok) {
-            evaluation = { ok: false, reason: "playback-failed" };
+            const successfulMediaResponse = playback.responses?.some((response) => ["media", "xhr"]
+              .includes(response.type) && [200, 206].includes(response.status));
+            const nativeCodecFailure = (playback.mediaErrorCode === 4
+              || playback.diagnostics?.error?.details === "manifestIncompatibleCodecsError")
+              && (pageState.nativePlayback?.frames?.some((frame) => frame.videos?.some(
+                (video) => video.errorCode === 4,
+              )) || successfulMediaResponse);
+            evaluation = nativeCodecFailure
+              ? {
+                ok: false,
+                blocked: true,
+                reason: "browser-codec-unsupported",
+              }
+              : { ok: false, reason: "playback-failed" };
           }
         }
         results.push({
@@ -662,6 +846,7 @@ async function main() {
           startedAt,
           adblockMode: fixtureAdblockMode || "not-loaded",
           adblockState,
+          environment,
           page: pageState,
           ...evaluation,
           progressiveProbe,
@@ -674,6 +859,7 @@ async function main() {
           id: fixture.id,
           startedAt,
           adblockMode: fixtureAdblockMode || "not-loaded",
+          environment,
           ok: false,
           reason: "monitor-execution-failed",
           error: redactedError(error),
@@ -696,6 +882,8 @@ async function main() {
     await rm(profileDirectory, { recursive: true, force: true });
   }
 
+  const rawOk = results.every((result) => result.ok);
+  const reportOk = results.every((result) => result.ok || (allowBlocked && result.blocked === true));
   const report = {
     generatedAt: new Date().toISOString(),
     extensionVersion,
@@ -707,10 +895,13 @@ async function main() {
         : "channel",
     headless,
     autoplay,
+    allowBlocked,
     challengeWaitSeconds,
-    minimumProgressiveBytes,
-    adblockMode: adblockMode || "not-loaded",
-    ok: results.every((result) => result.ok),
+    minimumProgressiveBytes: configuredMinimumProgressiveBytes,
+    adblockMode: activeAdblockMode || "not-loaded",
+    adblockAvailable,
+    ok: reportOk,
+    rawOk,
     results,
   };
   await mkdir(path.dirname(reportPath), { recursive: true });

@@ -41,7 +41,6 @@ import {
   resolvePlan,
 } from "./license.js";
 import {
-  canonicalMediaFetchReferrer,
   canonicalMediaFetchUrl,
   createMediaFetchLeaseRegistry,
   createMediaFetchRuleIdAllocator,
@@ -80,11 +79,16 @@ import {
   progressiveDownloadErrorMessage,
 } from "./progressive-redirect.js";
 import { createBrowserDownloadMonitor } from "./browser-download-monitor.js";
+import {
+  createMediaRequestDiagnosticStore,
+  resolveMediaRequestContext,
+} from "./media-request-context.js";
 
 const candidates = new Map();
 const PROGRESSIVE_REDIRECT_TARGET_LIMIT = 1000;
 const PROGRESSIVE_REDIRECT_TARGET_TTL_MS = 60_000;
 const requestHeaderStore = createRequestHeaderStore({ maxEntries: 1000, ttlMs: 10 * 60 * 1000 });
+const mediaRequestDiagnostics = createMediaRequestDiagnosticStore();
 const progressiveRedirectTargets = new Map();
 const mainFramesByTab = new Map();
 const frameLayoutsByTab = new Map();
@@ -672,16 +676,6 @@ function isLikelyDoodMediaHost(url) {
   }
 }
 
-function recordedHeadersForUrl(url, context = {}) {
-  return [...requestHeaderStore.dnrRequestHeaders(url, context)];
-}
-
-function recordedReferrerForUrl(url, context = {}) {
-  const operation = recordedHeadersForUrl(url, context)
-    .find((entry) => entry.header.toLowerCase() === "referer");
-  return operation?.value || "";
-}
-
 function exactExtensionPageSender(sender, pageName) {
   if (sender?.id !== chrome.runtime.id || typeof sender.url !== "string") return false;
   try {
@@ -743,30 +737,45 @@ async function cleanupStaleMediaFetchLeases() {
   }
 }
 
-async function prepareMediaFetchLease(sender, rawUrl, rawReferrer, sourceContext = {}) {
+async function prepareMediaFetchLease(sender, rawUrl, rawReferrer, sourceContext = {}, consumer = "media-fetch") {
   if (!validMediaFetchSender(sender)) return { ok: false, error: "unauthorized" };
-  return prepareMediaFetchLeaseForTab(mediaFetchSenderTabId(sender), rawUrl, rawReferrer, sourceContext);
+  return prepareMediaFetchLeaseForTab(
+    mediaFetchSenderTabId(sender),
+    rawUrl,
+    rawReferrer,
+    sourceContext,
+    false,
+    consumer,
+  );
 }
 
-async function prepareMediaFetchLeaseForTab(tabId, rawUrl, rawReferrer, sourceContext = {}, playback = false) {
+async function prepareMediaFetchLeaseForTab(
+  tabId,
+  rawUrl,
+  rawReferrer,
+  sourceContext = {},
+  playback = false,
+  consumer = "media-fetch",
+) {
   if (!Number.isInteger(tabId) || (tabId <= 0 && tabId !== OFFSCREEN_DOCUMENT_TAB_ID)) {
     return { ok: false, error: "invalid-tab" };
   }
-  const url = canonicalMediaFetchUrl(rawUrl);
-  if (!url) return { ok: false, error: "invalid-url" };
-  const lookupContext = {
-    tabId: Number.isInteger(sourceContext?.tabId) ? sourceContext.tabId : null,
-    frameId: Number.isInteger(sourceContext?.frameId) ? sourceContext.frameId : null,
-    initiator: typeof sourceContext?.initiator === "string" ? sourceContext.initiator : "",
-  };
-  let referrer = "";
-  if (rawReferrer !== undefined && rawReferrer !== "") {
-    if (typeof rawReferrer !== "string") return { ok: false, error: "invalid-referrer" };
-    referrer = canonicalMediaFetchReferrer(rawReferrer) || "";
-    if (!referrer) return { ok: false, error: "invalid-referrer" };
-  } else {
-    referrer = canonicalMediaFetchReferrer(recordedReferrerForUrl(url, lookupContext)) || "";
+  let requestContext;
+  try {
+    requestContext = resolveMediaRequestContext({
+      url: rawUrl,
+      fallbackReferrer: rawReferrer,
+      sourceContext,
+      consumer,
+      lookupRequestHeaders: (url, context) => requestHeaderStore.lookup(url, context),
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message === "invalid-media-request-referrer" ? "invalid-referrer" : "invalid-url",
+    };
   }
+  const { url, referrer, requestHeaders, diagnostic } = requestContext;
 
   await mediaFetchRulesReady;
   await cleanupStaleMediaFetchLeases();
@@ -784,7 +793,7 @@ async function prepareMediaFetchLeaseForTab(tabId, rawUrl, rawReferrer, sourceCo
       tabId,
       url,
       referrer,
-      requestHeaders: recordedHeadersForUrl(url, lookupContext),
+      requestHeaders,
     });
     await chrome.declarativeNetRequest.updateSessionRules({
       removeRuleIds: [],
@@ -807,7 +816,13 @@ async function prepareMediaFetchLeaseForTab(tabId, rawUrl, rawReferrer, sourceCo
     await removeMediaFetchLease({ leaseId: "", ruleId });
     return { ok: false, error: "media-fetch-unavailable" };
   }
-  return { ok: true, leaseId: lease.leaseId };
+  mediaRequestDiagnostics.start({
+    leaseId: lease.leaseId,
+    requestTabId: tabId,
+    url,
+    diagnostic,
+  });
+  return { ok: true, leaseId: lease.leaseId, requestContext: diagnostic };
 }
 
 function validPlaybackSender(sender) {
@@ -828,7 +843,7 @@ async function preparePlaybackMediaLease(sender, message) {
   } catch {
     return { ok: false, error: "invalid-tab" };
   }
-  return prepareMediaFetchLeaseForTab(tabId, message.url, message.referrer, {}, true);
+  return prepareMediaFetchLeaseForTab(tabId, message.url, message.referrer, {}, true, "playback-native");
 }
 
 async function releaseMediaFetchLeaseForTab(tabId, leaseId) {
@@ -957,7 +972,13 @@ async function startSubtitleGeneration(input) {
   const mediaUrl = canonicalHttpUrl(input?.mediaUrl)?.href || "";
   const sourceUrl = input?.sourceUrl ? canonicalHttpUrl(input.sourceUrl)?.href || "" : "";
   const sourceTabId = Number.isInteger(input?.sourceTabId) && input.sourceTabId > 0 ? input.sourceTabId : null;
+  const sourceFrameId = Number.isInteger(input?.sourceFrameId) && input.sourceFrameId >= 0
+    ? input.sourceFrameId
+    : null;
   const sourceLanguage = input?.sourceLanguage === "en" ? "en" : "ja";
+  const mediaType = ["HLS_MASTER", "HLS_MEDIA", "PROGRESSIVE"].includes(input?.mediaType)
+    ? input.mediaType
+    : "";
   const title = String(input?.title || "영상 자막").trim().slice(0, 240) || "영상 자막";
   if (!mediaUrl || input?.sourceUrl && !sourceUrl) throw new Error("invalid-media-url");
   if ((await resolveEdition()) !== "pro") throw new Error("pro-license-required");
@@ -968,7 +989,15 @@ async function startSubtitleGeneration(input) {
   }
   await downloadJobsReady;
   const jobId = crypto.randomUUID();
-  const subtitleInput = { mediaUrl, sourceUrl, title, sourceLanguage, sourceTabId };
+  const subtitleInput = {
+    mediaUrl,
+    sourceUrl,
+    title,
+    sourceLanguage,
+    sourceTabId,
+    sourceFrameId,
+    mediaType,
+  };
   downloadJobs.set(jobId, createDownloadJob({
     id: jobId,
     title,
@@ -1610,8 +1639,48 @@ chrome.webRequest.onSendHeaders.addListener(
   ["requestHeaders", "extraHeaders"],
 );
 
+chrome.webRequest.onCompleted?.addListener(
+  (details) => {
+    mediaRequestDiagnostics.finish({
+      tabId: details.tabId,
+      url: details.url,
+      statusCode: details.statusCode,
+      resourceType: details.type,
+      fromCache: details.fromCache === true,
+    });
+  },
+  {
+    urls: ["http://*/*", "https://*/*"],
+    types: ["media", "xmlhttprequest", "other"],
+  },
+);
+
+chrome.webRequest.onErrorOccurred?.addListener(
+  (details) => {
+    mediaRequestDiagnostics.finish({
+      tabId: details.tabId,
+      url: details.url,
+      error: details.error,
+      resourceType: details.type,
+      fromCache: details.fromCache === true,
+    });
+  },
+  {
+    urls: ["http://*/*", "https://*/*"],
+    types: ["media", "xmlhttprequest", "other"],
+  },
+);
+
 chrome.webRequest.onBeforeRedirect.addListener(
-  recordProgressiveRedirect,
+  (details) => {
+    recordProgressiveRedirect(details);
+    mediaRequestDiagnostics.redirect({
+      tabId: details.tabId,
+      url: details.url,
+      redirectUrl: details.redirectUrl,
+      statusCode: details.statusCode,
+    });
+  },
   {
     urls: ["http://*/*", "https://*/*"],
     types: ["media", "xmlhttprequest", "other"],
@@ -1973,8 +2042,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "prepare-media-fetch") {
-    prepareMediaFetchLease(sender, message.url, message.referrer, message.sourceContext).then(sendResponse);
+    prepareMediaFetchLease(
+      sender,
+      message.url,
+      message.referrer,
+      message.sourceContext,
+      message.consumer,
+    ).then(sendResponse);
     return true;
+  }
+
+  if (message?.type === "get-media-request-diagnostics"
+    && (validPlayerPageSender(sender) || playbackLauncherSender(sender) || validDownloadWorkerSender(sender))) {
+    const consumer = typeof message.consumer === "string" ? message.consumer : "";
+    const limit = Number.isInteger(message.limit) ? message.limit : 100;
+    sendResponse({ ok: true, requests: mediaRequestDiagnostics.list({ consumer, limit }) });
+    return false;
+  }
+
+  if (message?.type === "clear-media-request-diagnostics" && playbackLauncherSender(sender)) {
+    mediaRequestDiagnostics.clear();
+    sendResponse({ ok: true });
+    return false;
   }
 
   if (message?.type === "prepare-playback-media") {
@@ -2079,7 +2168,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({
       ok: true,
       version: chrome.runtime.getManifest().version,
-      capabilities: { mediaFetchLease: 1 },
+      capabilities: { mediaFetchLease: 1, mediaRequestDiagnostics: 1 },
     });
     return false;
   }

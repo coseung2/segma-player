@@ -76,7 +76,7 @@ test("MissAV-style ad iframe loses to the actively playing surrit manifest", () 
   assert.ok(feature.score > advertisement.score);
 });
 
-test("Dood direct media outranks its /d/ player page", () => {
+test("Dood direct media remains while its /d/ player page is rejected", () => {
   const playerPage = makeCandidate({
     pageTitle: "Player",
     pageUrl: "https://playmogo.com/d/example",
@@ -99,10 +99,10 @@ test("Dood direct media outranks its /d/ player page", () => {
     player: "dood",
     confidence: 100,
   });
+  assert.equal(playerPage, null);
   const ranked = rankCandidates([playerPage, direct]);
   assert.equal(ranked[0], direct);
   assert.equal(direct.main, true);
-  assert.equal(playerPage.main, false);
 });
 
 test("Level5 player evidence and exact iframe playback state outrank incidental network HLS", () => {

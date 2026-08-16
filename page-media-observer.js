@@ -274,14 +274,34 @@
     try {
       url = typeof value.src === "string" ? value.src
         : typeof value.file === "string" ? value.file
-          : typeof value.url === "string" ? value.url : "";
+          : typeof value.url === "string" ? value.url
+            : typeof value.streaming_url === "string" ? value.streaming_url
+              : typeof value.streamingUrl === "string" ? value.streamingUrl
+                : typeof value.playback_url === "string" ? value.playback_url
+                  : typeof value.playbackUrl === "string" ? value.playbackUrl
+                    : typeof value.manifest_url === "string" ? value.manifest_url
+                      : typeof value.manifestUrl === "string" ? value.manifestUrl : "";
       contentType = typeof value.type === "string" ? value.type
         : typeof value.mimeType === "string" ? value.mimeType : "";
     } catch {
       return result;
     }
     if (url) result.push({ url, contentType });
-    for (const name of ["source", "sources", "playlist", "levels", "tracks", "media", "config"]) {
+    for (const name of [
+      "source",
+      "sources",
+      "playlist",
+      "levels",
+      "tracks",
+      "media",
+      "config",
+      "stream",
+      "streams",
+      "streaming",
+      "playback",
+      "manifest",
+      "hls",
+    ]) {
       try {
         if (value[name] !== undefined && value[name] !== value) sourceEntries(value[name], depth + 1, result);
       } catch {
@@ -298,6 +318,49 @@
       if (!url || seen.has(url)) continue;
       seen.add(url);
       reportPlayerSource(url, { ...options, contentType: entry.contentType || options?.contentType || "" });
+    }
+  }
+
+  function decodedStructuredUrl(value) {
+    if (typeof value !== "string" || value.length > LIMITS.maxUrlBytes * 2) return "";
+    const decoded = value
+      .replace(/\\\//g, "/")
+      .replace(/\\u([0-9a-f]{4})/gi, (_match, code) => String.fromCharCode(Number.parseInt(code, 16)))
+      .replace(/\\\\/g, "\\");
+    return boundedUrl(decoded);
+  }
+
+  function inferredStructuredContentType(url) {
+    try {
+      const pathname = new URL(url).pathname.toLowerCase();
+      if (pathname.endsWith(".m3u8")) return "application/vnd.apple.mpegurl";
+      if (pathname.endsWith(".mpd")) return "application/dash+xml";
+      if (pathname.endsWith(".webm")) return "video/webm";
+      if (pathname.endsWith(".mp4") || pathname.endsWith(".m4v")) return "video/mp4";
+      if (/\.(?:aac|m4a|mp3|ogg|opus)$/i.test(pathname)) return "audio/mpeg";
+    } catch {
+      return "";
+    }
+    return "";
+  }
+
+  function reportStructuredSources(text) {
+    if (typeof text !== "string") return;
+    const trimmed = text.trim();
+    if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return;
+    const pattern = /"(?:streaming_url|streamingUrl|playback_url|playbackUrl|manifest_url|manifestUrl|hls_url|hlsUrl|file|src|url)"\s*:\s*"((?:\\.|[^"\\])*)"/g;
+    let reported = 0;
+    for (const match of trimmed.matchAll(pattern)) {
+      const url = decodedStructuredUrl(match[1]);
+      const contentType = inferredStructuredContentType(url);
+      if (!url || !contentType) continue;
+      reportPlayerSource(url, {
+        player: "api-json",
+        contentType,
+        confidence: 98,
+      });
+      reported += 1;
+      if (reported >= LIMITS.maxPlayerSourcesPerPass) break;
     }
   }
 
@@ -376,6 +439,7 @@
     if (!clone) return;
     const body = await readBoundedText(clone);
     reportManifest(url, contentType, body.text, "fetch", body.truncated);
+    reportStructuredSources(body.text);
   }
 
   function fetchUrl(input) {
@@ -485,8 +549,10 @@
     } catch {
       return;
     }
-    reportManifest(responseUrl, contentType, text.slice(0, LIMITS.maxManifestTextBytes), "xhr",
+    const boundedText = text.slice(0, LIMITS.maxManifestTextBytes);
+    reportManifest(responseUrl, contentType, boundedText, "xhr",
       text.length > LIMITS.maxManifestTextBytes);
+    reportStructuredSources(boundedText);
   }
 
   function installXhrHook() {

@@ -1,5 +1,6 @@
 import Hls from "./vendor/hls.min.mjs";
 import { createContextualHlsLoader } from "./contextual-hls-loader.js";
+import { hlsPlaybackRecoveryDecision } from "./hls-playback-recovery.js";
 import { cuesAt, cuesToSrt, decodeSubtitleBytes, findSubtitleFile, mediaIdentifier, parseSubtitle } from "./player-subtitle.js";
 import { createUniqueFile } from "./save-directory.js";
 import { ensureStoredSubtitleDirectory, getStoredSubtitleDirectory } from "./subtitle-folder.js";
@@ -501,11 +502,12 @@ async function saveSelectedCollection() {
   }
 }
 
-async function acquireMediaLease(url) {
+async function acquireMediaLease(url, consumer = "playback-media") {
   const response = await chrome.runtime.sendMessage({
     type: "prepare-media-fetch",
     url,
     referrer: exactReferrer,
+    consumer,
     sourceContext: {
       tabId: sourceTabId,
       frameId: sourceFrameId,
@@ -514,6 +516,13 @@ async function acquireMediaLease(url) {
   });
   if (!response?.ok || response.leaseId == null) {
     throw new Error(response?.error || "media-context-unavailable");
+  }
+  if (response.requestContext && globalThis.__auraPlaybackDiagnostics) {
+    const requestContexts = globalThis.__auraPlaybackDiagnostics.requestContexts;
+    if (Array.isArray(requestContexts)) {
+      requestContexts.push(response.requestContext);
+      if (requestContexts.length > 24) requestContexts.shift();
+    }
   }
   return response.leaseId;
 }
@@ -585,7 +594,7 @@ async function startHlsPlayback() {
     return;
   }
   const Loader = createContextualHlsLoader(Hls.DefaultConfig.loader, {
-    acquire: (url) => acquireMediaLease(url),
+    acquire: (url) => acquireMediaLease(url, "playback-hls"),
     release: (leaseId) => releaseMediaLease(leaseId),
   });
   hls = new Hls({
@@ -594,24 +603,71 @@ async function startHlsPlayback() {
       xhr.withCredentials = true;
     },
   });
-  globalThis.__auraPlaybackDiagnostics = { mediaAttached: false, manifestParsed: false, fragmentLoading: false, error: null };
+  const diagnostics = {
+    mediaAttached: false,
+    manifestParsed: false,
+    fragmentLoading: false,
+    fragmentLoaded: false,
+    fragmentParsed: false,
+    fragmentBuffered: false,
+    requestContexts: [],
+    events: [],
+    error: null,
+    recovery: null,
+  };
+  globalThis.__auraPlaybackDiagnostics = diagnostics;
+  const fragmentState = (data) => ({
+    sn: Number.isFinite(data?.frag?.sn) ? data.frag.sn : null,
+    level: Number.isFinite(data?.frag?.level) ? data.frag.level : null,
+    type: typeof data?.frag?.type === "string" ? data.frag.type : "",
+  });
+  const note = (event, detail = {}) => {
+    diagnostics.events.push({ event, at: Date.now(), ...detail });
+    if (diagnostics.events.length > 40) diagnostics.events.shift();
+  };
   hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-    globalThis.__auraPlaybackDiagnostics.mediaAttached = true;
+    diagnostics.mediaAttached = true;
+    note("media-attached");
   });
-  hls.on(Hls.Events.MANIFEST_PARSED, () => {
-    globalThis.__auraPlaybackDiagnostics.manifestParsed = true;
+  hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
+    diagnostics.manifestParsed = true;
+    note("manifest-parsed", {
+      levels: Array.isArray(data?.levels) ? data.levels.length : 0,
+      audioTracks: Array.isArray(data?.audioTracks) ? data.audioTracks.length : 0,
+    });
   });
-  hls.on(Hls.Events.FRAG_LOADING, () => {
-    globalThis.__auraPlaybackDiagnostics.fragmentLoading = true;
+  hls.on(Hls.Events.FRAG_LOADING, (_event, data) => {
+    diagnostics.fragmentLoading = true;
+    note("fragment-loading", fragmentState(data));
+  });
+  hls.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+    diagnostics.fragmentLoaded = true;
+    note("fragment-loaded", fragmentState(data));
+  });
+  hls.on(Hls.Events.FRAG_PARSED, (_event, data) => {
+    diagnostics.fragmentParsed = true;
+    note("fragment-parsed", fragmentState(data));
+  });
+  hls.on(Hls.Events.FRAG_BUFFERED, (_event, data) => {
+    diagnostics.fragmentBuffered = true;
+    note("fragment-buffered", fragmentState(data));
   });
   hls.on(Hls.Events.ERROR, (_event, data) => {
-    globalThis.__auraPlaybackDiagnostics.error = {
+    const decision = hlsPlaybackRecoveryDecision(data);
+    diagnostics.error = {
       type: String(data?.type || ""),
       details: String(data?.details || ""),
       fatal: data?.fatal === true,
+      classification: decision.classification,
     };
-    const fragmentFailure = ["fragLoadError", "fragLoadTimeOut", "aborted"].includes(data?.details);
-    if (data?.fatal || fragmentFailure) void handlePlaybackFailure({ alternate: fragmentFailure });
+    note("error", diagnostics.error);
+    if (!decision.recover) return;
+    diagnostics.recovery = {
+      alternate: decision.alternate,
+      classification: decision.classification,
+      at: Date.now(),
+    };
+    void handlePlaybackFailure({ alternate: decision.alternate });
   });
   hls.loadSource(mediaUrl);
   hls.attachMedia(video);
@@ -620,6 +676,7 @@ async function startHlsPlayback() {
 function subtitleProgressLabel(phase) {
   const labels = {
     queued: "대기 중",
+    "uploading-audio": "오디오 업로드 중",
     "extracting-audio": "오디오 추출 중",
     transcribing: "음성 인식 중",
     translating: "한글 번역 중",
@@ -657,7 +714,7 @@ function stopSubtitleProgress() {
 
 async function startProgressivePlayback() {
   try {
-    directLeaseId = await acquireMediaLease(mediaUrl);
+    directLeaseId = await acquireMediaLease(mediaUrl, "playback-progressive");
   } catch {
     await handlePlaybackFailure();
     return;
@@ -757,7 +814,9 @@ async function generateSubtitles() {
     sourceUrl,
     title: pageTitle,
     sourceLanguage: subtitleSourceLanguage.value === "en" ? "en" : "ja",
+    mediaType,
     ...(Number.isInteger(sourceTabId) ? { sourceTabId } : {}),
+    ...(Number.isInteger(sourceFrameId) ? { sourceFrameId } : {}),
   };
   try {
     const cached = await loadGeneratedSubtitle(input);

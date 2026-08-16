@@ -205,7 +205,7 @@ function samePlaybackGroup(left, right) {
 }
 
 export function rankCandidates(candidates, context = {}) {
-  const list = Array.isArray(candidates) ? candidates : [...(candidates || [])];
+  const list = (Array.isArray(candidates) ? candidates : [...(candidates || [])]).filter(Boolean);
   const ranked = list.map((candidate) => {
     const result = scoreCandidate(candidate, context);
     candidate.score = result.score;

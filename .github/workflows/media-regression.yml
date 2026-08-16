@@ -1,0 +1,62 @@
+name: Media regression
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      run_live_monitor:
+        description: Run the opt-in live-site smoke monitor
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:media-sites
+      - run: npm test
+      - run: npm run build:dev-staging
+
+  live-site-monitor:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.run_live_monitor) ||
+      (github.event_name == 'schedule' && vars.AURA_ENABLE_LIVE_MONITOR == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install --no-save playwright
+      - run: npx playwright install --with-deps chromium
+      - name: Run redacted live monitor
+        env:
+          AURA_MONITOR_HEADLESS: "1"
+          AURA_MONITOR_AUTOPLAY: "1"
+          AURA_MONITOR_ALLOW_BLOCKED: "1"
+          AURA_MONITOR_REPORT: artifacts/live-media-smoke.json
+        run: npm run monitor:media-sites
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-media-smoke
+          path: artifacts/live-media-smoke.json
+          if-no-files-found: warn
+          retention-days: 14

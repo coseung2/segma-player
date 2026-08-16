@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  cuesToSrt,
   cuesAt,
   decodeSubtitleBytes,
   mediaIdentifier,
@@ -8,7 +9,26 @@ import {
   parseSubtitle,
   parseVtt,
   subtitleNameMatches,
+  subtitleTitleMatches,
 } from "./player-subtitle.js";
+
+test("parsed cues convert to standards-compatible SRT timestamps", () => {
+  const srt = cuesToSrt([
+    { start: 0.5, end: 3, text: "첫 번째" },
+    { start: 60.125, end: 62.5, text: "둘째\n줄" },
+  ]);
+  assert.equal(srt, [
+    "1",
+    "00:00:00,500 --> 00:00:03,000",
+    "첫 번째",
+    "",
+    "2",
+    "00:01:00,125 --> 00:01:02,500",
+    "둘째",
+    "줄",
+    "",
+  ].join("\r\n"));
+});
 
 test("media identifier extraction mirrors the protocol handler", () => {
   assert.equal(mediaIdentifier("JUQ-546-카케이 준-유모자막"), "JUQ-546");
@@ -23,6 +43,12 @@ test("subtitle name matching tolerates separators and case", () => {
   assert.equal(subtitleNameMatches("JUQ_921_니시노미야.srt", "JUQ-921"), true);
   assert.equal(subtitleNameMatches("JUQ 921.srt", "JUQ-921"), true);
   assert.equal(subtitleNameMatches("ABC-123.srt", "JUQ-921"), false);
+});
+
+test("subtitle title matching reuses generated files without an identifier", () => {
+  assert.equal(subtitleTitleMatches("Teddy Tarantino Step Sister Picked Up From Cafe.srt", "Teddy Tarantino | Step Sister Picked Up From Cafe"), true);
+  assert.equal(subtitleTitleMatches("different-video.srt", "Teddy Tarantino | Step Sister Picked Up From Cafe"), false);
+  assert.equal(subtitleTitleMatches("short.srt", "short"), false);
 });
 
 test("SRT parsing handles CRLF, multiline cues, and ordering", () => {

@@ -1,4 +1,4 @@
-import { getStoredLicense } from "./license.js";
+import { getStoredLicense, refreshLicense } from "./license.js";
 
 export const SUBTITLE_API_URL = "https://aura.mdownloader.workers.dev/api/subtitles";
 export const GENERATED_SUBTITLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -14,8 +14,14 @@ export class SubtitleGenerationError extends Error {
   }
 }
 
-function cacheKeyInput({ mediaUrl = "", sourceUrl = "", title = "" } = {}) {
-  return [sourceUrl, title, mediaUrl].map((value) => String(value || "").trim()).join("\u001f");
+function normalizedSourceLanguage(value) {
+  return value === "en" ? "en" : "ja";
+}
+
+function cacheKeyInput({ mediaUrl = "", sourceUrl = "", title = "", sourceLanguage = "ja" } = {}) {
+  return [sourceLanguage, sourceUrl, title, mediaUrl]
+    .map((value) => String(value || "").trim())
+    .join("\u001f");
 }
 
 function hashKey(value) {
@@ -68,23 +74,41 @@ function wait(milliseconds, signal) {
   });
 }
 
-export async function requestGeneratedSubtitle({ mediaUrl, sourceUrl = "", title = "", signal = null } = {}) {
-  const license = await getStoredLicense();
-  if (!license?.key || license.edition !== "pro") {
+export async function requestGeneratedSubtitle({ mediaUrl, sourceUrl = "", title = "", sourceLanguage = "ja", licenseKey = "", signal = null, onProgress = null } = {}) {
+  let key = typeof licenseKey === "string" ? licenseKey.trim() : "";
+  if (!key) {
+    const storedLicense = await getStoredLicense();
+    if (storedLicense?.key) await refreshLicense();
+    const license = await getStoredLicense();
+    if (license?.edition === "pro" && typeof license.key === "string") key = license.key.trim();
+  }
+  if (!key) {
     throw new SubtitleGenerationError("pro-license-required");
   }
   const submitted = await requestJson(SUBTITLE_API_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mediaUrl, sourceUrl, title, licenseKey: license.key }),
+    body: JSON.stringify({ mediaUrl, sourceUrl, title, sourceLanguage: normalizedSourceLanguage(sourceLanguage), licenseKey: key }),
   }, signal);
   const jobId = typeof submitted.jobId === "string" ? submitted.jobId : "";
   if (!jobId) throw new SubtitleGenerationError("invalid-job");
+  onProgress?.({ phase: "queued", progress: 0, completed: 0, total: 0 });
   const startedAt = Date.now();
   while (Date.now() - startedAt < POLL_TIMEOUT_MS) {
     await wait(POLL_INTERVAL_MS, signal);
     const result = await requestJson(`${SUBTITLE_API_URL}?id=${encodeURIComponent(jobId)}`, {}, signal);
-    if (result.status === "running") continue;
+    if (result.status === "running") {
+      onProgress?.({
+        phase: typeof result.phase === "string" ? result.phase : "queued",
+        progress: Number(result.progress) || 0,
+        completed: Number(result.completed) || 0,
+        total: Number(result.total) || 0,
+      });
+      continue;
+    }
+    if (result.status === "completed" && typeof result.result?.error === "string") {
+      throw new SubtitleGenerationError(result.result.error);
+    }
     const vtt = result.result?.vtt || result.vtt || "";
     if (result.status !== "completed" || typeof vtt !== "string" || !vtt.trim()) {
       throw new SubtitleGenerationError("empty-subtitle");

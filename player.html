@@ -11,18 +11,23 @@
       html,
       body {
         margin: 0;
+        width: 100%;
         height: 100%;
+        min-width: 0;
+        min-height: 0;
         background: #0b0f16;
         color: #eef2f7;
         font-family: "Pretendard", "Segoe UI", system-ui, sans-serif;
       }
       body {
-        display: flex;
-        flex-direction: column;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: hidden;
       }
       header {
         position: relative;
         display: flex;
+        min-width: 0;
         align-items: center;
         gap: 10px;
         padding: 12px 16px;
@@ -53,6 +58,33 @@
       header button:disabled {
         opacity: 0.6;
         cursor: default;
+      }
+      #subtitle-source-language {
+        min-height: 30px;
+        padding: 0 8px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 8px;
+        background: #111926;
+        color: inherit;
+        font: inherit;
+        font-size: 12px;
+      }
+      #subtitle-progress {
+        flex: none;
+        color: #a9b7c9;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      @media (max-width: 720px) {
+        header {
+          flex-wrap: wrap;
+        }
+        header h1 {
+          flex: 1 1 220px;
+        }
+        header .spacer {
+          display: none;
+        }
       }
       #generate-subtitle {
         border-color: rgba(47, 111, 237, 0.65);
@@ -126,16 +158,22 @@
       }
       .stage {
         position: relative;
-        flex: 1;
+        min-width: 0;
+        min-height: 0;
         display: grid;
         place-items: center;
         background: #000;
         overflow: hidden;
       }
       video {
+        position: absolute;
+        inset: 0;
         width: 100%;
         height: 100%;
+        max-width: 100%;
         max-height: 100%;
+        object-fit: contain;
+        object-position: center;
       }
       #subtitle {
         position: absolute;
@@ -206,7 +244,13 @@
     <header>
       <h1 id="title">Aura Media Player</h1>
       <span class="spacer"></span>
+      <select id="subtitle-source-language" aria-label="자막 원본 언어" hidden>
+        <option value="ja">일본어 → 한글</option>
+        <option value="en">영어 → 한글</option>
+      </select>
       <button id="generate-subtitle" type="button" hidden>자막 생성</button>
+      <button id="save-subtitle" type="button" hidden>SRT 저장</button>
+      <span id="subtitle-progress" aria-live="polite" hidden></span>
       <button id="save" type="button">컬렉션에 저장</button>
       <span id="subtitle-tag" class="tag" hidden>자막</span>
       <section id="collection-picker" class="collection-picker" hidden aria-label="컬렉션 저장">

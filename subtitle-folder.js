@@ -49,3 +49,21 @@ export async function storeSubtitleDirectory(handle) {
     return false;
   }
 }
+
+// A handle selected by earlier versions was read-only. Keep playback's read
+// path untouched, but let the player request write access only when saving a
+// generated SRT from a user action.
+export async function ensureStoredSubtitleDirectory({ requestPermission = false } = {}) {
+  const handle = await getStoredSubtitleDirectory();
+  if (!handle) return null;
+  try {
+    const state = await handle.queryPermission?.({ mode: "readwrite" });
+    if (state === "granted") return handle;
+    if (requestPermission && state === "prompt") {
+      return (await handle.requestPermission?.({ mode: "readwrite" })) === "granted" ? handle : null;
+    }
+  } catch {
+    // The caller treats an unavailable handle as a non-fatal save failure.
+  }
+  return null;
+}

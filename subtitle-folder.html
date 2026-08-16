@@ -63,8 +63,9 @@
     <main>
       <h1>자막 폴더 선택</h1>
       <p>
-        자막(.srt)이 있는 폴더를 선택하면 재생 시 자동으로 찾습니다. 파일명에 영상
-        식별자(예: JUQ-921)가 포함된 자막이면 중첩 폴더까지 검색합니다.
+        자막(.srt)이 있는 폴더를 선택하면 재생 시 자동으로 찾습니다. 생성한 자막도 이
+        폴더에 SRT로 보관합니다. 파일명에 영상 식별자(예: JUQ-921)가 포함된 자막이면
+        중첩 폴더까지 검색합니다.
       </p>
       <button id="pick" type="button">폴더 선택</button>
       <div id="current" class="current" hidden></div>
@@ -85,7 +86,7 @@
 
       button.addEventListener("click", async () => {
         try {
-          const handle = await window.showDirectoryPicker({ mode: "read" });
+          const handle = await window.showDirectoryPicker({ mode: "readwrite" });
           const saved = await storeSubtitleDirectory(handle);
           if (saved) {
             button.textContent = "저장됨 — 이 탭을 닫아도 됩니다";

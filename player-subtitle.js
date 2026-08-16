@@ -14,11 +14,26 @@ export function subtitleNameMatches(name, identifier) {
   return new RegExp(pattern, "i").test(String(name));
 }
 
+export function subtitleTitleKey(value) {
+  return String(value || "")
+    .replace(/\.srt$/i, "")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .slice(0, 180);
+}
+
+export function subtitleTitleMatches(name, title) {
+  const titleKey = subtitleTitleKey(title);
+  if (titleKey.length < 8) return false;
+  return subtitleTitleKey(name).includes(titleKey);
+}
+
 function isSrtFile(name) {
   return typeof name === "string" && /\.srt$/i.test(name);
 }
 
-async function walkForSubtitle(directoryHandle, identifier) {
+async function walkForSubtitle(directoryHandle, identifier, title) {
   let best = null;
   const visit = async (handle) => {
     for await (const entry of handle.values()) {
@@ -26,7 +41,7 @@ async function walkForSubtitle(directoryHandle, identifier) {
         await visit(entry);
       } else if (entry.kind === "file" && isSrtFile(entry.name)) {
         const file = await entry.getFile();
-        if (subtitleNameMatches(entry.name, identifier)) {
+        if (subtitleNameMatches(entry.name, identifier) || subtitleTitleMatches(entry.name, title)) {
           if (!best || file.lastModified > best.file.lastModified) {
             best = { entry, file, name: entry.name };
           }
@@ -41,8 +56,8 @@ async function walkForSubtitle(directoryHandle, identifier) {
 export async function findSubtitleFile(directoryHandle, title, mediaUrl) {
   if (!directoryHandle || typeof directoryHandle.values !== "function") return null;
   const identifier = mediaIdentifier(title) || mediaIdentifier(mediaUrl);
-  if (!identifier) return null;
-  return walkForSubtitle(directoryHandle, identifier);
+  if (!identifier && subtitleTitleKey(title).length < 8) return null;
+  return walkForSubtitle(directoryHandle, identifier, title);
 }
 
 export async function decodeSubtitleBytes(bytes) {
@@ -99,6 +114,31 @@ export function parseVtt(text) {
 
 export function parseSubtitle(text) {
   return /^\uFEFF?\s*WEBVTT\b/i.test(String(text || "")) ? parseVtt(text) : parseSrt(text);
+}
+
+function srtTimestamp(seconds) {
+  const milliseconds = Math.max(0, Math.round(Number(seconds) * 1000));
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
+  const wholeSeconds = Math.floor((milliseconds % 60_000) / 1000);
+  const remainder = milliseconds % 1000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")},${String(remainder).padStart(3, "0")}`;
+}
+
+// Generated captions arrive as WEBVTT. The subtitle-folder matcher deliberately
+// uses .srt, so convert parsed cues rather than applying brittle text replaces.
+export function cuesToSrt(cues) {
+  const valid = (Array.isArray(cues) ? cues : []).filter((cue) => (
+    Number.isFinite(cue?.start)
+    && Number.isFinite(cue?.end)
+    && cue.end > cue.start
+    && String(cue?.text || "").trim()
+  ));
+  return valid.map((cue, index) => [
+    String(index + 1),
+    `${srtTimestamp(cue.start)} --> ${srtTimestamp(cue.end)}`,
+    String(cue.text).replace(/\r\n?/g, "\n").trim().replace(/\n/g, "\r\n"),
+  ].join("\r\n")).join("\r\n\r\n") + (valid.length ? "\r\n" : "");
 }
 
 export function cuesAt(cues, time) {

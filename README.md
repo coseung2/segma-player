@@ -39,6 +39,12 @@ The store ZIP excludes private page-key code, static site-specific redirect rule
 
 ## Development
 
+Bug fixes and regression history are tracked in [INCIDENTS.md](INCIDENTS.md).
+Read it before changing a failing path and update it after every handoff.
+Real site behavior by extension version, browser, and surface is tracked in
+[SITE_QA_LOG.md](SITE_QA_LOG.md); live detection is not treated as proof of
+download or subtitle success.
+
 ```powershell
 rtk npm test
 rtk npm run test:media-sites
@@ -48,9 +54,33 @@ rtk cargo fmt --check --manifest-path native-host/Cargo.toml
 
 The deterministic media-site fixtures cover the MissAV ad-iframe priority and
 AV19/Level5 token-session regressions. An opt-in live smoke probe is available
-with `npm run monitor:media-sites`; it writes only redacted candidate URLs to
-`artifacts/live-media-smoke.json`. See `MEDIA_PIPELINE_TECHNICAL_REVIEW.md` for
-the architecture review, remaining risks, and phased roadmap.
+with `npm run monitor:media-sites`; it writes only redacted candidate URLs to a
+versioned, timestamped report under `artifacts/`. The default live target set also permanently
+includes the configured AsianPorn, OnlyJerk, Playmogo, and Beeg reproduction
+URLs; provider hosts are intentionally not pinned for these rotating live-only
+cases. See `MEDIA_PIPELINE_TECHNICAL_REVIEW.md` for the architecture review,
+remaining risks, and phased roadmap.
+
+The live monitor prefers the newest unbranded Chromium already present in
+`PLAYWRIGHT_BROWSERS_PATH` because it supports unpacked-extension automation.
+It falls back to the installed Chrome channel on Windows. Set
+`AURA_MONITOR_CHANNEL` or `AURA_MONITOR_EXECUTABLE_PATH` to override detection;
+`npm run monitor:media-sites -- --headed` uses a temporary visible profile, and
+`--cases=<fixture-id>` runs one configured target.
+
+Use `--adblock=auto`, `--adblock=on`, `--adblock=quiet`,
+`--adblock=site-allow`, or `--adblock=off` to load the separate Aura AdBlock
+extension in the same temporary profile. Auto mode applies each fixture's
+recorded recommendation; the other modes test full blocking, reduced page
+intervention, a per-site exception, or a global-off control. Add
+`--report=<path>` to keep each matrix result separately.
+Add `--autoplay` only for an explicit playback probe; normal monitoring remains
+detection-only.
+
+For Cloudflare or Turnstile cases, `--headed --wait-for-challenge=180` brings
+the temporary browser forward and pauses for one user verification. It never
+automates CAPTCHA interaction; after the challenge disappears, playback,
+detection, and reporting resume automatically.
 
 Load the repository root as an unpacked extension for development. No
 companion installation is needed; the first download asks for a save folder

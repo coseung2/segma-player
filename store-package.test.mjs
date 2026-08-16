@@ -157,7 +157,7 @@ test("store packager builds and audits the exact free-edition ZIP", async (conte
     }, {
       matches: ["http://*/*", "https://*/*"],
       js: ["content.js"],
-      run_at: "document_idle",
+      run_at: "document_start",
       all_frames: true,
     }]);
 

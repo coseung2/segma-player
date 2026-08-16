@@ -206,10 +206,10 @@ function Write-AuditedManifest {
   $validIsolatedContent = $isolatedProperties -eq 'all_frames,js,matches,run_at' -and
     (@($isolatedContent.matches) -join ',') -eq 'http://*/*,https://*/*' -and
     (@($isolatedContent.js) -join ',') -eq 'content.js' -and
-    $isolatedContent.run_at -eq 'document_idle' -and
+    $isolatedContent.run_at -eq 'document_start' -and
     $isolatedContent.all_frames -eq $true
   if (-not $validIsolatedContent) {
-    throw 'Store manifest isolated content script must be content.js at document_idle.'
+    throw 'Store manifest isolated content script must be content.js at document_start.'
   }
   if ($auditedManifest.background.service_worker -ne 'background.js' -or $auditedManifest.background.type -ne 'module') {
     throw 'Store manifest background runtime is not the audited module worker.'
@@ -275,7 +275,7 @@ function Invoke-StoreAudit([string[]]$ExpectedFiles) {
     $contentScripts[0].run_at -eq 'document_start' -and
     $contentScripts[0].world -eq 'MAIN' -and
     (@($contentScripts[1].js) -join ',') -eq 'content.js' -and
-    $contentScripts[1].run_at -eq 'document_idle' -and
+    $contentScripts[1].run_at -eq 'document_start' -and
     -not ($contentScripts[1].PSObject.Properties.Name -contains 'world')
   if (-not $validContentScripts) {
     throw 'Store audit found content scripts other than the exact bundled bridge and isolated detector.'

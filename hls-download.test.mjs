@@ -13,6 +13,7 @@ const {
   mediaChunks,
   prepareDownloadCandidate,
   prepareProgressiveFetch,
+  prepareSubtitleAudioUpload,
   progressiveSession,
   requestPageDecodedKey,
   requestSourceFrameDownload,
@@ -196,6 +197,81 @@ test("Dood-compatible media falls back to its source frame when an authenticated
   assert.equal(prepared.sourceFrameFallbackPreferred, true);
   delete globalThis.fetch;
   delete globalThis.chrome;
+});
+
+test("Dood-compatible media uses source-frame fallback when authenticated range probing returns HTTP 405", async () => {
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: async (message) => {
+        if (message.type === "ensure-media-routes") return { ok: true };
+        if (message.type === "prepare-media-fetch") return { ok: true, leaseId: "lease-playmogo-405" };
+        if (message.type === "release-media-fetch") return { ok: true };
+        return { ok: true };
+      },
+    },
+  };
+  globalThis.fetch = async () => new Response("method not allowed", { status: 405 });
+  const prepared = await prepareProgressiveFetch({
+    url: "https://asw188q.cloudatacdn.com/media/video.mp4",
+    referrer: "https://playmogo.com/e/0tma53gi8rvo",
+    authenticatedProbeRequired: true,
+  });
+  assert.equal(prepared.authenticatedProbeRequired, false);
+  assert.equal(prepared.sourceFrameFallbackPreferred, true);
+  assert.equal(prepared.sourceFrameFallbackReason, "http-405");
+  delete globalThis.fetch;
+  delete globalThis.chrome;
+});
+
+test("subtitle preparation uploads only a separate HLS audio rendition", async () => {
+  const requested = [];
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: async (message) => {
+        if (message.type === "prepare-media-fetch") return { ok: true, leaseId: `lease-${requested.length}` };
+        if (message.type === "release-media-fetch") return { ok: true };
+        if (message.type === "ensure-media-routes") return { ok: true };
+        return { ok: true };
+      },
+    },
+  };
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    requested.push(value);
+    if (value.endsWith("master.m3u8")) {
+      return new Response(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Japanese",LANGUAGE="ja",DEFAULT=YES,URI="audio/ja.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080,AUDIO="audio"
+video/1080.m3u8`, { status: 200, headers: { "content-type": "application/vnd.apple.mpegurl" } });
+    }
+    if (value.endsWith("audio/ja.m3u8")) {
+      return new Response("#EXTM3U\n#EXTINF:4,\na0.ts\n#EXTINF:4,\na1.ts\n", {
+        status: 200,
+        headers: { "content-type": "application/vnd.apple.mpegurl" },
+      });
+    }
+    if (value.endsWith("audio/a0.ts")) return new Response(new Uint8Array([1, 2]), { status: 200 });
+    if (value.endsWith("audio/a1.ts")) return new Response(new Uint8Array([3, 4]), { status: 200 });
+    throw new Error(`unexpected fetch: ${value}`);
+  };
+  try {
+    const prepared = await prepareSubtitleAudioUpload({
+      mediaUrl: "https://media.example/root/master.m3u8",
+      sourceUrl: "https://site.example/watch/1",
+      sourceTabId: 7,
+      sourceFrameId: 3,
+      mediaType: "HLS_MASTER",
+      sourceLanguage: "ja",
+    });
+    assert.equal(prepared.source, "hls-audio-rendition");
+    assert.equal(prepared.bytes, 4);
+    assert.equal(prepared.filename, "aura-subtitle-audio.ts");
+    assert.deepEqual([...new Uint8Array(await prepared.blob.arrayBuffer())], [1, 2, 3, 4]);
+    assert.equal(requested.some((url) => url.includes("video/1080.m3u8")), false);
+  } finally {
+    delete globalThis.fetch;
+    delete globalThis.chrome;
+  }
 });
 
 test("mediaChunks resumes from a segment checkpoint", async () => {

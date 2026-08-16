@@ -1,12 +1,13 @@
 import html
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import modal
 
@@ -22,7 +23,19 @@ MAX_MEDIA_URL_LENGTH = 4096
 MAX_TITLE_LENGTH = 240
 MAX_DURATION_SECONDS = 60 * 60
 MAX_VTT_BYTES = 2_000_000
+MAX_AUDIO_UPLOAD_BYTES = 80 * 1024 * 1024
+AUDIO_JOB_MAX_AGE_SECONDS = 2 * 60 * 60
+AUDIO_JOB_DIR = "/audio-jobs"
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+AUDIO_JOB_PATH_RE = re.compile(r"^/audio-jobs/[a-f0-9]{32}\.(?:input|wav)$")
+ALLOWED_AUDIO_UPLOAD_CONTENT_TYPES = {
+    "application/octet-stream",
+    "audio/aac",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/ogg",
+    "video/mp2t",
+}
 MEDIA_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -34,21 +47,26 @@ def media_log(message):
 
 app = modal.App(APP_NAME)
 model_volume = modal.Volume.from_name("aura-asr-models", create_if_missing=True)
+audio_job_volume = modal.Volume.from_name(
+    "aura-asr-audio-jobs",
+    create_if_missing=True,
+    version=2,
+)
 job_progress = modal.Dict.from_name("aura-asr-job-progress", create_if_missing=True)
-image = (
+ingest_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("curl", "ffmpeg")
-    .pip_install(
-        "accelerate",
-        "bitsandbytes",
-        "fastapi",
-        "huggingface_hub",
-        "Pillow",
-        "soundfile",
-        "torch",
-        "torchvision",
-        "transformers",
-    )
+    .pip_install("fastapi")
+)
+image = ingest_image.pip_install(
+    "accelerate",
+    "bitsandbytes",
+    "huggingface_hub",
+    "Pillow",
+    "soundfile",
+    "torch",
+    "torchvision",
+    "transformers",
 )
 auth_secret = modal.Secret.from_name("aura-asr-auth")
 huggingface_secret = modal.Secret.from_name("huggingface")
@@ -95,6 +113,80 @@ def clean_payload(payload):
         "sourceLanguage": source_language,
         "progressKey": progress_key,
     }
+
+
+def clean_audio_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("invalid-request")
+    audio_path = str(payload.get("audioPath", "")).strip()
+    title = str(payload.get("title", "")).strip()[:MAX_TITLE_LENGTH]
+    source_language = str(payload.get("sourceLanguage", "ja")).strip().lower()
+    progress_key = str(payload.get("progressKey", "")).strip()
+    if not AUDIO_JOB_PATH_RE.fullmatch(audio_path):
+        raise ValueError("invalid-audio-path")
+    if source_language not in {"ja", "en"}:
+        raise ValueError("invalid-source-language")
+    if progress_key and not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", progress_key):
+        raise ValueError("invalid-progress-key")
+    return {
+        "audioPath": audio_path,
+        "title": title,
+        "sourceLanguage": source_language,
+        "progressKey": progress_key,
+    }
+
+
+def audio_job_paths(token=None):
+    job_token = token or uuid.uuid4().hex
+    if not re.fullmatch(r"[a-f0-9]{32}", job_token):
+        raise ValueError("invalid-audio-job-token")
+    return (
+        os.path.join(AUDIO_JOB_DIR, f"{job_token}.input"),
+        os.path.join(AUDIO_JOB_DIR, f"{job_token}.wav"),
+    )
+
+
+def remove_audio_job_files(*paths):
+    changed = False
+    for path in paths:
+        if not AUDIO_JOB_PATH_RE.fullmatch(str(path or "")):
+            continue
+        try:
+            os.remove(path)
+            changed = True
+        except FileNotFoundError:
+            pass
+    if changed:
+        audio_job_volume.commit()
+
+
+def prune_audio_job_files(now=None):
+    current = float(now if now is not None else time.time())
+    changed = False
+    try:
+        names = os.listdir(AUDIO_JOB_DIR)
+    except FileNotFoundError:
+        return 0
+    removed = 0
+    for name in names:
+        path = os.path.join(AUDIO_JOB_DIR, name)
+        if not AUDIO_JOB_PATH_RE.fullmatch(path):
+            continue
+        try:
+            age = current - os.stat(path).st_mtime
+        except FileNotFoundError:
+            continue
+        if age < AUDIO_JOB_MAX_AGE_SECONDS:
+            continue
+        try:
+            os.remove(path)
+            changed = True
+            removed += 1
+        except FileNotFoundError:
+            pass
+    if changed:
+        audio_job_volume.commit()
+    return removed
 
 
 def set_job_progress(progress_key, phase, progress, completed=0, total=0):
@@ -299,10 +391,101 @@ def browser_fingerprint_media(media_url, source_url):
         media_log("curl fallback downloaded=progressive")
         return workdir, downloaded
     except Exception:
-        import shutil
-
         shutil.rmtree(workdir, ignore_errors=True)
         raise
+
+
+def audio_extract_command(input_path, audio_path, headers="", remote=False, allow_all_extensions=False):
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-loglevel",
+        "error",
+    ]
+    if remote:
+        command.extend([
+            "-user_agent",
+            MEDIA_USER_AGENT,
+            "-protocol_whitelist",
+            "file,http,https,tcp,tls,crypto,data",
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_delay_max",
+            "5",
+        ])
+    if headers:
+        command.extend(["-headers", headers])
+    if allow_all_extensions:
+        command.extend(["-allowed_extensions", "ALL"])
+    command.extend([
+        "-i",
+        input_path,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-t",
+        str(MAX_DURATION_SECONDS),
+        "-f",
+        "wav",
+        audio_path,
+    ])
+    return command
+
+
+def normalize_uploaded_audio(input_path, audio_path):
+    if not AUDIO_JOB_PATH_RE.fullmatch(input_path) or not AUDIO_JOB_PATH_RE.fullmatch(audio_path):
+        raise ValueError("invalid-audio-path")
+    subprocess.run(
+        audio_extract_command(input_path, audio_path),
+        check=True,
+        timeout=MAX_DURATION_SECONDS + 180,
+        capture_output=True,
+    )
+
+
+def extract_remote_audio(request, audio_path):
+    media_url = request["mediaUrl"]
+    source_url = request["sourceUrl"]
+    progress_key = request["progressKey"]
+    headers = f"Referer: {source_url}\r\nOrigin: {origin_for(source_url)}\r\n" if source_url else ""
+    media_workdir = None
+    try:
+        set_job_progress(progress_key, "extracting-audio", 5)
+        try:
+            subprocess.run(
+                audio_extract_command(media_url, audio_path, headers=headers, remote=True),
+                check=True,
+                timeout=MAX_DURATION_SECONDS + 120,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as direct_error:
+            direct_stderr = direct_error.stderr.decode("utf-8", "replace") if isinstance(direct_error.stderr, bytes) else str(direct_error.stderr or "")
+            if not (re.search(r"403|forbidden|access denied", direct_stderr, re.IGNORECASE)
+                    or re.search(r"\.m3u8(?:$|[?#])", media_url, re.IGNORECASE)):
+                raise
+            media_log("direct ffmpeg blocked; retrying with curl")
+            set_job_progress(progress_key, "extracting-audio", 8)
+            media_workdir, local_media = browser_fingerprint_media(media_url, source_url)
+            try:
+                subprocess.run(
+                    audio_extract_command(local_media, audio_path, allow_all_extensions=True),
+                    check=True,
+                    timeout=MAX_DURATION_SECONDS + 180,
+                    capture_output=True,
+                )
+            except subprocess.CalledProcessError as retry_error:
+                retry_stderr = retry_error.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[-320:]
+                media_log(f"local ffmpeg retry failed code={retry_error.returncode} detail={retry_stderr}")
+                raise
+            media_log("local ffmpeg retry succeeded")
+    finally:
+        if media_workdir:
+            shutil.rmtree(media_workdir, ignore_errors=True)
 
 
 async def put_job_progress(progress_key, value):
@@ -354,7 +537,10 @@ def chunks_to_vtt(chunks):
     gpu="L4",
     timeout=60 * 60,
     scaledown_window=300,
-    volumes={"/models": model_volume},
+    volumes={
+        "/models": model_volume,
+        AUDIO_JOB_DIR: audio_job_volume.with_mount_options(read_only=True),
+    },
     secrets=[huggingface_secret],
 )
 class AnimeWhisperWorker:
@@ -478,109 +664,96 @@ class AnimeWhisperWorker:
         return translated
 
     @modal.method()
-    def transcribe(self, payload):
-        request = clean_payload(payload)
-        media_url = request["mediaUrl"]
-        source_url = request["sourceUrl"]
+    def transcribe_audio(self, payload):
+        request = clean_audio_payload(payload)
+        audio_job_volume.reload()
+        audio_path = request["audioPath"]
+        if not os.path.isfile(audio_path):
+            return {"ok": False, "error": "audio-input-missing"}
+
+        import soundfile as sf
+
+        audio, sample_rate = sf.read(audio_path, dtype="float32")
         source_language = request["sourceLanguage"]
         progress_key = request["progressKey"]
-        headers = f"Referer: {source_url}\r\nOrigin: {origin_for(source_url)}\r\n" if source_url else ""
-        audio_path = os.path.join(tempfile.gettempdir(), f"aura-asr-{uuid.uuid4().hex}.wav")
-        media_workdir = None
-        command = [
-            "ffmpeg",
-            "-nostdin",
-            "-y",
-            "-loglevel",
-            "error",
-            "-user_agent",
-            MEDIA_USER_AGENT,
-            "-protocol_whitelist",
-            "file,http,https,tcp,tls,crypto,data",
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_delay_max",
-            "5",
-        ]
-        if headers:
-            command.extend(["-headers", headers])
-        command.extend([
-            "-i",
-            media_url,
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-t",
-            str(MAX_DURATION_SECONDS),
-            "-f",
-            "wav",
-            audio_path,
-        ])
-        try:
-            set_job_progress(progress_key, "extracting-audio", 5)
-            try:
-                subprocess.run(command, check=True, timeout=MAX_DURATION_SECONDS + 120, capture_output=True)
-            except subprocess.CalledProcessError as direct_error:
-                direct_stderr = direct_error.stderr.decode("utf-8", "replace") if isinstance(direct_error.stderr, bytes) else str(direct_error.stderr or "")
-                if not (re.search(r"403|forbidden|access denied", direct_stderr, re.IGNORECASE)
-                        or re.search(r"\.m3u8(?:$|[?#])", media_url, re.IGNORECASE)):
-                    raise
-                media_log("direct ffmpeg blocked; retrying with curl")
-                set_job_progress(progress_key, "extracting-audio", 8)
-                media_workdir, local_media = browser_fingerprint_media(media_url, source_url)
-                retry_command = list(command)
-                retry_command.insert(retry_command.index("-i"), "-allowed_extensions")
-                retry_command.insert(retry_command.index("-i"), "ALL")
-                retry_command[retry_command.index(media_url)] = local_media
-                try:
-                    subprocess.run(retry_command, check=True, timeout=MAX_DURATION_SECONDS + 180, capture_output=True)
-                except subprocess.CalledProcessError as retry_error:
-                    retry_stderr = retry_error.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[-320:]
-                    media_log(f"local ffmpeg retry failed code={retry_error.returncode} detail={retry_stderr}")
-                    raise
-                media_log("local ffmpeg retry succeeded")
-            import soundfile as sf
+        set_job_progress(progress_key, "transcribing", 15)
+        asr_pipeline = self.japanese_pipeline if source_language == "ja" else self.english_asr_pipeline()
+        asr_model_id = MODEL_ID if source_language == "ja" else ENGLISH_ASR_MODEL_ID
+        result = asr_pipeline(
+            {"array": audio, "sampling_rate": sample_rate},
+            chunk_length_s=30,
+            stride_length_s=(5, 2),
+            return_timestamps=True,
+            generate_kwargs={
+                "language": "japanese" if source_language == "ja" else "english",
+                "task": "transcribe",
+                "no_repeat_ngram_size": 5,
+            },
+        )
+        set_job_progress(progress_key, "translating", 60)
+        vtt = chunks_to_vtt(self.translate_chunks(result.get("chunks", []), source_language, progress_key))
+        set_job_progress(progress_key, "finalizing", 99)
+        return {
+            "ok": True,
+            "vtt": vtt,
+            "title": request["title"],
+            "model": f"{asr_model_id}+{TRANSLATION_MODEL_ID}",
+            "sourceLanguage": source_language,
+        }
 
-            audio, sample_rate = sf.read(audio_path, dtype="float32")
-            set_job_progress(progress_key, "transcribing", 15)
-            asr_pipeline = self.japanese_pipeline if source_language == "ja" else self.english_asr_pipeline()
-            asr_model_id = MODEL_ID if source_language == "ja" else ENGLISH_ASR_MODEL_ID
-            result = asr_pipeline(
-                {"array": audio, "sampling_rate": sample_rate},
-                chunk_length_s=30,
-                stride_length_s=(5, 2),
-                return_timestamps=True,
-                generate_kwargs={
-                    "language": "japanese" if source_language == "ja" else "english",
-                    "task": "transcribe",
-                    "no_repeat_ngram_size": 5,
-                },
-            )
-            set_job_progress(progress_key, "translating", 60)
-            vtt = chunks_to_vtt(self.translate_chunks(result.get("chunks", []), source_language, progress_key))
-            set_job_progress(progress_key, "finalizing", 99)
-            return {
-                "ok": True,
-                "vtt": vtt,
-                "title": request["title"],
-                "model": f"{asr_model_id}+{TRANSLATION_MODEL_ID}",
-                "sourceLanguage": source_language,
-            }
-        except subprocess.CalledProcessError as error:
-            return {"ok": False, "error": media_input_error(error)}
-        finally:
-            try:
-                os.remove(audio_path)
-            except FileNotFoundError:
-                pass
-            if media_workdir:
-                import shutil
 
-                shutil.rmtree(media_workdir, ignore_errors=True)
+@app.function(
+    image=ingest_image,
+    cpu=2.0,
+    memory=1024,
+    timeout=60 * 60,
+    volumes={AUDIO_JOB_DIR: audio_job_volume},
+)
+def ingest_url_job(payload):
+    request = clean_payload(payload)
+    _, audio_path = audio_job_paths()
+    audio_job_volume.reload()
+    prune_audio_job_files()
+    try:
+        extract_remote_audio(request, audio_path)
+        audio_job_volume.commit()
+        return AnimeWhisperWorker().transcribe_audio.remote({
+            "audioPath": audio_path,
+            "title": request["title"],
+            "sourceLanguage": request["sourceLanguage"],
+            "progressKey": request["progressKey"],
+        })
+    except subprocess.CalledProcessError as error:
+        return {"ok": False, "error": media_input_error(error)}
+    finally:
+        remove_audio_job_files(audio_path)
+
+
+@app.function(
+    image=ingest_image,
+    cpu=2.0,
+    memory=1024,
+    timeout=60 * 60,
+    volumes={AUDIO_JOB_DIR: audio_job_volume},
+)
+def ingest_uploaded_audio_job(payload):
+    input_path = str(payload.get("inputPath", "")).strip() if isinstance(payload, dict) else ""
+    request = clean_audio_payload(payload)
+    if not input_path.endswith(".input") or not AUDIO_JOB_PATH_RE.fullmatch(input_path):
+        raise ValueError("invalid-audio-path")
+    audio_job_volume.reload()
+    prune_audio_job_files()
+    if not os.path.isfile(input_path):
+        return {"ok": False, "error": "audio-input-missing"}
+    try:
+        set_job_progress(request["progressKey"], "extracting-audio", 8)
+        normalize_uploaded_audio(input_path, request["audioPath"])
+        audio_job_volume.commit()
+        return AnimeWhisperWorker().transcribe_audio.remote(request)
+    except subprocess.CalledProcessError:
+        return {"ok": False, "error": "invalid-audio-upload"}
+    finally:
+        remove_audio_job_files(input_path, request["audioPath"])
 
 
 def authorized(request):
@@ -595,7 +768,13 @@ def response(body, status=200):
     return JSONResponse(body, status_code=status, headers={"cache-control": "no-store"})
 
 
-@app.function(image=image, secrets=[auth_secret], timeout=60 * 60)
+@app.function(
+    image=ingest_image,
+    secrets=[auth_secret],
+    memory=512,
+    timeout=60 * 60,
+    volumes={AUDIO_JOB_DIR: audio_job_volume},
+)
 @modal.asgi_app()
 def web():
     from fastapi import FastAPI, Request
@@ -620,7 +799,84 @@ def web():
             "total": 0,
             "updatedAt": int(time.time()),
         })
-        call = await AnimeWhisperWorker().transcribe.spawn.aio(payload)
+        call = await ingest_url_job.spawn.aio(payload)
+        await job_progress.put.aio(f"call:{call.object_id}", progress_key)
+        return response({"ok": True, "jobId": call.object_id}, 202)
+
+    @api.post("/submit-audio")
+    async def submit_audio(request: Request):
+        if not authorized(request):
+            return response({"ok": False, "error": "unauthorized"}, 401)
+        content_type = request.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
+        if content_type not in ALLOWED_AUDIO_UPLOAD_CONTENT_TYPES:
+            return response({"ok": False, "error": "invalid-audio-content-type"}, 415)
+        claimed_bytes = request.headers.get("x-aura-audio-bytes", "")
+        if not claimed_bytes.isdigit() or int(claimed_bytes) <= 0:
+            return response({"ok": False, "error": "invalid-audio-upload"}, 400)
+        claimed_bytes = int(claimed_bytes)
+        if claimed_bytes > MAX_AUDIO_UPLOAD_BYTES:
+            return response({"ok": False, "error": "subtitle-audio-too-large"}, 413)
+        content_length = request.headers.get("content-length", "")
+        if content_length.isdigit():
+            content_length = int(content_length)
+            if content_length > MAX_AUDIO_UPLOAD_BYTES:
+                return response({"ok": False, "error": "subtitle-audio-too-large"}, 413)
+            if content_length != claimed_bytes:
+                return response({"ok": False, "error": "audio-size-mismatch"}, 400)
+        source_language = request.headers.get("x-aura-source-language", "ja").strip().lower()
+        if source_language not in {"ja", "en"}:
+            return response({"ok": False, "error": "invalid-source-language"}, 400)
+        try:
+            title = unquote(request.headers.get("x-aura-title", "")).strip()[:MAX_TITLE_LENGTH]
+        except Exception:
+            return response({"ok": False, "error": "invalid-title"}, 400)
+        audio_source = re.sub(
+            r"[^a-z0-9._:-]",
+            "",
+            request.headers.get("x-aura-audio-source", "browser-audio"),
+            flags=re.IGNORECASE,
+        )[:64]
+
+        input_path, audio_path = audio_job_paths()
+        progress_key = uuid.uuid4().hex
+        total_bytes = 0
+        try:
+            with open(input_path, "wb") as handle:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_AUDIO_UPLOAD_BYTES:
+                        raise OverflowError("subtitle-audio-too-large")
+                    handle.write(chunk)
+            if total_bytes == 0:
+                remove_audio_job_files(input_path, audio_path)
+                return response({"ok": False, "error": "invalid-audio-upload"}, 400)
+            if total_bytes != claimed_bytes:
+                remove_audio_job_files(input_path, audio_path)
+                return response({"ok": False, "error": "audio-size-mismatch"}, 400)
+            audio_job_volume.commit()
+            await put_job_progress(progress_key, {
+                "phase": "queued",
+                "progress": 0,
+                "completed": 0,
+                "total": 0,
+                "updatedAt": int(time.time()),
+            })
+            media_log(f"audio upload accepted source={audio_source or 'browser-audio'} bytes={total_bytes}")
+            call = await ingest_uploaded_audio_job.spawn.aio({
+                "inputPath": input_path,
+                "audioPath": audio_path,
+                "title": title,
+                "sourceLanguage": source_language,
+                "progressKey": progress_key,
+            })
+        except OverflowError:
+            remove_audio_job_files(input_path, audio_path)
+            return response({"ok": False, "error": "subtitle-audio-too-large"}, 413)
+        except Exception:
+            remove_audio_job_files(input_path, audio_path)
+            raise
         await job_progress.put.aio(f"call:{call.object_id}", progress_key)
         return response({"ok": True, "jobId": call.object_id}, 202)
 

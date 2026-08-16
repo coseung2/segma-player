@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { aesCbcDecrypt } from "./aes-cbc.js";
 import {
   activeKeyForSegment,
+  chooseHlsAudioRendition,
   chooseHlsVariant,
   decryptSegment,
   hlsFileExtension,
@@ -14,6 +15,19 @@ import {
 test("parses HLS master playlists and selects the highest bandwidth variant", () => {
   const parsed = parseHlsPlaylist(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360\nlow/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2000,RESOLUTION=1280x720\nhigh/index.m3u8`, "https://media.example/root/master.m3u8");
   assert.equal(chooseHlsVariant(parsed.variants).uri, "https://media.example/root/high/index.m3u8");
+});
+
+test("parses and selects a separate HLS audio rendition", () => {
+  const parsed = parseHlsPlaylist(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="stereo",NAME="Japanese",LANGUAGE="ja",DEFAULT=YES,AUTOSELECT=YES,URI="audio/ja.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="stereo",NAME="English",LANGUAGE="en",DEFAULT=NO,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="stereo"
+video/720p.m3u8`, "https://media.example/root/master.m3u8");
+  assert.equal(parsed.audioRenditions.length, 2);
+  assert.equal(chooseHlsAudioRendition(parsed.audioRenditions).uri, "https://media.example/root/audio/ja.m3u8");
+  assert.equal(chooseHlsAudioRendition(parsed.audioRenditions, "en").uri, "https://media.example/root/audio/en.m3u8");
+  assert.equal(parsed.variants[0].audioGroup, "stereo");
+  assert.equal(parsed.variants[0].codecs, "avc1.4d401f,mp4a.40.2");
 });
 
 test("rejects HTML/CSS responses that are not playlists", () => {

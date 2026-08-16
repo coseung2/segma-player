@@ -8,7 +8,7 @@ function json(data, status = 200) {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
       "access-control-allow-origin": "*",
-      "access-control-allow-headers": "content-type, authorization",
+      "access-control-allow-headers": "content-type, authorization, x-aura-audio-upload, x-aura-audio-bytes, x-aura-audio-source, x-aura-source-language, x-aura-title",
       "access-control-allow-methods": "GET, POST, OPTIONS",
     },
   });
@@ -91,6 +91,7 @@ function licenseExpired(record) {
 }
 
 const asrRequestsByIp = new Map();
+const MAX_ASR_AUDIO_BYTES = 80 * 1024 * 1024;
 
 function asrRateLimited(request, limit = 12, windowMs = 60 * 60 * 1000) {
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
@@ -186,7 +187,7 @@ export default {
         status: 204,
         headers: {
           "access-control-allow-origin": "*",
-          "access-control-allow-headers": "content-type, authorization",
+          "access-control-allow-headers": "content-type, authorization, x-aura-audio-upload, x-aura-audio-bytes, x-aura-audio-source, x-aura-source-language, x-aura-title",
           "access-control-allow-methods": "GET, POST, OPTIONS",
         },
       });
@@ -195,6 +196,67 @@ export default {
     if (path === "/api/subtitles" && request.method === "POST") {
       if (!env.MODAL_ASR_TOKEN) return json({ ok: false, error: "asr-not-configured" }, 503);
       if (asrRateLimited(request)) return json({ ok: false, error: "rate-limited" }, 429);
+      const audioUpload = request.headers.get("x-aura-audio-upload") === "1";
+      if (audioUpload) {
+        const authorization = request.headers.get("authorization") || "";
+        const licenseKey = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+        const sourceLanguage = (request.headers.get("x-aura-source-language") || "ja").trim().toLowerCase();
+        const contentType = (request.headers.get("content-type") || "application/octet-stream")
+          .split(";", 1)[0].trim().toLowerCase();
+        const claimedBytes = Number(request.headers.get("x-aura-audio-bytes") || 0);
+        let title = "";
+        try {
+          title = decodeURIComponent(request.headers.get("x-aura-title") || "").trim().slice(0, 240);
+        } catch {
+          return json({ ok: false, error: "invalid-title" }, 400);
+        }
+        const audioSource = (request.headers.get("x-aura-audio-source") || "browser-audio")
+          .replace(/[^a-z0-9._:-]/gi, "")
+          .slice(0, 64) || "browser-audio";
+        if (!["ja", "en"].includes(sourceLanguage)) {
+          return json({ ok: false, error: "invalid-source-language" }, 400);
+        }
+        if (![
+          "application/octet-stream",
+          "audio/aac",
+          "audio/mp4",
+          "audio/mpeg",
+          "audio/ogg",
+          "video/mp2t",
+        ].includes(contentType)) {
+          return json({ ok: false, error: "invalid-audio-content-type" }, 415);
+        }
+        if (!Number.isInteger(claimedBytes) || claimedBytes <= 0) {
+          return json({ ok: false, error: "invalid-audio-upload" }, 400);
+        }
+        if (claimedBytes > MAX_ASR_AUDIO_BYTES) {
+          return json({ ok: false, error: "subtitle-audio-too-large" }, 413);
+        }
+        if (!request.body) return json({ ok: false, error: "invalid-audio-upload" }, 400);
+        if (!await approvedAsrLicense(env, licenseKey)) {
+          return json({ ok: false, error: "pro-license-required" }, 403);
+        }
+        const endpoint = modalAsrUrl(env, "/submit-audio");
+        if (!endpoint) return json({ ok: false, error: "asr-not-configured" }, 503);
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "content-type": contentType,
+              authorization: `Bearer ${env.MODAL_ASR_TOKEN}`,
+              "x-aura-title": encodeURIComponent(title),
+              "x-aura-source-language": sourceLanguage,
+              "x-aura-audio-source": audioSource,
+              "x-aura-audio-bytes": String(claimedBytes),
+            },
+            body: request.body,
+          });
+          return forwardModalJson(response);
+        } catch {
+          return json({ ok: false, error: "asr-upstream-unreachable" }, 502);
+        }
+      }
+
       const body = await request.json().catch(() => null);
       const mediaUrl = typeof body?.mediaUrl === "string" ? body.mediaUrl.trim() : "";
       const sourceUrl = typeof body?.sourceUrl === "string" ? body.sourceUrl.trim() : "";

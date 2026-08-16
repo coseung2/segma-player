@@ -57,6 +57,7 @@ function parseByterangeValue(value) {
 export function parseHlsPlaylist(text, baseUrl) {
   const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const variants = [];
+  const audioRenditions = [];
   const segments = [];
   const keys = [];
   let pendingVariant = null;
@@ -72,6 +73,22 @@ export function parseHlsPlaylist(text, baseUrl) {
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex];
+    if (line.startsWith("#EXT-X-MEDIA:")) {
+      const attributes = splitAttributeList(line.slice("#EXT-X-MEDIA:".length));
+      if (String(attributes.TYPE || "").toUpperCase() === "AUDIO") {
+        const uri = absoluteUrl(attributes.URI, baseUrl);
+        if (uri) audioRenditions.push({
+          uri,
+          groupId: String(attributes["GROUP-ID"] || ""),
+          name: String(attributes.NAME || ""),
+          language: String(attributes.LANGUAGE || "").toLowerCase(),
+          default: String(attributes.DEFAULT || "").toUpperCase() === "YES",
+          autoselect: String(attributes.AUTOSELECT || "").toUpperCase() === "YES",
+          channels: String(attributes.CHANNELS || ""),
+        });
+      }
+      continue;
+    }
     if (line.startsWith("#EXT-X-STREAM-INF:")) {
       pendingVariant = splitAttributeList(line.slice("#EXT-X-STREAM-INF:".length));
       continue;
@@ -84,6 +101,8 @@ export function parseHlsPlaylist(text, baseUrl) {
         bandwidth: Number(pendingVariant.BANDWIDTH || 0),
         width: resolution.width,
         height: resolution.height,
+        audioGroup: String(pendingVariant.AUDIO || ""),
+        codecs: String(pendingVariant.CODECS || ""),
       });
       pendingVariant = null;
       continue;
@@ -155,7 +174,18 @@ export function parseHlsPlaylist(text, baseUrl) {
     byteranges[byteranges.length - 1] = { ...pendingByterange };
   }
 
-  return { variants, segments, byteranges, initUrl, initByterange, encrypted, byterange, mediaSequence, keys };
+  return {
+    variants,
+    audioRenditions,
+    segments,
+    byteranges,
+    initUrl,
+    initByterange,
+    encrypted,
+    byterange,
+    mediaSequence,
+    keys,
+  };
 }
 
 export function isHlsPlaylist(text, contentType = "") {
@@ -163,6 +193,17 @@ export function isHlsPlaylist(text, contentType = "") {
   if (/^#EXTM3U/.test(trimmed)) return true;
   if (trimmed.includes("#EXT-X-")) return true;
   return /mpegurl|vnd\.apple\.mpegurl/i.test(String(contentType || ""));
+}
+
+export function chooseHlsAudioRendition(renditions, preferredLanguage = "") {
+  const language = String(preferredLanguage || "").trim().toLowerCase();
+  return [...(Array.isArray(renditions) ? renditions : [])].sort((left, right) => {
+    const leftLanguage = language && left.language === language ? 1 : 0;
+    const rightLanguage = language && right.language === language ? 1 : 0;
+    return (rightLanguage - leftLanguage)
+      || (Number(right.default) - Number(left.default))
+      || (Number(right.autoselect) - Number(left.autoselect));
+  })[0] || null;
 }
 
 export function chooseHlsVariant(variants) {

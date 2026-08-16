@@ -122,6 +122,53 @@ test("pro subtitle jobs are proxied without exposing the worker secret", async (
   }
 });
 
+test("browser-prepared subtitle audio is proxied to the CPU audio ingest endpoint", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"F".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  const audio = new Blob([new Uint8Array([1, 2, 3, 4])], { type: "audio/mp4" });
+  const originalFetch = globalThis.fetch;
+  let forwarded = null;
+  globalThis.fetch = async (request, options) => {
+    const bytes = new Uint8Array(await new Response(options.body).arrayBuffer());
+    forwarded = { request: String(request), options, bytes };
+    return new Response(JSON.stringify({ ok: true, jobId: "audio-job-1" }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const response = await worker.fetch(new Request("https://aura.mdownloader.workers.dev/api/subtitles", {
+      method: "POST",
+      headers: {
+        "cf-connecting-ip": "203.0.113.31",
+        "content-type": "audio/mp4",
+        authorization: `Bearer ${key}`,
+        "x-aura-audio-upload": "1",
+        "x-aura-audio-bytes": "4",
+        "x-aura-audio-source": "hls-audio-rendition",
+        "x-aura-source-language": "ja",
+        "x-aura-title": encodeURIComponent("Audio sample"),
+      },
+      body: audio,
+    }), environment(kv, {
+      MODAL_ASR_URL: "https://aura-asr.modal.run",
+      MODAL_ASR_TOKEN: "modal-secret",
+    }));
+    assert.equal(response.status, 202);
+    assert.equal(forwarded.request, "https://aura-asr.modal.run/submit-audio");
+    assert.equal(forwarded.options.headers.authorization, "Bearer modal-secret");
+    assert.equal(forwarded.options.headers["content-type"], "audio/mp4");
+    assert.equal(decodeURIComponent(forwarded.options.headers["x-aura-title"]), "Audio sample");
+    assert.equal(forwarded.options.headers["x-aura-source-language"], "ja");
+    assert.equal(forwarded.options.headers["x-aura-audio-bytes"], "4");
+    assert.deepEqual([...forwarded.bytes], [1, 2, 3, 4]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("subtitle proxy rejects private media addresses and handles preflight", async () => {
   const worker = await loadWorker();
   const invalid = await worker.fetch(new Request("https://aura.mdownloader.workers.dev/api/subtitles", {

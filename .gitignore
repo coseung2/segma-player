@@ -1,5 +1,7 @@
 _metadata/
 node_modules/
+__pycache__/
+*.py[cod]
 *.crx
 *.pem
 native-host/target/

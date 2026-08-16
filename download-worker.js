@@ -2,6 +2,7 @@ import {
   createCheckpointingSink,
   downloadPreparedCandidate,
   prepareDownloadCandidate,
+  prepareSubtitleAudioUpload,
   probeProgressiveCandidateSize,
   setRuntimePlan,
 } from "./hls-download.js";
@@ -121,6 +122,7 @@ async function saveGeneratedSubtitleSrt(input, vtt) {
 function subtitleStatus(progress = {}) {
   const phase = progress.phase || "queued";
   const percent = Math.max(0, Math.min(99, Number(progress.progress) || 0));
+  if (phase === "uploading-audio") return `오디오 업로드 중… ${percent}%`;
   if (phase === "extracting-audio") return `오디오 추출 중… ${percent}%`;
   if (phase === "transcribing") return `음성 인식 중… ${percent}%`;
   if (phase === "translating") {
@@ -137,9 +139,30 @@ async function runSubtitleJob(jobId, input, licenseKey = "") {
   syncWorkerHeartbeat();
   await report(jobId, { status: "running", statusText: "자막 생성 대기 중…", folderName: "자막 폴더" });
   try {
+    let audioUpload = null;
+    try {
+      audioUpload = await prepareSubtitleAudioUpload(input, {
+        signal: controller.signal,
+        onStatus: (statusText) => void report(jobId, { status: "running", statusText }),
+      });
+      if (audioUpload) {
+        await report(jobId, {
+          status: "running",
+          statusText: `오디오 전송 준비 완료 · ${Math.round(audioUpload.bytes / 1048576)} MB`,
+        });
+      }
+    } catch (error) {
+      if (controller.signal.aborted || error?.code === "subtitle-audio-too-large") throw error;
+      audioUpload = null;
+      await report(jobId, {
+        status: "running",
+        statusText: "오디오 전용 경로를 사용할 수 없어 서버 준비 경로로 전환합니다.",
+      });
+    }
     const generated = await requestGeneratedSubtitle({
       ...input,
       licenseKey,
+      audioUpload,
       signal: controller.signal,
       onProgress: (progress) => void report(jobId, { status: "running", statusText: subtitleStatus(progress) }),
     });

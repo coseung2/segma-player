@@ -3,6 +3,7 @@ import { getStoredLicense, refreshLicense } from "./license.js";
 export const SUBTITLE_API_URL = "https://aura.mdownloader.workers.dev/api/subtitles";
 export const GENERATED_SUBTITLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_VTT_BYTES = 2_000_000;
+const MAX_AUDIO_UPLOAD_BYTES = 80 * 1024 * 1024;
 const POLL_INTERVAL_MS = 3_000;
 const POLL_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -37,9 +38,9 @@ export function generatedSubtitleCacheKey(input) {
   return `auraGeneratedSubtitle:${hashKey(cacheKeyInput(input))}`;
 }
 
-async function requestJson(url, options = {}, signal = null) {
+async function requestJson(url, options = {}, signal = null, timeoutMs = 20_000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const abort = () => controller.abort();
   signal?.addEventListener?.("abort", abort, { once: true });
   try {
@@ -74,7 +75,16 @@ function wait(milliseconds, signal) {
   });
 }
 
-export async function requestGeneratedSubtitle({ mediaUrl, sourceUrl = "", title = "", sourceLanguage = "ja", licenseKey = "", signal = null, onProgress = null } = {}) {
+export async function requestGeneratedSubtitle({
+  mediaUrl,
+  sourceUrl = "",
+  title = "",
+  sourceLanguage = "ja",
+  licenseKey = "",
+  audioUpload = null,
+  signal = null,
+  onProgress = null,
+} = {}) {
   let key = typeof licenseKey === "string" ? licenseKey.trim() : "";
   if (!key) {
     const storedLicense = await getStoredLicense();
@@ -85,11 +95,41 @@ export async function requestGeneratedSubtitle({ mediaUrl, sourceUrl = "", title
   if (!key) {
     throw new SubtitleGenerationError("pro-license-required");
   }
-  const submitted = await requestJson(SUBTITLE_API_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mediaUrl, sourceUrl, title, sourceLanguage: normalizedSourceLanguage(sourceLanguage), licenseKey: key }),
-  }, signal);
+  let submitted;
+  if (audioUpload?.blob instanceof Blob && audioUpload.blob.size > 0) {
+    if (audioUpload.blob.size > MAX_AUDIO_UPLOAD_BYTES) {
+      throw new SubtitleGenerationError("subtitle-audio-too-large");
+    }
+    const audioSource = String(audioUpload.source || "browser-audio")
+      .replace(/[^a-z0-9._:-]/gi, "")
+      .slice(0, 64) || "browser-audio";
+    onProgress?.({ phase: "uploading-audio", progress: 5, completed: 0, total: 0 });
+    submitted = await requestJson(SUBTITLE_API_URL, {
+      method: "POST",
+      headers: {
+        "content-type": audioUpload.blob.type || "application/octet-stream",
+        authorization: `Bearer ${key}`,
+        "x-aura-audio-upload": "1",
+        "x-aura-audio-bytes": String(audioUpload.blob.size),
+        "x-aura-audio-source": audioSource,
+        "x-aura-source-language": normalizedSourceLanguage(sourceLanguage),
+        "x-aura-title": encodeURIComponent(String(title || "").slice(0, 240)),
+      },
+      body: audioUpload.blob,
+    }, signal, 5 * 60 * 1000);
+  } else {
+    submitted = await requestJson(SUBTITLE_API_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mediaUrl,
+        sourceUrl,
+        title,
+        sourceLanguage: normalizedSourceLanguage(sourceLanguage),
+        licenseKey: key,
+      }),
+    }, signal);
+  }
   const jobId = typeof submitted.jobId === "string" ? submitted.jobId : "";
   if (!jobId) throw new SubtitleGenerationError("invalid-job");
   onProgress?.({ phase: "queued", progress: 0, completed: 0, total: 0 });

@@ -1,6 +1,7 @@
 import { canonicalHttpUrl, normalizeOriginPath } from "./candidate.js";
 import {
   activeKeyForSegment,
+  chooseHlsAudioRendition,
   chooseHlsVariant,
   decryptSegment,
   hlsFileExtension,
@@ -35,6 +36,7 @@ const CHECKPOINT_SEGMENT_INTERVAL = 48;
 const CHECKPOINT_BYTE_INTERVAL = 48 * 1024 * 1024;
 const SEGMENT_RETRY_DELAYS_MS = [0, 400, 1200];
 const SEGMENT_RETRY_STATUSES = new Set([403, 408, 425, 429, 500, 502, 503, 504]);
+export const MAX_SUBTITLE_AUDIO_UPLOAD_BYTES = 80 * 1024 * 1024;
 const CURRENT_PLAN = productPlan(PRODUCT_EDITION);
 let activePlan = CURRENT_PLAN;
 const DOOD_MEDIA_HOST_RE = /(?:doodcdn|doimg|d000d|dood\.|playmogo|cloudatacdn)\./i;
@@ -113,6 +115,7 @@ export function createDownloadContext({
   totalBytes = null,
   signal = null,
   candidate = null,
+  consumer = "download-media",
 } = {}) {
   return {
     onStatus: typeof onStatus === "function" ? onStatus : null,
@@ -125,6 +128,7 @@ export function createDownloadContext({
     frameId: Number.isInteger(frameId) ? frameId : null,
     tabId: Number.isInteger(tabId) ? tabId : null,
     candidate: candidate && typeof candidate === "object" ? candidate : null,
+    consumer: typeof consumer === "string" && consumer ? consumer : "download-media",
     refreshPromise: null,
     lastRefreshAt: 0,
     recordedHeadersByUrl: new Map(),
@@ -268,12 +272,22 @@ export async function probeProgressiveCandidateSize(candidate) {
     frameId: candidate.frameId,
     tabId: candidate.tabId,
     candidate,
+    consumer: "probe-progressive",
   });
   await loadRecordedHeaders(context);
   const session = await prepareProgressiveFetch(
     await progressiveSession(candidate.resourceUrl, candidate.pageUrl, candidate.tabId, context.signal),
     context,
   );
+  if (session.sourceFrameFallbackPreferred) {
+    return {
+      totalBytes: null,
+      rangeSupported: false,
+      contentKind: "unknown",
+      sourceFrameFallback: true,
+      fallbackReason: session.sourceFrameFallbackReason || "probe-unavailable",
+    };
+  }
   const probed = await probeDownloadTotalBytes(session.url, session.referrer, context);
   const contentType = String(probed.contentType || "");
   if (contentType && !/^(video|audio)\//i.test(contentType) && !/octet-stream/i.test(contentType)) {
@@ -432,6 +446,7 @@ async function withMediaFetchLease(url, referrer, consume, requestHeaders = {}, 
     type: "prepare-media-fetch",
     url,
     referrer,
+    consumer: context.consumer,
     sourceContext: { tabId: context.tabId, frameId: context.frameId, initiator: referrer },
   });
   const leaseId = prepared?.leaseId;
@@ -699,6 +714,7 @@ async function withParallelMediaFetchLease(url, referrer, context, run) {
     type: "prepare-media-fetch",
     url,
     referrer,
+    consumer: context.consumer,
     sourceContext: { tabId: context.tabId, frameId: context.frameId, initiator: referrer },
   });
   const leaseId = prepared?.leaseId;
@@ -764,6 +780,72 @@ async function loadMediaPlaylist(url, depth = 0, referrer, context = defaultDown
     ...parsed.segments,
   ]);
   return { ...parsed, baseUrl: loaded.url };
+}
+
+export async function prepareSubtitleAudioUpload({
+  mediaUrl,
+  sourceUrl,
+  sourceTabId = null,
+  sourceFrameId = null,
+  mediaType = "",
+  sourceLanguage = "",
+} = {}, {
+  signal = null,
+  onStatus = null,
+  maxBytes = MAX_SUBTITLE_AUDIO_UPLOAD_BYTES,
+} = {}) {
+  const hls = mediaType === "HLS_MASTER" || mediaType === "HLS_MEDIA"
+    || /\.m3u8(?:[?#]|$)/i.test(String(mediaUrl || ""));
+  if (!hls || !canonicalHttpUrl(mediaUrl) || !canonicalHttpUrl(sourceUrl)) return null;
+  const candidate = {
+    resourceUrl: mediaUrl,
+    pageUrl: sourceUrl,
+    mediaType: mediaType || "HLS_MASTER",
+    tabId: Number.isInteger(sourceTabId) ? sourceTabId : null,
+    frameId: Number.isInteger(sourceFrameId) ? sourceFrameId : null,
+  };
+  const context = createDownloadContext({
+    onStatus,
+    signal,
+    tabId: candidate.tabId,
+    frameId: candidate.frameId,
+    candidate,
+    hlsConcurrency: 4,
+    consumer: "subtitle-audio",
+  });
+  const master = await fetchText(mediaUrl, sourceUrl, context);
+  if (!isHlsPlaylist(master.text, master.contentType)) return null;
+  const parsedMaster = parseHlsPlaylist(master.text, master.url);
+  const rendition = chooseHlsAudioRendition(parsedMaster.audioRenditions, sourceLanguage);
+  if (!rendition) return null;
+  onStatus?.("자막용 오디오 스트림을 준비하는 중…");
+  const media = await loadMediaPlaylist(rendition.uri, 0, sourceUrl, context);
+  await prepareHlsKeys(media, sourceUrl, candidate.tabId, context);
+  const parts = [];
+  let totalBytes = 0;
+  for await (const chunk of mediaChunks(media, sourceUrl, candidate.tabId, context)) {
+    totalBytes += chunk.byteLength;
+    if (totalBytes > maxBytes) {
+      const error = new Error("subtitle-audio-too-large");
+      error.code = "subtitle-audio-too-large";
+      throw error;
+    }
+    parts.push(chunk);
+    onStatus?.(`자막용 오디오 전송 준비 중… ${Math.round(totalBytes / 1048576)} MB`);
+  }
+  if (!totalBytes) return null;
+  const extension = hlsFileExtension(media.initUrl, media.segments) === "mp4" ? "m4a" : "ts";
+  return {
+    blob: new Blob(parts, { type: extension === "m4a" ? "audio/mp4" : "video/mp2t" }),
+    filename: `aura-subtitle-audio.${extension}`,
+    source: "hls-audio-rendition",
+    bytes: totalBytes,
+    rendition: {
+      language: rendition.language || "",
+      name: rendition.name || "",
+      channels: rendition.channels || "",
+    },
+  };
 }
 
 export async function prepareHlsKeys(media, referrer, videoTabId = null, context = defaultDownloadContext) {
@@ -1101,7 +1183,9 @@ async function prepareProgressiveFetch(session, context = defaultDownloadContext
         await cancelProbeResponse(response);
         if ((!response?.ok && status !== 206) || !responseUrl) {
           const statusText = status == null ? "" : ` (HTTP ${status})`;
-          throw new Error(`인증된 영상 확인 요청에 실패했습니다${statusText}. 영상 페이지를 새로고침한 뒤 다시 시도해 주세요.`);
+          const probeError = new Error(`인증된 영상 확인 요청에 실패했습니다${statusText}. 영상 페이지를 새로고침한 뒤 다시 시도해 주세요.`);
+          probeError.httpStatus = status;
+          throw probeError;
         }
         return responseUrl;
       },
@@ -1109,21 +1193,25 @@ async function prepareProgressiveFetch(session, context = defaultDownloadContext
       context,
     );
   } catch (error) {
-    if (error?.code === "media-route-failed"
-      || String(error?.message || "").startsWith("인증된 영상 확인 요청에 실패했습니다")
-      || String(error?.message || "").startsWith("미디어 요청을 준비하지 못했습니다")) {
-      throw error;
-    }
     // Dood-compatible CDNs commonly allow navigation/download from their
-    // player frame while rejecting extension-origin fetch probes with CORS.
-    // Preserve the fresh URL and let saveProgressive use the source-frame
-    // handoff instead of failing before that fallback can run.
-    if (isDoodLikeHost(session.url)) {
+    // player frame while rejecting extension-origin probes with CORS or an
+    // explicit method/status response such as HTTP 405. Preserve the fresh URL
+    // and let saveProgressive use the source-frame handoff instead of failing
+    // before the already-supported fallback can run.
+    if (isDoodLikeHost(session.url) && error?.name !== "AbortError") {
       return {
         ...session,
         authenticatedProbeRequired: false,
         sourceFrameFallbackPreferred: true,
+        sourceFrameFallbackReason: Number.isInteger(error?.httpStatus)
+          ? `http-${error.httpStatus}`
+          : "probe-unavailable",
       };
+    }
+    if (error?.code === "media-route-failed"
+      || String(error?.message || "").startsWith("인증된 영상 확인 요청에 실패했습니다")
+      || String(error?.message || "").startsWith("미디어 요청을 준비하지 못했습니다")) {
+      throw error;
     }
     throw new Error("인증된 영상 확인 요청 중 네트워크 오류가 발생했습니다. 영상 페이지를 새로고침한 뒤 다시 시도해 주세요.");
   }
@@ -1537,6 +1625,7 @@ export async function prepareDownloadCandidate(candidate, {
     frameId: candidate.frameId,
     tabId: candidate.tabId,
     candidate,
+    consumer: "download-media",
   });
   await loadRecordedHeaders(context);
   const progressive = candidate.mediaType === "PROGRESSIVE";

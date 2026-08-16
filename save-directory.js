@@ -123,6 +123,24 @@ export async function hasReadWritePermission(handle) {
   }
 }
 
+// A download button is a user gesture. Use that gesture to renew the stored
+// handle before the offscreen worker starts, because the worker cannot request
+// a File System Access permission by itself.
+export async function renewSaveDirectoryPermission() {
+  const handle = await getStoredSaveDirectory();
+  if (!handle) return null;
+  try {
+    const requested = await handle.requestPermission?.({ mode: "readwrite" });
+    if (requested === "granted") {
+      await storeSaveDirectory(handle);
+      return handle;
+    }
+  } catch {
+    // The caller may still fall back to the existing picker flow.
+  }
+  return null;
+}
+
 export async function ensureSaveDirectory({ pick = false } = {}) {
   if (pick && typeof showDirectoryPicker === "function") {
     let handle = null;

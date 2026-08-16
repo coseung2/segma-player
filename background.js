@@ -249,40 +249,89 @@ async function forgetDownloadIntent(jobId) {
   await persistDownloadIntents().catch(() => {});
 }
 
-function activeDownloadJobSignature() {
-  return [...downloadJobs.values()]
-    .filter((job) => ["queued", "running", "paused"].includes(job.status))
-    .map((job) => job.id)
-    .sort()
-    .join(",");
-}
-
-let lastDownloadOverlaySignature = "";
-
-async function syncDownloadOverlayForTab(tabId) {
-  if (!Number.isInteger(tabId)) return;
+async function syncDownloadOverlayForTab(tabId, jobIds = []) {
+  if (!Number.isInteger(tabId)) return false;
+  // Existing tabs keep the old content-script closure across extension
+  // updates. Inject the current guarded script before delivery so an old V3
+  // listener cannot leave the tab with only the Aura-AdBlock-hidden host.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      files: ["content.js"],
+      injectImmediately: true,
+    });
+  } catch {
+    // Restricted browser pages cannot host an in-page overlay.
+  }
+  const visibleJobIds = [...new Set((Array.isArray(jobIds) ? jobIds : [])
+    .filter((jobId) => typeof jobId === "string" && jobId))]
+    .slice(0, 3);
+  const deliver = async () => {
+    const response = await chrome.tabs.sendMessage(
+      tabId,
+      {
+        type: "show-download-overlay",
+        ...(visibleJobIds.length ? { jobIds: visibleJobIds } : {}),
+      },
+      { frameId: 0 },
+    );
+    return response?.ok === true;
+  };
+  // A download can be queued while its source tab is navigating.  Do not
+  // consider a fire-and-forget message delivered: wait for the top-frame
+  // content script to acknowledge it, including after a slow site injects
+  // the script at document_start.
   for (const delay of [0, 250, 1_000]) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     try {
-      await chrome.tabs.sendMessage(tabId, { type: "show-download-overlay" });
-      return;
+      if (await deliver()) return true;
     } catch {
       // The active tab may not host the content script yet.
     }
   }
+  // Some sites replace the document while a download begins.  Explicitly
+  // inject the already-guarded content script into frame zero, then retry the
+  // acknowledgement. This does not depend on the site's own scripts or CSP.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      files: ["content.js"],
+      injectImmediately: true,
+    });
+  } catch {
+    // Restricted browser pages cannot host an in-page overlay.
+  }
+  for (const delay of [0, 250, 1_000, 3_000]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      if (await deliver()) return true;
+    } catch {
+      // Keep the popup/download-job UI usable if the page rejects injection.
+    }
+  }
+  return false;
 }
 
-async function syncDownloadOverlayForActiveTab() {
-  const signature = activeDownloadJobSignature();
-  if (signature === lastDownloadOverlaySignature) return;
-  lastDownloadOverlaySignature = signature;
-  if (!signature) return;
+async function syncDownloadOverlayForAllTabs(jobIds = []) {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch {
+    return;
+  }
+  const eligibleTabs = tabs.filter((tab) => Number.isInteger(tab?.id)
+    && /^https?:\/\//i.test(String(tab.url || "")));
+  await Promise.allSettled(eligibleTabs.map((tab) => syncDownloadOverlayForTab(tab.id, jobIds)));
+}
+
+async function syncDownloadOverlayForActiveTab(changedJobId = "") {
+  await downloadJobsReady;
   const targetTabIds = new Set();
   for (const [jobId, sourceTabId] of jobSourceTabs) {
     const job = downloadJobs.get(jobId);
-    if (job && ["queued", "running", "paused"].includes(job.status) && Number.isInteger(sourceTabId)) {
-      targetTabIds.add(sourceTabId);
-    }
+    if (!job || (changedJobId && jobId !== changedJobId)) continue;
+    if (!changedJobId && !["queued", "running", "paused"].includes(job.status)) continue;
+    if (Number.isInteger(sourceTabId)) targetTabIds.add(sourceTabId);
   }
   try {
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -291,10 +340,15 @@ async function syncDownloadOverlayForActiveTab() {
   } catch {
     // Fall through with whatever source tabs were already collected.
   }
-  for (const tabId of targetTabIds) await syncDownloadOverlayForTab(tabId);
+  for (const tabId of targetTabIds) {
+    await syncDownloadOverlayForTab(tabId, changedJobId ? [changedJobId] : []);
+  }
 }
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
+  // The content script refreshes the shared job list after this message.
+  // Keep tab activation delivery small and deterministic, as in the known
+  // working link-input/YouTube path.
   void syncDownloadOverlayForTab(tabId);
 });
 
@@ -307,7 +361,7 @@ async function patchDownloadJob(jobId, patch) {
   if (["completed", "failed", "cancelled"].includes(next.status)) {
     await forgetDownloadIntent(jobId);
   }
-  void syncDownloadOverlayForActiveTab();
+  void syncDownloadOverlayForActiveTab(jobId);
   await persistDownloadJobs().catch(() => {});
   void chrome.runtime.sendMessage({ type: "download-jobs-changed" }).catch(() => {});
   syncWorkerLifecycleAlarm();
@@ -643,8 +697,12 @@ function validDownloadWorkerSender(sender) {
   return exactExtensionPageSender(sender, "download-worker.html");
 }
 
+function validPlayerPageSender(sender) {
+  return exactExtensionPageSender(sender, "player.html");
+}
+
 function validPlayerSender(sender) {
-  return exactExtensionPageSender(sender, "player.html")
+  return validPlayerPageSender(sender)
     && Number.isInteger(sender.tab?.id) && sender.tab.id > 0;
 }
 
@@ -845,21 +903,36 @@ async function hasDownloadWorkerDocument() {
 }
 
 async function ensureDownloadWorker() {
-  if (await hasDownloadWorkerDocument()) return;
-  if (!offscreenCreatePromise) {
-    offscreenCreatePromise = chrome.offscreen.createDocument({
-      url: "download-worker.html",
-      reasons: ["BLOBS"],
-      justification: "Download detected media into the user-selected folder without opening a browser tab.",
-    }).finally(() => { offscreenCreatePromise = null; });
+  if (!await hasDownloadWorkerDocument()) {
+    if (!offscreenCreatePromise) {
+      offscreenCreatePromise = chrome.offscreen.createDocument({
+        url: "download-worker.html",
+        reasons: ["BLOBS"],
+        justification: "Download detected media into the user-selected folder without opening a browser tab.",
+      }).finally(() => { offscreenCreatePromise = null; });
+    }
+    await offscreenCreatePromise;
   }
-  await offscreenCreatePromise;
+  // createDocument resolves before the document has evaluated its message
+  // listeners. Do not send the first job into that startup window: a subtitle
+  // request would otherwise look accepted in the player, then fail instantly.
+  let lastError = null;
+  for (const delay of [0, 50, 150, 400, 1_000]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      const state = await chrome.runtime.sendMessage({ type: "download-worker-state" });
+      if (state?.ok) return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("download-worker-unavailable");
 }
 
 async function dispatchMediaDownload(jobId, candidate) {
   try {
     if (terminalDownloadJob(downloadJobs.get(jobId))) return;
-    const transferCandidate = await refreshCandidateFromSourceFrame(candidate);
+    const transferCandidate = await resolvePlayerCandidate(candidate);
     await ensureDownloadWorker();
     if (terminalDownloadJob(downloadJobs.get(jobId))) return;
     const accepted = await chrome.runtime.sendMessage({
@@ -878,6 +951,51 @@ async function dispatchMediaDownload(jobId, candidate) {
     });
     jobSourceTabs.delete(jobId);
   }
+}
+
+async function startSubtitleGeneration(input) {
+  const mediaUrl = canonicalHttpUrl(input?.mediaUrl)?.href || "";
+  const sourceUrl = input?.sourceUrl ? canonicalHttpUrl(input.sourceUrl)?.href || "" : "";
+  const sourceTabId = Number.isInteger(input?.sourceTabId) && input.sourceTabId > 0 ? input.sourceTabId : null;
+  const sourceLanguage = input?.sourceLanguage === "en" ? "en" : "ja";
+  const title = String(input?.title || "영상 자막").trim().slice(0, 240) || "영상 자막";
+  if (!mediaUrl || input?.sourceUrl && !sourceUrl) throw new Error("invalid-media-url");
+  if ((await resolveEdition()) !== "pro") throw new Error("pro-license-required");
+  await refreshLicense();
+  const license = await getStoredLicense();
+  if (license?.edition !== "pro" || typeof license.key !== "string" || !license.key) {
+    throw new Error("pro-license-required");
+  }
+  await downloadJobsReady;
+  const jobId = crypto.randomUUID();
+  const subtitleInput = { mediaUrl, sourceUrl, title, sourceLanguage, sourceTabId };
+  downloadJobs.set(jobId, createDownloadJob({
+    id: jobId,
+    title,
+    mediaType: "SUBTITLE",
+    folderName: "자막 폴더",
+    retryPayload: { kind: "subtitle", input: subtitleInput },
+  }));
+  if (sourceTabId !== null) jobSourceTabs.set(jobId, sourceTabId);
+  await persistDownloadJobs();
+  void syncDownloadOverlayForAllTabs([jobId]);
+  await ensureDownloadWorker();
+  const accepted = await chrome.runtime.sendMessage({
+    type: "run-subtitle-job",
+    jobId,
+    input: subtitleInput,
+    licenseKey: license.key,
+  });
+  if (!accepted?.ok) {
+    await patchDownloadJob(jobId, {
+      status: "failed",
+      statusText: "자막 생성 작업을 시작하지 못했습니다.",
+      error: accepted?.error || "subtitle-worker-unavailable",
+    });
+    throw new Error(accepted?.error || "subtitle-worker-unavailable");
+  }
+  await patchDownloadJob(jobId, { status: "running", statusText: "자막 생성 대기 중…" });
+  return { jobId };
 }
 
 // Tab-focus pausing is owned by the background service worker because the
@@ -999,7 +1117,7 @@ async function queueMediaDownload(candidate) {
     retryPayload: { kind: "media", candidate: structuredClone(candidate) },
   });
   downloadJobs.set(jobId, job);
-  if (!plan.backgroundDownloads && Number.isInteger(candidate?.tabId) && candidate.tabId > 0) {
+  if (Number.isInteger(candidate?.tabId) && candidate.tabId > 0) {
     jobSourceTabs.set(jobId, candidate.tabId);
   }
   await Promise.all([
@@ -1007,9 +1125,7 @@ async function queueMediaDownload(candidate) {
     rememberDownloadIntent(jobId, candidate).catch(() => {}),
   ]);
   syncWorkerLifecycleAlarm();
-  if (Number.isInteger(candidate?.tabId) && candidate.tabId > 0) {
-    void syncDownloadOverlayForTab(candidate.tabId);
-  }
+  void syncDownloadOverlayForAllTabs([jobId]);
   void syncDownloadOverlayForActiveTab();
   void dispatchMediaDownload(jobId, candidate);
   return { mode, jobId };
@@ -1038,6 +1154,9 @@ async function retryDownloadJob(jobId) {
   }
   if (payload.kind === "youtube") {
     return startYouTubeDownload(payload.url, payload.quality, { resumeFromJobId: jobId });
+  }
+  if (payload.kind === "subtitle" && payload.input) {
+    return startSubtitleGeneration(payload.input);
   }
   throw new Error("download-job-not-retryable");
 }
@@ -1308,6 +1427,22 @@ function bestPlaybackCandidateForTab(tabId, previousCandidate = null) {
   return ranked[0] || null;
 }
 
+function alternatePlaybackCandidateForTab(tabId, previousCandidate = null) {
+  rerankTabCandidates(tabId);
+  const family = playbackMediaFamily(previousCandidate?.mediaType);
+  const currentUrl = canonicalHttpUrl(previousCandidate?.resourceUrl)?.href || "";
+  return [...candidates.values()]
+    .filter((candidate) => candidate.tabId === tabId
+      && isDownloadableMediaType(candidate.mediaType)
+      && !candidate.likelyAdvertisement
+      && (!family || playbackMediaFamily(candidate.mediaType) === family)
+      && canonicalHttpUrl(candidate.resourceUrl)?.href !== currentUrl
+      && !isLikelyHlsSegmentUrl(candidate.resourceUrl))
+    .sort((left, right) => (Number(right.main) - Number(left.main))
+      || (Number(right.score) - Number(left.score))
+      || (Number(right.lastObservedAt) - Number(left.lastObservedAt)))[0] || null;
+}
+
 function playbackSessionPayload(session) {
   const candidate = session?.candidate;
   if (!candidate || !canonicalHttpUrl(candidate.resourceUrl) || !canonicalHttpUrl(candidate.pageUrl)) return null;
@@ -1328,6 +1463,30 @@ function playbackSessionPayload(session) {
   });
 }
 
+async function resolvePlayerCandidate(candidate) {
+  const fresh = await refreshCandidateFromSourceFrame(candidate);
+  if (!looksLikePlayerPage(fresh?.resourceUrl)) return fresh;
+  const resolved = await playerGraphResolver.resolve(fresh.resourceUrl);
+  if (!resolved?.url) return fresh;
+  const resolvedCandidate = makeCandidate({
+    pageTitle: fresh.pageTitle,
+    pageUrl: resolved.referrer || fresh.pageUrl,
+    resourceUrl: resolved.url,
+    contentType: resolved.type === "hls" ? "application/vnd.apple.mpegurl" : "video/mp4",
+    likelyAdvertisement: fresh.likelyAdvertisement,
+    tabId: fresh.tabId,
+    frameId: fresh.frameId,
+    main: fresh.main,
+    explicitMain: fresh.explicitMain,
+    detectionSource: "player-page-resolver",
+    confidence: 100,
+    observedAt: Date.now(),
+  });
+  if (!resolvedCandidate) return fresh;
+  resolvedCandidate.id = fresh.id;
+  return resolvedCandidate;
+}
+
 async function createPlaybackSessionForCandidate(candidateId, sourceUrl = "") {
   await downloadJobsReady;
   const candidate = [...candidates.values()].find((item) => item.id === candidateId);
@@ -1335,7 +1494,7 @@ async function createPlaybackSessionForCandidate(candidateId, sourceUrl = "") {
     || isLikelyHlsSegmentUrl(candidate.resourceUrl) || candidate.likelyAdvertisement) {
     return { ok: false, error: "candidate-not-found" };
   }
-  const fresh = await refreshCandidateFromSourceFrame(candidate);
+  const fresh = await resolvePlayerCandidate(candidate);
   const session = playbackSessions.create(fresh, { sourceUrl });
   if (!session) return { ok: false, error: "playback-session-unavailable" };
   await persistPlaybackSessions().catch(() => {});
@@ -1355,7 +1514,8 @@ async function createPlaybackSessionFromTab(sourceTabId, sourceUrl = "", previou
     return { ok: false, error: "invalid-source-tab" };
   }
   const previousCandidate = previousMediaType ? { mediaType: previousMediaType } : null;
-  const candidate = bestPlaybackCandidateForTab(sourceTabId, previousCandidate);
+  const selected = bestPlaybackCandidateForTab(sourceTabId, previousCandidate);
+  const candidate = selected ? await resolvePlayerCandidate(selected) : null;
   if (!candidate) return { ok: false, error: "source-media-not-detected" };
   const session = playbackSessions.create(candidate, { sourceUrl });
   if (!session) return { ok: false, error: "playback-session-unavailable" };
@@ -1364,22 +1524,32 @@ async function createPlaybackSessionFromTab(sourceTabId, sourceUrl = "", previou
   return payload ? { ok: true, session: payload } : { ok: false, error: "playback-session-invalid" };
 }
 
-async function resolvePlaybackSession(sessionId, { forceRefresh = false, sourceTabId = null } = {}) {
+async function resolvePlaybackSession(sessionId, {
+  forceRefresh = false,
+  sourceTabId = null,
+  alternate = false,
+} = {}) {
   await downloadJobsReady;
   let session = playbackSessions.get(sessionId);
   if (!session) return { ok: false, error: "playback-session-expired" };
   let candidate = session.candidate;
-  if (Number.isInteger(sourceTabId) && sourceTabId > 0) {
-    const replacement = bestPlaybackCandidateForTab(sourceTabId, candidate);
+  const candidateTabId = Number.isInteger(sourceTabId) && sourceTabId > 0
+    ? sourceTabId
+    : candidate.tabId;
+  if (Number.isInteger(candidateTabId) && candidateTabId > 0) {
+    const replacement = alternate
+      ? alternatePlaybackCandidateForTab(candidateTabId, candidate)
+      : bestPlaybackCandidateForTab(candidateTabId, candidate);
     if (!replacement) return { ok: false, error: "source-media-not-detected" };
     let sourceUrl = session.sourceUrl;
     try {
-      const tab = await chrome.tabs.get(sourceTabId);
+      const tab = await chrome.tabs.get(candidateTabId);
       sourceUrl = canonicalHttpUrl(tab?.url)?.href || sourceUrl;
     } catch {
       // Keep the original source URL when the newly opened tab already closed.
     }
-    session = playbackSessions.updateCandidate(sessionId, replacement, { sourceUrl });
+    const resolvedReplacement = await resolvePlayerCandidate(replacement);
+    session = playbackSessions.updateCandidate(sessionId, resolvedReplacement, { sourceUrl });
   } else {
     const nearExpiry = candidate.tokenized
       && Number.isFinite(candidate.expiresAt)
@@ -1480,6 +1650,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "complete") {
+    if (hasActiveDownloadJobs()) void syncDownloadOverlayForTab(tabId);
+    return;
+  }
   if (changeInfo.status !== "loading" || !changeInfo.url) return;
   mainFramesByTab.delete(tabId);
   frameLayoutsByTab.delete(tabId);
@@ -1642,6 +1816,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "start-subtitle-generation" && validPlayerPageSender(sender)) {
+    startSubtitleGeneration(message.input).then(
+      (result) => sendResponse({ ok: true, ...result }),
+      (error) => sendResponse({ ok: false, error: error?.message || "subtitle-generation-failed" }),
+    );
+    return true;
+  }
+
   if (message?.type === "create-playback-session" && playbackLauncherSender(sender)) {
     createPlaybackSessionForCandidate(message.candidateId, message.sourceUrl).then(
       sendResponse,
@@ -1674,7 +1856,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "refresh-playback-session"
     && playerOwnsPlaybackSession(sender, message.sessionId)) {
     const sourceTabId = Number.isInteger(message.sourceTabId) ? message.sourceTabId : null;
-    resolvePlaybackSession(message.sessionId, { forceRefresh: sourceTabId === null, sourceTabId }).then(
+    resolvePlaybackSession(message.sessionId, {
+      forceRefresh: sourceTabId === null,
+      sourceTabId,
+      alternate: message.alternate === true,
+    }).then(
       sendResponse,
       () => sendResponse({ ok: false, error: "playback-session-refresh-failed" }),
     );
@@ -1714,6 +1900,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         rows: toTextOnlyRows(filtered),
       });
     })();
+    return true;
+  }
+
+  if (message?.type === "probe-progressive-candidate" && playbackLauncherSender(sender)) {
+    const candidate = [...candidates.values()].find((item) => item.id === message.candidateId);
+    if (!candidate || candidate.mediaType !== MEDIA_TYPES.PROGRESSIVE) {
+      sendResponse({ ok: false, error: "progressive-candidate-not-found" });
+      return false;
+    }
+    (async () => {
+      const refreshed = await resolvePlayerCandidate(candidate);
+      await ensureDownloadWorker();
+      const probe = await chrome.runtime.sendMessage({
+        type: "worker-probe-progressive-candidate",
+        candidate: refreshed,
+      });
+      if (!probe?.ok) return { ok: false, error: probe?.error || "progressive-probe-failed" };
+      return {
+        ok: true,
+        candidateId: candidate.id,
+        totalBytes: Number.isFinite(probe.totalBytes) ? probe.totalBytes : null,
+        rangeSupported: probe.rangeSupported === true,
+        contentKind: ["media", "binary", "unknown"].includes(probe.contentKind) ? probe.contentKind : "unknown",
+      };
+    })().then(sendResponse, () => sendResponse({ ok: false, error: "progressive-probe-failed" }));
     return true;
   }
 

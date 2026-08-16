@@ -103,6 +103,7 @@ test("pro subtitle jobs are proxied without exposing the worker secret", async (
         mediaUrl: "https://cdn.example.test/video.mp4",
         sourceUrl: "https://example.test/watch/1",
         title: "Sample",
+        sourceLanguage: "en",
         licenseKey: key,
       }),
     }), environment(kv, {
@@ -115,6 +116,7 @@ test("pro subtitle jobs are proxied without exposing the worker secret", async (
     assert.equal(calls[0].request, "https://aura-asr.modal.run/submit");
     assert.equal(calls[0].options.headers.authorization, "Bearer modal-secret");
     assert.equal(JSON.parse(calls[0].options.body).licenseKey, undefined);
+    assert.equal(JSON.parse(calls[0].options.body).sourceLanguage, "en");
   } finally {
     globalThis.fetch = originalFetch;
   }

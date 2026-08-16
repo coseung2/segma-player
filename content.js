@@ -1,6 +1,6 @@
 (() => {
-  if (globalThis.__auraMediaDetectorInstalledV3) return;
-  globalThis.__auraMediaDetectorInstalledV3 = true;
+  if (globalThis.__auraMediaDetectorInstalledV4) return;
+  globalThis.__auraMediaDetectorInstalledV4 = true;
   const MAX_URL_BYTES = 4096;
   const MAX_TITLE_CHARACTERS = 512;
   const MAX_SEEN = 1000;
@@ -543,8 +543,11 @@
 
   function handleMessage(message, sendResponse) {
     if (message?.type === "show-download-overlay") {
-      showDownloadOverlay();
-      return false;
+      void showDownloadOverlay(message.jobIds).then(
+        (shown) => sendResponse({ ok: true, shown }),
+        () => sendResponse({ ok: false }),
+      );
+      return true;
     }
     if (message?.type === "rescan") {
       scheduleScan(true);
@@ -566,17 +569,21 @@
       downloadOverlayTimer = null;
     }
     shownDownloadJobIds.clear();
-    document.getElementById("aura-download-overlay-host")?.remove();
+    document.getElementById("aura-media-progress-host")?.remove();
   }
 
   function downloadOverlayHost() {
-    let host = document.getElementById("aura-download-overlay-host");
+    let host = document.getElementById("aura-media-progress-host");
     if (!host) {
       host = document.createElement("div");
-      host.id = "aura-download-overlay-host";
-      host.setAttribute("style", "position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;max-width:calc(100vw - 24px);font-family:system-ui,-apple-system,'Segoe UI',sans-serif;");
+      host.id = "aura-media-progress-host";
+      host.setAttribute("style", "position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;max-width:calc(100vw - 24px);font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:block !important;visibility:visible !important;opacity:1 !important;pointer-events:auto !important;");
       document.documentElement.append(host);
     }
+    host.style.setProperty("display", "block", "important");
+    host.style.setProperty("visibility", "visible", "important");
+    host.style.setProperty("opacity", "1", "important");
+    host.style.setProperty("pointer-events", "auto", "important");
     if (!host.shadowRoot) {
       try { host.attachShadow({ mode: "open" }); } catch { /* keep the light DOM fallback */ }
     }
@@ -736,11 +743,17 @@
     host.append(panel);
   }
 
-  function showDownloadOverlay() {
-    if (window !== window.top) return;
-    void syncOverlayLocale().then(() => refreshDownloadOverlay());
+  async function showDownloadOverlay(jobIds = []) {
+    if (window !== window.top) return false;
+    for (const jobId of Array.isArray(jobIds) ? jobIds : []) {
+      if (typeof jobId === "string" && jobId) shownDownloadJobIds.add(jobId);
+    }
     if (downloadOverlayTimer !== null) clearInterval(downloadOverlayTimer);
     downloadOverlayTimer = setInterval(() => void refreshDownloadOverlay(), 1000);
+    downloadOverlayTimer?.unref?.();
+    await syncOverlayLocale();
+    await refreshDownloadOverlay();
+    return true;
   }
 
   function scan() {
@@ -853,10 +866,14 @@
       // Buffered resource observation is unavailable; the cursor below covers it.
     }
   }
-  new MutationObserver((records) => {
+  const documentObserver = new MutationObserver((records) => {
     markRelevantDirty(records);
+    // Dood-compatible pages can close or replace themselves before
+    // document_idle. Resolve as soon as the parser inserts /pass_md5/ config.
+    if (doodDirty) void reportDoodPlayer();
     scheduleScan();
-  }).observe(document.documentElement, {
+  });
+  documentObserver.observe(document, {
     childList: true,
     subtree: true,
     characterData: true,

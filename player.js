@@ -1,7 +1,8 @@
 import Hls from "./vendor/hls.min.mjs";
 import { createContextualHlsLoader } from "./contextual-hls-loader.js";
-import { decodeSubtitleBytes, findSubtitleFile, cuesAt, parseSubtitle } from "./player-subtitle.js";
-import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
+import { cuesAt, cuesToSrt, decodeSubtitleBytes, findSubtitleFile, mediaIdentifier, parseSubtitle } from "./player-subtitle.js";
+import { createUniqueFile } from "./save-directory.js";
+import { ensureStoredSubtitleDirectory, getStoredSubtitleDirectory } from "./subtitle-folder.js";
 import {
   addToCollection,
   createCollectionFolder,
@@ -10,12 +11,7 @@ import {
 } from "./collection.js";
 import { resolveEdition } from "./license.js";
 import { loadLocale } from "./i18n.js";
-import {
-  loadGeneratedSubtitle,
-  requestGeneratedSubtitle,
-  storeGeneratedSubtitle,
-  SubtitleGenerationError,
-} from "./subtitle-generation.js";
+import { loadGeneratedSubtitle } from "./subtitle-generation.js";
 
 const NO_SUBTITLE_MESSAGES = {
   ko: "자막을 찾지 못했습니다 — 자막 없이 재생합니다",
@@ -25,10 +21,10 @@ const NO_SUBTITLE_MESSAGES = {
 };
 
 const AUTO_SUBTITLE_MESSAGES = {
-  ko: { generate: "자막 생성", generating: "자막 생성 중…", ready: "자막 준비됨", failed: "자막 생성 실패", empty: "인식된 대사가 없습니다" },
-  en: { generate: "Generate subtitles", generating: "Generating subtitles…", ready: "Subtitles ready", failed: "Subtitle generation failed", empty: "No speech was recognized" },
-  ja: { generate: "字幕を生成", generating: "字幕を生成中…", ready: "字幕を準備しました", failed: "字幕生成に失敗しました", empty: "認識できる発話がありません" },
-  zh: { generate: "生成字幕", generating: "正在生成字幕…", ready: "字幕已准备好", failed: "字幕生成失败", empty: "没有识别到语音" },
+  ko: { generate: "자막 생성", generating: "자막 생성 중…", ready: "자막 준비됨", failed: "자막 생성 실패", empty: "인식된 대사가 없습니다", save: "SRT 저장", saved: "SRT 저장됨", folder: "자막 폴더를 먼저 선택해 주세요", saveFailed: "SRT 저장 실패" },
+  en: { generate: "Generate subtitles", generating: "Generating subtitles…", ready: "Subtitles ready", failed: "Subtitle generation failed", empty: "No speech was recognized", save: "Save SRT", saved: "SRT saved", folder: "Select a subtitle folder first", saveFailed: "Could not save SRT" },
+  ja: { generate: "字幕を生成", generating: "字幕を生成中…", ready: "字幕を準備しました", failed: "字幕生成に失敗しました", empty: "認識できる発話がありません", save: "SRT を保存", saved: "SRT を保存しました", folder: "先に字幕フォルダを選択してください", saveFailed: "SRT を保存できませんでした" },
+  zh: { generate: "生成字幕", generating: "正在生成字幕…", ready: "字幕已准备好", failed: "字幕生成失败", empty: "没有识别到语音", save: "保存 SRT", saved: "已保存 SRT", folder: "请先选择字幕文件夹", saveFailed: "无法保存 SRT" },
 };
 
 const COLLECTION_MESSAGES = {
@@ -109,7 +105,6 @@ let playbackLeaseTimer = null;
 let hls = null;
 let directLeaseId = null;
 let directLeaseHeartbeat = null;
-
 const video = document.getElementById("video");
 const titleElement = document.getElementById("title");
 const subtitleElement = document.getElementById("subtitle");
@@ -117,6 +112,9 @@ const subtitleTag = document.getElementById("subtitle-tag");
 const message = document.getElementById("message");
 const saveButton = document.getElementById("save");
 const generateSubtitleButton = document.getElementById("generate-subtitle");
+const saveSubtitleButton = document.getElementById("save-subtitle");
+const subtitleSourceLanguage = document.getElementById("subtitle-source-language");
+const subtitleProgressElement = document.getElementById("subtitle-progress");
 const collectionPicker = document.getElementById("collection-picker");
 const collectionFolder = document.getElementById("collection-folder");
 const collectionFolderLabel = document.getElementById("collection-folder-label");
@@ -127,6 +125,12 @@ const collectionCreateFolderButton = document.getElementById("collection-create-
 const collectionCancelButton = document.getElementById("collection-cancel");
 const collectionConfirmButton = document.getElementById("collection-confirm");
 saveButton.hidden = true;
+let generatedSubtitleVtt = "";
+let subtitleProgressStartedAt = 0;
+let subtitleProgressTimer = null;
+let activeSubtitleJobId = "";
+let activeSubtitleInput = null;
+let subtitleJobPollTimer = null;
 
 function safeHttpUrl(value) {
   if (typeof value !== "string" || !value) return "";
@@ -208,7 +212,7 @@ async function preparePlaybackMedia() {
       type: "prepare-playback-media",
       tabId: tab.id,
       url: mediaUrl,
-      referrer: sourceUrl,
+      referrer: exactReferrer || sourceUrl,
     });
     if (!response?.ok || typeof response.leaseId !== "string") return;
     playbackTabId = tab.id;
@@ -299,13 +303,14 @@ async function resolveInitialPlayback() {
   return true;
 }
 
-async function refreshExistingSession(sourceTab = null) {
+async function refreshExistingSession(sourceTab = null, alternate = false) {
   if (!playbackSessionId) return null;
   try {
     const response = await chrome.runtime.sendMessage({
       type: "refresh-playback-session",
       sessionId: playbackSessionId,
       ...(Number.isInteger(sourceTab) ? { sourceTabId: sourceTab } : {}),
+      ...(alternate ? { alternate: true } : {}),
     });
     return playbackPayload(response);
   } catch {
@@ -406,6 +411,7 @@ async function refreshPlanGate() {
   proActive = (await resolveEdition()) === "pro";
   saveButton.hidden = tokenized;
   generateSubtitleButton.hidden = !proActive;
+  subtitleSourceLanguage.hidden = !proActive;
 }
 
 function setCollectionLocale(locale) {
@@ -542,21 +548,24 @@ async function stopPlayback() {
   }
 }
 
-async function attemptAutomaticRefresh() {
+async function attemptAutomaticRefresh({ alternate = false } = {}) {
   if (!playbackSessionId || automaticRefreshUsed) return false;
   automaticRefreshUsed = true;
-  const fresh = await refreshExistingSession();
+  const fresh = await refreshExistingSession(
+    alternate && Number.isInteger(sourceTabId) ? sourceTabId : null,
+    alternate,
+  );
   if (!fresh) return false;
   applyPlaybackPayload(fresh);
   await startPlayback();
   return true;
 }
 
-async function handlePlaybackFailure() {
+async function handlePlaybackFailure({ alternate = false } = {}) {
   if (recoveryInProgress) return;
   recoveryInProgress = true;
   try {
-    if (await attemptAutomaticRefresh()) return;
+    if (await attemptAutomaticRefresh({ alternate })) return;
     fail("재생에 실패했습니다. 주소가 만료되었거나 서버에서 거부했습니다.", {
       refresh: Boolean(sourceUrl),
     });
@@ -585,11 +594,65 @@ async function startHlsPlayback() {
       xhr.withCredentials = true;
     },
   });
+  globalThis.__auraPlaybackDiagnostics = { mediaAttached: false, manifestParsed: false, fragmentLoading: false, error: null };
+  hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+    globalThis.__auraPlaybackDiagnostics.mediaAttached = true;
+  });
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    globalThis.__auraPlaybackDiagnostics.manifestParsed = true;
+  });
+  hls.on(Hls.Events.FRAG_LOADING, () => {
+    globalThis.__auraPlaybackDiagnostics.fragmentLoading = true;
+  });
   hls.on(Hls.Events.ERROR, (_event, data) => {
-    if (data?.fatal) void handlePlaybackFailure();
+    globalThis.__auraPlaybackDiagnostics.error = {
+      type: String(data?.type || ""),
+      details: String(data?.details || ""),
+      fatal: data?.fatal === true,
+    };
+    const fragmentFailure = ["fragLoadError", "fragLoadTimeOut", "aborted"].includes(data?.details);
+    if (data?.fatal || fragmentFailure) void handlePlaybackFailure({ alternate: fragmentFailure });
   });
   hls.loadSource(mediaUrl);
   hls.attachMedia(video);
+}
+
+function subtitleProgressLabel(phase) {
+  const labels = {
+    queued: "대기 중",
+    "extracting-audio": "오디오 추출 중",
+    transcribing: "음성 인식 중",
+    translating: "한글 번역 중",
+    finalizing: "자막 정리 중",
+  };
+  return labels[phase] || "자막 생성 중";
+}
+
+function elapsedSubtitleTime() {
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - subtitleProgressStartedAt) / 1000));
+  return `${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
+}
+
+function renderSubtitleProgress({ phase = "queued", progress = 0, completed = 0, total = 0 } = {}) {
+  if (!subtitleProgressStartedAt) return;
+  const percent = Number.isFinite(progress) && progress > 0 ? ` ${Math.min(99, Math.floor(progress))}%` : "";
+  const count = phase === "translating" && total > 0 ? ` (${completed}/${total})` : "";
+  subtitleProgressElement.textContent = `${subtitleProgressLabel(phase)}${percent}${count} · ${elapsedSubtitleTime()}`;
+  subtitleProgressElement.hidden = false;
+}
+
+function startSubtitleProgress() {
+  subtitleProgressStartedAt = Date.now();
+  renderSubtitleProgress();
+  subtitleProgressTimer = setInterval(() => renderSubtitleProgress(), 1000);
+}
+
+function stopSubtitleProgress() {
+  if (subtitleProgressTimer !== null) clearInterval(subtitleProgressTimer);
+  subtitleProgressTimer = null;
+  subtitleProgressStartedAt = 0;
+  subtitleProgressElement.hidden = true;
+  subtitleProgressElement.textContent = "";
 }
 
 async function startProgressivePlayback() {
@@ -627,33 +690,99 @@ async function startPlayback() {
   else await startProgressivePlayback();
 }
 
-function subtitleGenerationErrorMessage(error) {
-  if (!(error instanceof SubtitleGenerationError)) return autoSubtitleMessages.failed;
-  if (error.code === "pro-license-required") return noSubtitleMessage;
-  if (error.code === "empty-subtitle") return autoSubtitleMessages.empty;
-  if (error.code === "aborted") return autoSubtitleMessages.failed;
-  return autoSubtitleMessages.failed;
+async function refreshSubtitleJob() {
+  if (!activeSubtitleJobId || !activeSubtitleInput) return;
+  const response = await chrome.runtime.sendMessage({ type: "list-download-jobs" }).catch(() => null);
+  const job = response?.jobs?.find((item) => item.id === activeSubtitleJobId);
+  if (!job) return;
+  if (["queued", "running", "paused"].includes(job.status)) {
+    subtitleProgressElement.textContent = `${job.statusText || "자막 생성 중…"} · ${elapsedSubtitleTime()}`;
+    subtitleProgressElement.hidden = false;
+    return;
+  }
+  const input = activeSubtitleInput;
+  activeSubtitleJobId = "";
+  activeSubtitleInput = null;
+  if (subtitleJobPollTimer !== null) clearInterval(subtitleJobPollTimer);
+  subtitleJobPollTimer = null;
+  stopSubtitleProgress();
+  generateSubtitleButton.disabled = false;
+  generateSubtitleButton.textContent = autoSubtitleMessages.generate;
+  if (job.status !== "completed") {
+    showToast(job.error || autoSubtitleMessages.failed);
+    return;
+  }
+  const generated = await loadGeneratedSubtitle(input);
+  if (!generated?.vtt || !bindSubtitleCues(parseSubtitle(generated.vtt))) {
+    showToast(autoSubtitleMessages.empty);
+    return;
+  }
+  generatedSubtitleVtt = generated.vtt;
+  saveSubtitleButton.hidden = false;
+  showToast(autoSubtitleMessages.ready);
+}
+
+function generatedSubtitleFilename() {
+  const title = String(pageTitle || "aura-subtitle")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .trim()
+    .slice(0, 120);
+  const identifier = mediaIdentifier(pageTitle) || mediaIdentifier(mediaUrl);
+  return `${title || identifier || "aura-subtitle"}.srt`;
+}
+
+async function saveGeneratedSrt({ requestPermission = false } = {}) {
+  if (!generatedSubtitleVtt) return "";
+  const directory = await ensureStoredSubtitleDirectory({ requestPermission });
+  if (!directory) return "";
+  const srt = cuesToSrt(parseSubtitle(generatedSubtitleVtt));
+  if (!srt) throw new Error("empty-srt");
+  const { fileHandle, filename } = await createUniqueFile(directory, generatedSubtitleFilename());
+  const writable = await fileHandle.createWritable();
+  try {
+    await writable.write(srt);
+  } finally {
+    await writable.close();
+  }
+  return filename;
 }
 
 async function generateSubtitles() {
   if (!proActive || generateSubtitleButton.disabled || !mediaUrl) return;
   generateSubtitleButton.disabled = true;
   generateSubtitleButton.textContent = autoSubtitleMessages.generating;
-  const input = { mediaUrl, sourceUrl, title: pageTitle };
+  startSubtitleProgress();
+  const input = {
+    mediaUrl,
+    sourceUrl,
+    title: pageTitle,
+    sourceLanguage: subtitleSourceLanguage.value === "en" ? "en" : "ja",
+    ...(Number.isInteger(sourceTabId) ? { sourceTabId } : {}),
+  };
   try {
     const cached = await loadGeneratedSubtitle(input);
-    const generated = cached || await requestGeneratedSubtitle(input);
-    if (!cached) await storeGeneratedSubtitle(input, generated);
-    if (!bindSubtitleCues(parseSubtitle(generated.vtt))) {
-      showToast(autoSubtitleMessages.empty);
+    if (cached?.vtt) {
+      generatedSubtitleVtt = cached.vtt;
+      if (!bindSubtitleCues(parseSubtitle(cached.vtt))) throw new Error("empty-subtitle");
+      saveSubtitleButton.hidden = false;
+      stopSubtitleProgress();
+      generateSubtitleButton.disabled = false;
+      generateSubtitleButton.textContent = autoSubtitleMessages.generate;
+      showToast(autoSubtitleMessages.ready);
       return;
     }
-    showToast(autoSubtitleMessages.ready);
+    const started = await chrome.runtime.sendMessage({ type: "start-subtitle-generation", input });
+    if (!started?.ok || !started.jobId) throw new Error(started?.error || "subtitle-generation-failed");
+    activeSubtitleJobId = started.jobId;
+    activeSubtitleInput = input;
+    subtitleJobPollTimer = setInterval(() => { void refreshSubtitleJob(); }, 1500);
+    await refreshSubtitleJob();
+    showToast("자막 생성은 다운로드 작업창에서 계속됩니다.");
   } catch (error) {
-    showToast(subtitleGenerationErrorMessage(error));
-  } finally {
+    stopSubtitleProgress();
     generateSubtitleButton.disabled = false;
     generateSubtitleButton.textContent = autoSubtitleMessages.generate;
+    showToast(error?.message === "pro-license-required" ? noSubtitleMessage : autoSubtitleMessages.failed);
   }
 }
 
@@ -665,6 +794,17 @@ saveButton.addEventListener("click", () => {
   void openCollectionPicker();
 });
 generateSubtitleButton.addEventListener("click", generateSubtitles);
+saveSubtitleButton.addEventListener("click", async () => {
+  saveSubtitleButton.disabled = true;
+  try {
+    const filename = await saveGeneratedSrt({ requestPermission: true });
+    showToast(filename ? `${filename} ${autoSubtitleMessages.saved}` : autoSubtitleMessages.folder);
+  } catch {
+    showToast(autoSubtitleMessages.saveFailed);
+  } finally {
+    saveSubtitleButton.disabled = false;
+  }
+});
 window.addEventListener("pagehide", releasePlaybackMedia, { once: true });
 collectionNewFolderButton.addEventListener("click", () => {
   collectionNewFolderRow.hidden = false;
@@ -678,11 +818,17 @@ collectionCancelButton.addEventListener("click", closeCollectionPicker);
 collectionConfirmButton.addEventListener("click", saveSelectedCollection);
 
 window.addEventListener("pagehide", () => {
+  if (subtitleJobPollTimer !== null) clearInterval(subtitleJobPollTimer);
+  subtitleJobPollTimer = null;
   if (hls) {
     try { hls.destroy(); } catch { /* best effort */ }
     hls = null;
   }
   void releaseDirectLease();
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "download-jobs-changed") void refreshSubtitleJob();
 });
 
 async function init() {
@@ -691,6 +837,7 @@ async function init() {
   noSubtitleMessage = NO_SUBTITLE_MESSAGES[locale] || NO_SUBTITLE_MESSAGES.ko;
   autoSubtitleMessages = AUTO_SUBTITLE_MESSAGES[locale] || AUTO_SUBTITLE_MESSAGES.ko;
   generateSubtitleButton.textContent = autoSubtitleMessages.generate;
+  saveSubtitleButton.textContent = autoSubtitleMessages.save;
   cleanupSubtitleSessions();
   await refreshPlanGate();
   if (!await resolveInitialPlayback()) {

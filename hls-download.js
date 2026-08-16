@@ -29,7 +29,8 @@ import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from
 
 export const MAX_HLS_SEGMENTS = 10_000;
 const SUPPORTED_KEY_METHODS = new Set(["AES-128", "AES-256"]);
-const DOWNLOAD_CONCURRENCY = 6;
+const FREE_HLS_DOWNLOAD_CONCURRENCY = 6;
+const PRO_HLS_DOWNLOAD_CONCURRENCY = 10;
 const CHECKPOINT_SEGMENT_INTERVAL = 48;
 const CHECKPOINT_BYTE_INTERVAL = 48 * 1024 * 1024;
 const SEGMENT_RETRY_DELAYS_MS = [0, 400, 1200];
@@ -95,12 +96,20 @@ export function setRuntimePlan(plan) {
   if (plan && typeof plan === "object") activePlan = plan;
 }
 
+export function hlsDownloadConcurrencyForPlan(plan = activePlan) {
+  // Segment CDNs often cap a single HLS request.  Pro has no throughput cap,
+  // so it can use additional ordered workers without changing the output
+  // format; the regular edition retains the established six-request ceiling.
+  return plan?.id === "pro" ? PRO_HLS_DOWNLOAD_CONCURRENCY : FREE_HLS_DOWNLOAD_CONCURRENCY;
+}
+
 export function createDownloadContext({
   onStatus = null,
   frameId = null,
   tabId = null,
   pauseGate = null,
   paceBytes = null,
+  hlsConcurrency = null,
   totalBytes = null,
   signal = null,
   candidate = null,
@@ -109,6 +118,8 @@ export function createDownloadContext({
     onStatus: typeof onStatus === "function" ? onStatus : null,
     pauseGate: typeof pauseGate === "function" ? pauseGate : null,
     paceBytes: typeof paceBytes === "function" ? paceBytes : null,
+    hlsConcurrency: Number.isInteger(hlsConcurrency) && hlsConcurrency > 0
+      ? hlsConcurrency : hlsDownloadConcurrencyForPlan(),
     totalBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : null,
     signal: signal && typeof signal === "object" ? signal : null,
     frameId: Number.isInteger(frameId) ? frameId : null,
@@ -246,6 +257,33 @@ async function probeDownloadTotalBytes(url, referrer, context = defaultDownloadC
     total: Number.isFinite(total) && total >= 0 ? total : null,
     contentType,
     rangeSupported,
+  };
+}
+
+export async function probeProgressiveCandidateSize(candidate) {
+  if (!candidate || candidate.mediaType !== "PROGRESSIVE" || typeof candidate.resourceUrl !== "string") {
+    throw new Error("invalid-progressive-candidate");
+  }
+  const context = createDownloadContext({
+    frameId: candidate.frameId,
+    tabId: candidate.tabId,
+    candidate,
+  });
+  await loadRecordedHeaders(context);
+  const session = await prepareProgressiveFetch(
+    await progressiveSession(candidate.resourceUrl, candidate.pageUrl, candidate.tabId, context.signal),
+    context,
+  );
+  const probed = await probeDownloadTotalBytes(session.url, session.referrer, context);
+  const contentType = String(probed.contentType || "");
+  if (contentType && !/^(video|audio)\//i.test(contentType) && !/octet-stream/i.test(contentType)) {
+    throw new Error("not-media-content");
+  }
+  return {
+    totalBytes: probed.total,
+    rangeSupported: probed.rangeSupported,
+    contentKind: /^(video|audio)\//i.test(contentType) ? "media"
+      : /octet-stream/i.test(contentType) ? "binary" : "unknown",
   };
 }
 
@@ -816,7 +854,11 @@ export async function* mediaChunks(
   const buffer = new Map();
   const ready = new Map();
   const claimWaiters = new Set();
-  const maxBuffered = Math.max(DOWNLOAD_CONCURRENCY * 2, 8);
+  const concurrency = Math.min(
+    Math.max(1, Number(context.hlsConcurrency) || hlsDownloadConcurrencyForPlan()),
+    total,
+  );
+  const maxBuffered = Math.max(concurrency * 2, 8);
   let consumed = resumeFrom;
   let nextFetch = resumeFrom;
   let failed = null;
@@ -866,7 +908,7 @@ export async function* mediaChunks(
     }
   }
 
-  const workers = Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, total) }, () => worker());
+  const workers = Array.from({ length: concurrency }, () => worker());
   try {
     for (let index = resumeFrom; index < total; index += 1) {
       await waitForChunk(index);
@@ -1360,7 +1402,7 @@ async function saveHlsToNative(
     throw new Error("분할 형식 영상은 저장 폴더 연결이 필요합니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
   }
   if (!(await hasReadWritePermission(saveHandle))) {
-    const error = new Error("저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다.");
+    const error = new Error("저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 권한을 확인해 주세요.");
     error.code = "save-permission-required";
     throw error;
   }
@@ -1490,6 +1532,7 @@ export async function prepareDownloadCandidate(candidate, {
     onStatus,
     pauseGate,
     paceBytes: paceBytes || createSpeedGate(activePlan.downloadSpeedLimitBytesPerSecond),
+    hlsConcurrency: hlsDownloadConcurrencyForPlan(activePlan),
     signal,
     frameId: candidate.frameId,
     tabId: candidate.tabId,

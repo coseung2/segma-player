@@ -176,7 +176,14 @@ export function canonicalHttpUrl(value) {
 
 export function isImageResourceUrl(value) {
   const url = canonicalHttpUrl(value);
-  return Boolean(url && /\.(?:avif|gif|jpe?g|png|webp)$/i.test(url.pathname));
+  return Boolean(url && /\.(?:avif|gif|ico|jpe?g|png|webp)$/i.test(url.pathname));
+}
+
+export function isKnownNonMediaResourceUrl(value) {
+  const url = canonicalHttpUrl(value);
+  if (!url) return false;
+  const pathname = url.pathname.toLowerCase();
+  return pathname === "/favicon.ico" || pathname.startsWith("/cdn-cgi/challenge-platform/");
 }
 
 export function isLikelyHlsSegmentUrl(value) {
@@ -200,6 +207,7 @@ export function mediaTypeForResource(resourceUrl, contentType = "") {
   try {
     const parsed = new URL(resourceUrl);
     if (isStreamtapePlayerPage(parsed.href)) return MEDIA_TYPES.UNKNOWN;
+    if (isKnownNonMediaResourceUrl(parsed.href)) return MEDIA_TYPES.UNKNOWN;
     pathname = parsed.pathname.toLowerCase();
   } catch {
     return MEDIA_TYPES.UNKNOWN;
@@ -275,7 +283,7 @@ function likelyAd(pageTitle, resourceUrl, pageUrl = "") {
   }
   return [resourceUrl, pageUrl].some((value) => {
     try {
-      return /(?:^|\.)(?:growcdnssedge\.com|mayzaent\.com|myavlive\.com|stripchat\.(?:com|mov)|snaptrckr\.fun)$/i
+      return /(?:^|\.)(?:growcdnssedge\.com|mayzaent\.com|myavlive\.com|rallytrck\.website|saawsedge\.com|storagexhd\.com|stripchat\.(?:com|mov)|snaptrckr\.fun|tsyndicate\.com)$/i
         .test(new URL(value).hostname);
     } catch {
       return false;
@@ -314,7 +322,7 @@ export function makeCandidate({
   const canonical = blob ? resourceUrl : canonicalHttpUrl(resourceUrl)?.href;
   const pageCanonical = canonicalHttpUrl(pageUrl);
   const origin = pageCanonical ? `${pageCanonical.protocol}//${pageCanonical.host}` : null;
-  if (!canonical || (!blob && (isImageResourceUrl(canonical) || isLikelyHlsSegmentUrl(canonical)
+  if (!canonical || (!blob && (isImageResourceUrl(canonical) || isKnownNonMediaResourceUrl(canonical) || isLikelyHlsSegmentUrl(canonical)
     || isLikelyPreviewResourceUrl(canonical))) || !origin
     || typeof pageTitle !== "string" || [...pageTitle].length > LIMITS.titleCharacters
     || /[\u0000-\u001f\u007f]/.test(pageTitle) || typeof contentType !== "string"
@@ -327,7 +335,8 @@ export function makeCandidate({
   // no ".mp4" extension and an application/octet-stream Content-Type, which
   // extension/content-type matching alone would drop.
   if (mediaType === MEDIA_TYPES.UNKNOWN && fromMediaElement && !blob
-    && !isImageResourceUrl(canonical) && !isStreamtapePlayerPage(canonical)) {
+    && !isImageResourceUrl(canonical) && !isKnownNonMediaResourceUrl(canonical)
+    && !isStreamtapePlayerPage(canonical)) {
     mediaType = MEDIA_TYPES.PROGRESSIVE;
   }
   if (mediaType === MEDIA_TYPES.UNKNOWN && !blob) return null;

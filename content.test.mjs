@@ -50,6 +50,7 @@ function baseEnvironment({
   let onMessage = null;
 
   delete globalThis.__auraMediaDetectorInstalledV3;
+  delete globalThis.__auraMediaDetectorInstalledV4;
   delete globalThis.__personalVpnMediaDetectorInstalledV3;
   globalThis.Element = class MockElement {};
   globalThis.window = globalThis;
@@ -452,6 +453,17 @@ test("an explicit rescan runs prompt detection", async () => {
   assert.equal(env.countScans, scansBefore + 1);
   await delay(180);
   assert.equal(env.countScans, scansBefore + 1, "no extra scan after the prompt rescan");
+});
+
+test("download overlay acknowledges its top-frame activation after the first refresh", async () => {
+  const env = baseEnvironment();
+  await importFreshContent();
+  const result = await new Promise((resolve) => {
+    const keepAlive = env.onMessage({ type: "show-download-overlay" }, {}, resolve);
+    assert.equal(keepAlive, true);
+  });
+  assert.deepEqual(result, { ok: true, shown: true });
+  assert.ok(env.sent.some((message) => message.type === "list-download-jobs"));
 });
 
 test("an explicit rescan interrupts a pending debounce without double scanning", async () => {

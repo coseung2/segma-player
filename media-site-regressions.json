@@ -2,6 +2,7 @@
   {
     "id": "missav-simd-012-ad-iframe-priority",
     "liveUrl": "https://missav123.com/ko/simd-012",
+    "recommendedAdblockMode": "site-allow",
     "settleMs": 12000,
     "expected": {
       "primaryHost": "surrit.com",
@@ -57,10 +58,12 @@
   {
     "id": "av19-level5-iframe-session",
     "liveUrl": "https://av19t.com/bj/39141",
+    "recommendedAdblockMode": "on",
     "settleMs": 15000,
     "expected": {
       "primaryHost": "media.nnvivi.site",
-      "primaryPlayer": "level5"
+      "primaryPlayer": "level5",
+      "livePrimaryHostFlexible": true
     },
     "candidates": [
       {
@@ -107,5 +110,64 @@
         "adHint": false
       }
     ]
+  },
+  {
+    "id": "asianporn-korean-bj-193189-live",
+    "liveOnly": true,
+    "liveUrl": "https://asianporn.li/video/193189/250214-korean-bj/",
+    "recommendedAdblockMode": "on",
+    "settleMs": 15000,
+    "expected": {
+      "minimumCandidateCount": 1,
+      "requireNonAdvertisementPrimary": true
+    }
+  },
+  {
+    "id": "onlyjerk-rikakodesu-airi-minami-live",
+    "liveOnly": true,
+    "liveUrl": "https://onlyjerk.net/2-asian-chicks-gets-smashed-by-latina-maximo-garcias-cock-rikakodesu-airi-minami/",
+    "recommendedAdblockMode": "on",
+    "settleMs": 15000,
+    "expected": {
+      "minimumCandidateCount": 1,
+      "requireNonAdvertisementPrimary": true
+    }
+  },
+  {
+    "id": "playmogo-j8k8xq9gilty-live",
+    "liveOnly": true,
+    "liveUrl": "https://playmogo.com/d/j8k8xq9gilty",
+    "recommendedAdblockMode": "site-allow",
+    "settleMs": 15000,
+    "expected": {
+      "minimumCandidateCount": 1,
+      "requireNonAdvertisementPrimary": true,
+      "rejectedPrimaryPathPrefixes": [
+        "/cdn-cgi/challenge-platform/",
+        "/favicon.ico"
+      ]
+    }
+  },
+  {
+    "id": "missav-docp-259-live",
+    "liveOnly": true,
+    "liveUrl": "https://missav123.com/dm31/ko/docp-259",
+    "recommendedAdblockMode": "site-allow",
+    "settleMs": 15000,
+    "expected": {
+      "minimumCandidateCount": 1,
+      "requireNonAdvertisementPrimary": true
+    }
+  },
+  {
+    "id": "beeg-0211503327065170-live",
+    "liveOnly": true,
+    "liveUrl": "https://beeg.com/-0211503327065170",
+    "recommendedAdblockMode": "on",
+    "settleMs": 15000,
+    "expected": {
+      "minimumCandidateCount": 1,
+      "requireNonAdvertisementPrimary": true
+    }
   }
 ]

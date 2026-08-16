@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   canonicalHttpUrl,
   isDownloadableMediaType,
+  isKnownNonMediaResourceUrl,
   isLikelyHlsSegmentUrl,
   isLikelyPreviewResourceUrl,
   MEDIA_TYPES,
@@ -119,6 +120,24 @@ test("keeps blob media-element sources as UNKNOWN instead of a broken button", (
   assert.equal(candidate?.mediaType, MEDIA_TYPES.UNKNOWN);
 });
 
+test("rejects browser chrome and Cloudflare challenge resources as media", () => {
+  const challengeUrl = "https://player.example/cdn-cgi/challenge-platform/h/g/flow/token";
+  const faviconUrl = "https://player.example/favicon.ico";
+  assert.equal(isKnownNonMediaResourceUrl(challengeUrl), true);
+  assert.equal(isKnownNonMediaResourceUrl(faviconUrl), true);
+  assert.equal(mediaTypeForResource(challengeUrl, "video/mp4"), MEDIA_TYPES.UNKNOWN);
+  assert.equal(mediaTypeForResource(faviconUrl, "video/mp4"), MEDIA_TYPES.UNKNOWN);
+  for (const resourceUrl of [challengeUrl, faviconUrl]) {
+    assert.equal(makeCandidate({
+      pageTitle: "Challenge",
+      pageUrl: "https://player.example/d/id",
+      resourceUrl,
+      contentType: "application/octet-stream",
+      fromMediaElement: true,
+    }), null);
+  }
+});
+
 test("canonical media URLs reject IPv6 forms that embed private IPv4", () => {
   for (const value of [
     "https://[64:ff9b::a00:1]/video.mp4",
@@ -156,6 +175,18 @@ test("marks known embedded advertising stream hosts without flagging the primary
     contentType: "application/vnd.apple.mpegurl",
   });
   assert.equal(advertisement?.likelyAdvertisement, true);
+  for (const [pageUrl, resourceUrl] of [
+    ["https://t.rallytrck.website/frame", "https://video.saawsedge.com/ad.mp4"],
+    ["https://cdn.storagexhd.com/frame", "https://cdn.storagexhd.com/ad.mp4"],
+    ["https://missav123.com/ad-frame", "https://cdn.tsyndicate.com/ad.mp4"],
+  ]) {
+    assert.equal(makeCandidate({
+      pageTitle: "Video",
+      pageUrl,
+      resourceUrl,
+      contentType: "video/mp4",
+    })?.likelyAdvertisement, true);
+  }
   assert.equal(primary?.likelyAdvertisement, false);
 });
 

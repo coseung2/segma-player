@@ -1,4 +1,5 @@
 import { canonicalHttpUrl, normalizeOriginPath } from "./candidate.js";
+import { looksLikePlayerPage } from "./player-page-resolver.js";
 
 const SOURCE_WEIGHTS = Object.freeze({
   "player-adapter": 48,
@@ -108,6 +109,11 @@ export function scoreCandidate(candidate, {
   } else if (candidate?.mediaType === "PROGRESSIVE") {
     score += 5;
     boundedReason(reasons, "direct-media", 5);
+  }
+
+  if (looksLikePlayerPage(candidate?.resourceUrl)) {
+    score -= 60;
+    boundedReason(reasons, "player-page-not-media", -60);
   }
 
   const observedFrameState = frameStateForCandidate(candidate, frameStates);

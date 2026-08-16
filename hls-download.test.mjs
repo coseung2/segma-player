@@ -9,6 +9,7 @@ const {
   createCheckpointingSink,
   createDownloadContext,
   dashTracksForPlan,
+  hlsDownloadConcurrencyForPlan,
   mediaChunks,
   prepareDownloadCandidate,
   prepareProgressiveFetch,
@@ -17,6 +18,11 @@ const {
   requestSourceFrameDownload,
   tryBrowserDownloadFallback,
 } = await import("./hls-download.js");
+
+test("Pro raises HLS segment parallelism without removing the regular edition cap", () => {
+  assert.equal(hlsDownloadConcurrencyForPlan({ id: "free" }), 6);
+  assert.equal(hlsDownloadConcurrencyForPlan({ id: "pro" }), 10);
+});
 
 test("checkpointing sink close is idempotent after a parallel save closes it", async () => {
   let closeCount = 0;

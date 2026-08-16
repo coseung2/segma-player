@@ -199,8 +199,12 @@ export default {
       const mediaUrl = typeof body?.mediaUrl === "string" ? body.mediaUrl.trim() : "";
       const sourceUrl = typeof body?.sourceUrl === "string" ? body.sourceUrl.trim() : "";
       const title = typeof body?.title === "string" ? body.title.trim().slice(0, 240) : "";
+      const sourceLanguage = typeof body?.sourceLanguage === "string" ? body.sourceLanguage.trim().toLowerCase() : "ja";
       if (!isSafeAsrUrl(mediaUrl) || (sourceUrl && !isSafeAsrUrl(sourceUrl))) {
         return json({ ok: false, error: "invalid-media-url" }, 400);
+      }
+      if (!["ja", "en"].includes(sourceLanguage)) {
+        return json({ ok: false, error: "invalid-source-language" }, 400);
       }
       if (!await approvedAsrLicense(env, body?.licenseKey)) {
         return json({ ok: false, error: "pro-license-required" }, 403);
@@ -214,7 +218,7 @@ export default {
             "content-type": "application/json",
             authorization: `Bearer ${env.MODAL_ASR_TOKEN}`,
           },
-          body: JSON.stringify({ mediaUrl, sourceUrl, title }),
+          body: JSON.stringify({ mediaUrl, sourceUrl, title, sourceLanguage }),
         });
         return forwardModalJson(response);
       } catch {

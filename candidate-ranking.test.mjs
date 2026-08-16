@@ -76,6 +76,35 @@ test("MissAV-style ad iframe loses to the actively playing surrit manifest", () 
   assert.ok(feature.score > advertisement.score);
 });
 
+test("Dood direct media outranks its /d/ player page", () => {
+  const playerPage = makeCandidate({
+    pageTitle: "Player",
+    pageUrl: "https://playmogo.com/d/example",
+    resourceUrl: "https://playmogo.com/d/example",
+    contentType: "video/mp4",
+    tabId: 9,
+    frameId: 0,
+    main: true,
+    detectionSource: "web-response",
+    confidence: 100,
+  });
+  const direct = makeCandidate({
+    pageTitle: "Player",
+    pageUrl: "https://playmogo.com/e/example",
+    resourceUrl: "https://i.doodcdn.io/getfile/example/video.mp4",
+    contentType: "video/mp4",
+    tabId: 9,
+    frameId: 0,
+    detectionSource: "player-adapter",
+    player: "dood",
+    confidence: 100,
+  });
+  const ranked = rankCandidates([playerPage, direct]);
+  assert.equal(ranked[0], direct);
+  assert.equal(direct.main, true);
+  assert.equal(playerPage.main, false);
+});
+
 test("Level5 player evidence and exact iframe playback state outrank incidental network HLS", () => {
   const level5 = hlsCandidate({
     pageUrl: "https://p.nnvivi.site/player/39141",

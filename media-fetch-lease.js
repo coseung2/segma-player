@@ -75,14 +75,13 @@ export function exactMediaFetchRule({ ruleId, tabId, url, referrer = "", request
   };
 }
 
-export function playbackMediaFetchRule({ ruleId, tabId, url, referrer = "" }) {
+export function playbackMediaFetchRule({ ruleId, tabId, url, referrer = "", requestHeaders = [] }) {
   const parsed = new URL(url);
   if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) throw new Error("invalid-playback-media-url");
-  const directory = parsed.pathname.slice(0, parsed.pathname.lastIndexOf("/") + 1) || "/";
-  const rule = exactMediaFetchRule({ ruleId, tabId, url, referrer });
+  const rule = exactMediaFetchRule({ ruleId, tabId, url, referrer, requestHeaders });
   delete rule.condition.regexFilter;
   delete rule.condition.urlFilter;
-  rule.condition.urlFilter = `|${parsed.origin}${directory}`;
+  rule.condition.urlFilter = `|${parsed.origin}/`;
   return rule;
 }
 

@@ -6,6 +6,12 @@ import { makeCandidate, normalizeOriginPath } from "./candidate.js";
 import { rankCandidates } from "./candidate-ranking.js";
 
 const fixtures = JSON.parse(await readFile(new URL("./media-site-regressions.json", import.meta.url), "utf8"));
+const PERMANENT_LIVE_TARGETS = Object.freeze([
+  "https://asianporn.li/video/193189/250214-korean-bj/",
+  "https://onlyjerk.net/2-asian-chicks-gets-smashed-by-latina-maximo-garcias-cock-rikakodesu-airi-minami/",
+  "https://playmogo.com/d/j8k8xq9gilty",
+  "https://beeg.com/-0211503327065170",
+]);
 
 function stateMap(value) {
   return new Map(Object.entries(value || {}).map(([frameId, state]) => [Number(frameId), state]));
@@ -15,7 +21,34 @@ function layoutMap(value) {
   return new Map((value || []).map((layout) => [normalizeOriginPath(layout.pageUrl), layout]));
 }
 
+test("permanent live media targets remain in the default monitor set", () => {
+  const configured = new Set(fixtures.map((fixture) => fixture.liveUrl));
+  for (const target of PERMANENT_LIVE_TARGETS) assert.equal(configured.has(target), true, target);
+});
+
 for (const fixture of fixtures) {
+  test(`site target schema: ${fixture.id}`, () => {
+    assert.match(fixture.id, /^[a-z0-9][a-z0-9-]+$/);
+    const liveUrl = new URL(fixture.liveUrl);
+    assert.equal(liveUrl.protocol, "https:");
+    assert.equal(Number.isFinite(fixture.settleMs) && fixture.settleMs >= 2_000, true);
+    assert.equal(typeof fixture.expected, "object");
+    assert.equal(["on", "quiet", "site-allow", "off"].includes(fixture.recommendedAdblockMode), true);
+    if (fixture.liveOnly) {
+      assert.equal(Array.isArray(fixture.candidates), false);
+      assert.equal(fixture.expected.minimumCandidateCount >= 1, true);
+      assert.equal(fixture.expected.requireNonAdvertisementPrimary, true);
+      if (fixture.expected.rejectedPrimaryPathPrefixes) {
+        assert.equal(fixture.expected.rejectedPrimaryPathPrefixes.every((prefix) => prefix.startsWith("/")), true);
+      }
+    } else {
+      assert.equal(Array.isArray(fixture.candidates) && fixture.candidates.length > 0, true);
+      assert.equal(typeof fixture.expected.primaryHost, "string");
+      if (fixture.expected.livePrimaryHostFlexible) assert.equal(typeof fixture.expected.primaryPlayer, "string");
+    }
+  });
+
+  if (fixture.liveOnly) continue;
   test(`site regression: ${fixture.id}`, () => {
     const candidates = fixture.candidates.map((candidate) => makeCandidate({
       pageTitle: candidate.pageTitle,

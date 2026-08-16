@@ -2,6 +2,7 @@ import {
   createCheckpointingSink,
   downloadPreparedCandidate,
   prepareDownloadCandidate,
+  probeProgressiveCandidateSize,
   setRuntimePlan,
 } from "./hls-download.js";
 import { parallelDownload } from "./parallel-download.js";
@@ -16,6 +17,9 @@ import {
   setDownloadCheckpoint,
 } from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
+import { cuesToSrt, mediaIdentifier, parseSubtitle } from "./player-subtitle.js";
+import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
+import { requestGeneratedSubtitle, storeGeneratedSubtitle } from "./subtitle-generation.js";
 import {
   MIN_HEARTBEAT_CADENCE_MS,
   heartbeatPortName,
@@ -85,6 +89,91 @@ function rememberCancelledJob(jobId) {
 
 async function report(jobId, patch) {
   await chrome.runtime.sendMessage({ type: "download-job-update", jobId, patch }).catch(() => {});
+}
+
+function subtitleFilename(title, mediaUrl) {
+  const safeTitle = String(title || "")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .trim()
+    .slice(0, 120);
+  return `${safeTitle || mediaIdentifier(mediaUrl) || "aura-subtitle"}.srt`;
+}
+
+async function saveGeneratedSubtitleSrt(input, vtt) {
+  const directory = await getStoredSubtitleDirectory();
+  if (!directory || !await hasReadWritePermission(directory)) {
+    const error = new Error("subtitle-save-permission-required");
+    error.code = "subtitle-save-permission-required";
+    throw error;
+  }
+  const srt = cuesToSrt(parseSubtitle(vtt));
+  if (!srt) throw new Error("empty-srt");
+  const { fileHandle, filename } = await createUniqueFile(directory, subtitleFilename(input.title, input.mediaUrl));
+  const writable = await fileHandle.createWritable();
+  try {
+    await writable.write(srt);
+  } finally {
+    await writable.close();
+  }
+  return { filename, folderName: directory.name || "자막 폴더" };
+}
+
+function subtitleStatus(progress = {}) {
+  const phase = progress.phase || "queued";
+  const percent = Math.max(0, Math.min(99, Number(progress.progress) || 0));
+  if (phase === "extracting-audio") return `오디오 추출 중… ${percent}%`;
+  if (phase === "transcribing") return `음성 인식 중… ${percent}%`;
+  if (phase === "translating") {
+    const suffix = progress.total > 0 ? ` (${progress.completed || 0}/${progress.total})` : "";
+    return `한글 번역 중… ${percent}%${suffix}`;
+  }
+  if (phase === "finalizing") return `자막 정리 중… ${percent}%`;
+  return "자막 생성 대기 중…";
+}
+
+async function runSubtitleJob(jobId, input, licenseKey = "") {
+  const controller = new AbortController();
+  runningJobs.set(jobId, { paused: false, sourceClosed: false, cancelled: false, lease: null, controller });
+  syncWorkerHeartbeat();
+  await report(jobId, { status: "running", statusText: "자막 생성 대기 중…", folderName: "자막 폴더" });
+  try {
+    const generated = await requestGeneratedSubtitle({
+      ...input,
+      licenseKey,
+      signal: controller.signal,
+      onProgress: (progress) => void report(jobId, { status: "running", statusText: subtitleStatus(progress) }),
+    });
+    if (controller.signal.aborted) throw cancellationError();
+    await storeGeneratedSubtitle(input, generated);
+    const saved = await saveGeneratedSubtitleSrt(input, generated.vtt);
+    await report(jobId, {
+      status: "completed",
+      statusText: `자막 저장 완료 · ${saved.filename}`,
+      folderName: saved.folderName,
+    });
+  } catch (error) {
+    const cancelled = controller.signal.aborted || error?.code === "download-cancelled";
+    const permissionExpired = error?.name === "NotAllowedError"
+      || error?.code === "save-permission-required";
+    const detail = cancelled ? "사용자가 자막 생성을 취소했습니다."
+      : (error?.code === "subtitle-save-permission-required"
+        ? "자막은 생성됐지만 폴더 쓰기 권한이 없습니다. 자막 폴더를 다시 선택해 주세요."
+        : (error?.code === "media-source-access-denied"
+          ? "영상 서버가 자막 서버의 접근을 차단했습니다. 이 사이트는 서버에서 직접 음성을 읽을 수 없습니다."
+          : (error?.code === "media-source-unavailable"
+            ? "영상 서버에서 음성을 읽지 못했습니다. 원본 페이지를 새로고침한 뒤 다시 시도해 주세요."
+            : (error instanceof Error ? error.message : "subtitle-generation-failed"))));
+    await report(jobId, {
+      status: cancelled ? "cancelled" : "failed",
+      statusText: cancelled ? detail : "자막 생성 실패",
+      error: cancelled ? "" : detail,
+      errorCode: error?.code || "subtitle-generation-failed",
+    });
+  } finally {
+    runningJobs.delete(jobId);
+    syncWorkerHeartbeat();
+    acceptedJobIds.delete(jobId);
+  }
 }
 
 function cancellationError() {
@@ -218,7 +307,7 @@ async function runParallelSave(message) {
       throw new Error("저장 폴더 권한이 없습니다. 다운로드 버튼을 다시 눌러 폴더를 선택해 주세요.");
     }
     if (!(await hasReadWritePermission(directoryHandle))) {
-      const error = new Error("저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 폴더를 선택해 주세요.");
+      const error = new Error("저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 권한을 확인해 주세요.");
       error.code = "save-permission-required";
       throw error;
     }
@@ -300,11 +389,13 @@ async function runParallelSave(message) {
       // Checkpoint best effort; the job still reports its failure below.
     }
     const detail = cancelled ? "사용자가 다운로드를 취소했습니다."
-      : (error instanceof Error ? error.message : "parallel-save-failed");
+      : permissionExpired ? "저장 폴더에 쓸 수 없습니다. 저장 폴더 권한을 확인해 주세요."
+        : (error instanceof Error ? error.message : "parallel-save-failed");
     await report(message.jobId, {
       status: cancelled ? "cancelled" : "failed",
       statusText: cancelled ? detail : "저장 실패",
       error: cancelled ? "" : detail,
+      ...(permissionExpired ? { errorCode: "save-permission-required" } : {}),
     });
   } finally {
     runningJobs.delete(message.jobId);
@@ -314,6 +405,13 @@ async function runParallelSave(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "worker-probe-progressive-candidate" && sender.id === chrome.runtime.id) {
+    probeProgressiveCandidateSize(message.candidate).then(
+      (probe) => sendResponse({ ok: true, ...probe }),
+      (error) => sendResponse({ ok: false, error: error?.message || "progressive-probe-failed" }),
+    );
+    return true;
+  }
   if (message?.type === "download-worker-state" && sender.id === chrome.runtime.id) {
     sendResponse({
       ok: true,
@@ -343,6 +441,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       pauseWaiters.delete(message.jobId);
       for (const resolve of waiters) resolve();
     }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === "run-subtitle-job" && sender.id === chrome.runtime.id) {
+    if (typeof message.jobId !== "string" || !message.input || typeof message.input !== "object") {
+      sendResponse({ ok: false, error: "invalid-subtitle-job" });
+      return false;
+    }
+    if (acceptedJobIds.has(message.jobId)) {
+      sendResponse({ ok: false, error: "duplicate-download-job" });
+      return false;
+    }
+    acceptedJobIds.add(message.jobId);
+    void runSubtitleJob(message.jobId, message.input, message.licenseKey);
     sendResponse({ ok: true });
     return false;
   }

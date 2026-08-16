@@ -4,7 +4,7 @@ import { downloadJobView, retryableDownloadJob } from "./download-job-view.js";
 import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
 import { productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
-import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
+import { ensureSaveDirectory, getStoredSaveDirectory, renewSaveDirectoryPermission } from "./save-directory.js";
 import {
   LOCALE_NAMES,
   LOCALE_STORAGE_KEY,
@@ -224,8 +224,18 @@ async function verifySaveFolderWritable(handle) {
 
 async function ensureSaveFolder({ forcePick = false } = {}) {
   if (!forcePick) {
+    const storedBeforeRenewal = await getStoredSaveDirectory();
+    const renewed = await renewSaveDirectoryPermission();
+    if (renewed && await verifySaveFolderWritable(renewed)) return renewed;
     const stored = await ensureSaveDirectory();
     if (stored && await verifySaveFolderWritable(stored)) return stored;
+    // A stored handle means the user already selected this folder. Do not
+    // reopen the picker on every permission refresh/update; the explicit
+    // folder-change action remains the place where a new folder is chosen.
+    if (storedBeforeRenewal) {
+      void refreshSaveStatus();
+      return null;
+    }
   }
   try {
     const picked = await ensureSaveDirectory({ pick: true });
@@ -528,11 +538,16 @@ function buildJobCard(job, { inline = false } = {}) {
       retry.addEventListener("click", async () => {
         retry.disabled = true;
         retry.textContent = t("action.retrying");
-        feedback.textContent = "";
+          feedback.textContent = "";
         try {
-          const folder = await ensureSaveFolder({ forcePick: job.errorCode === "save-permission-required" });
-          if (!folder) {
-            throw new Error(t("save.needFolder"));
+          if (job.mediaType !== "SUBTITLE") {
+            // Reuse the stored handle first. A worker restart/update can make
+            // its permission appear stale, but the popup click can renew that
+            // permission without asking the user to choose the same folder.
+            const folder = await ensureSaveFolder();
+            if (!folder) {
+              throw new Error(t("save.needFolder"));
+            }
           }
           const response = await chrome.runtime.sendMessage({
             type: "retry-download-job",

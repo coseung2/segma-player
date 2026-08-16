@@ -32,7 +32,7 @@ function segmentProgress(message) {
 }
 
 function percentProgress(message) {
-  const match = /(?:저장 중|서버 처리 중|내 기기로 전송 중|수신 중)…\s+(\d{1,3})%/.exec(message);
+  const match = /(?:저장 중|서버 처리 중|내 기기로 전송 중|수신 중|오디오 추출 중|음성 인식 중|한글 번역 중|자막 정리 중)…\s+(\d{1,3})%/.exec(message);
   if (!match) return null;
   const value = Number(match[1]);
   return Number.isFinite(value) ? boundedPercent(value) : null;
@@ -45,6 +45,7 @@ function stageKeyFor(status, message) {
   if (status === "failed") return "stage.stopped";
   if (status === "cancelled") return "stage.cancelled";
   if (/영상 정보|구간\s+\d+개/.test(message)) return "stage.inspecting";
+  if (/자막 생성|오디오 추출|음성 인식|한글 번역|자막 정리/.test(message)) return "stage.working";
   if (/저장 중…\s+\d+\s*\//.test(message)) return "stage.saving";
   if (/저장 중|영상을 저장/.test(message)) return "stage.writing";
   if (/서버 처리/.test(message)) return "stage.server";

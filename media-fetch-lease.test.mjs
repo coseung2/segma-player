@@ -62,18 +62,20 @@ test("long tokenized URLs avoid the compiled-regex size limit", () => {
   assert.deepEqual(rule.condition.tabIds, [18]);
 });
 
-test("playback HLS rules cover the playlist directory for segment requests", () => {
+test("playback HLS rules cover the playlist origin for relocated segment requests", () => {
   const rule = playbackMediaFetchRule({
     ruleId: 103,
     tabId: 19,
     url: "https://cdn.example/hls/title/playlist.m3u8?token=abc",
     referrer: "https://site.example/watch/1",
+    requestHeaders: [{ header: "Cookie", operation: "set", value: "session=opaque" }],
   });
   assert.equal(rule.condition.regexFilter, undefined);
-  assert.equal(rule.condition.urlFilter, "|https://cdn.example/hls/title/");
+  assert.equal(rule.condition.urlFilter, "|https://cdn.example/");
   assert.deepEqual(rule.action.requestHeaders, [
     { header: "Referer", operation: "set", value: "https://site.example/watch/1" },
     { header: "Origin", operation: "remove" },
+    { header: "Cookie", operation: "set", value: "session=opaque" },
   ]);
 });
 

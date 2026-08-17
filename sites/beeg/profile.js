@@ -1,0 +1,15 @@
+import { DOWNLOAD_MODES } from "../../download-mode.js";
+import { DOWNLOADER_IDS } from "../../downloaders/ids.js";
+import { defineSiteProfile } from "../profile.js";
+
+export const beegSite = defineSiteProfile({
+  id: "beeg",
+  hosts: ["beeg.com"],
+  primaryMode: DOWNLOAD_MODES.DIRECT_PROGRESSIVE,
+  fallbackModes: [DOWNLOAD_MODES.HLS_MANIFEST],
+  modules: {
+    primaryDownloader: DOWNLOADER_IDS.PROGRESSIVE,
+    fallbackDownloaders: [DOWNLOADER_IDS.HLS],
+    providers: [],
+  },
+});

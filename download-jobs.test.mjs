@@ -54,6 +54,10 @@ test("download job diagnostics expose only redacted candidate metadata", () => {
     diagnostic: {
       resource: "https://media.example/cast2/abc/video.mp4?token=[redacted]",
       mediaType: "PROGRESSIVE",
+      downloadMode: "AUTHENTICATED_SOURCE_FRAME",
+      downloaderId: "progressive",
+      providerId: "level5",
+      siteId: "av19",
       frameId: 2,
       player: "nnvivi",
       sessionId: "session-1",
@@ -66,6 +70,10 @@ test("download job diagnostics expose only redacted candidate metadata", () => {
   assert.deepEqual(publicDownloadJobs([job])[0].diagnostic, {
     resource: "https://media.example/cast2/abc/video.mp4?token=[redacted]",
     mediaType: "PROGRESSIVE",
+    downloadMode: "AUTHENTICATED_SOURCE_FRAME",
+    downloaderId: "progressive",
+    providerId: "level5",
+    siteId: "av19",
     frameId: 2,
     player: "nnvivi",
     sessionId: "session-1",

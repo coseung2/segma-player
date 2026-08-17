@@ -32,7 +32,16 @@ test("classifies player pages and remote YouTube jobs", () => {
   assert.equal(classifyDownloadMode({ pageUrl: "https://www.youtube.com/watch?v=abc" }), DOWNLOAD_MODES.REMOTE_SERVICE);
 });
 
-test("classifies Dood-compatible sources as authenticated frame mode", () => {
+test("keeps provider hostname out of the generic transport classifier", () => {
   assert.equal(classifyDownloadMode({ pageUrl: "https://doodstream.com/e/example", mediaType: "PROGRESSIVE" }),
-    DOWNLOAD_MODES.AUTHENTICATED_SOURCE_FRAME);
+    DOWNLOAD_MODES.DIRECT_PROGRESSIVE);
+});
+
+test("classifies Dood player evidence as authenticated frame mode", () => {
+  assert.equal(classifyDownloadMode({
+    pageUrl: "https://doodstream.com/e/example",
+    mediaType: "PROGRESSIVE",
+    player: "dood",
+    detectionSource: "player-adapter",
+  }), DOWNLOAD_MODES.AUTHENTICATED_SOURCE_FRAME);
 });

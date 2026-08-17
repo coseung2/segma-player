@@ -30,6 +30,10 @@ export function createDownloadJob({
     diagnostic: diagnostic && typeof diagnostic === "object" ? Object.freeze({
       resource: safeText(diagnostic.resource),
       mediaType: safeText(diagnostic.mediaType, "UNKNOWN"),
+      downloadMode: safeText(diagnostic.downloadMode, "UNKNOWN"),
+      downloaderId: safeText(diagnostic.downloaderId, "unknown"),
+      providerId: safeText(diagnostic.providerId, "generic"),
+      siteId: safeText(diagnostic.siteId, "generic"),
       frameId: Number.isInteger(diagnostic.frameId) ? diagnostic.frameId : null,
       player: safeText(diagnostic.player),
       sessionId: safeText(diagnostic.sessionId),

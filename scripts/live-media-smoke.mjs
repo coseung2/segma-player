@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { SITE_REGRESSION_FIXTURES } from "../sites/regressions.js";
+
 const repositoryRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const fixturePath = path.join(repositoryRoot, "media-site-regressions.json");
 const manifestPath = path.join(repositoryRoot, "manifest.json");
 const extensionManifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const extensionVersion = String(extensionManifest.version || "unknown");
@@ -522,8 +523,8 @@ async function main() {
     throw new Error("playwright-not-installed: install Playwright and a Chromium browser before live monitoring");
   }
 
-  const allFixtures = JSON.parse(await readFile(fixturePath, "utf8"));
-  const fixtures = allFixtures.filter((fixture) => !caseFilter.size || caseFilter.has(fixture.id));
+  const fixtures = SITE_REGRESSION_FIXTURES
+    .filter((fixture) => !caseFilter.size || caseFilter.has(fixture.id));
   if (!fixtures.length) throw new Error("no-monitor-cases-selected");
   const adblockAvailable = await extensionRootLoadable(adblockRoot);
   const activeAdblockMode = adblockMode

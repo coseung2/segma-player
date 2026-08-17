@@ -3,7 +3,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "test:media-sites": "node --test candidate-ranking.test.mjs site-regression.test.mjs",
+    "test:media-sites": "node --test sites/registry.test.mjs downloaders/registry.test.mjs download-policy.test.mjs candidate-ranking.test.mjs site-regression.test.mjs",
     "monitor:media-sites": "node scripts/live-media-smoke.mjs",
     "build:dev-staging": "node scripts/build-dev-staging.mjs --edition=pro",
     "deploy": "wrangler deploy",

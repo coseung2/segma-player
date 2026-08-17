@@ -3,7 +3,7 @@
 This is the versioned record of real site checks. It is separate from
 deterministic unit tests and from `INCIDENTS.md`:
 
-- `media-site-regressions.json` defines reusable site fixtures.
+- `sites/<id>/regressions.js` defines reusable fixtures beside each site profile.
 - `site-regression.test.mjs` checks deterministic ranking and detection rules.
 - `scripts/live-media-smoke.mjs` checks a live page, candidate stability, and
   optional playback/progressive probes.
@@ -141,10 +141,10 @@ the same site changes behavior in a new version.
 
 ## New site procedure
 
-1. Add a stable `id`, live URL, expected behavior, and recommended AdBlock mode
-   to `media-site-regressions.json`.
-2. Add or update the deterministic fixture assertions in
-   `site-regression.test.mjs`.
+1. Add a thin module declaration in `sites/<id>/profile.js`.
+2. Add a stable fixture id, live URL, expected behavior, and recommended AdBlock
+   mode in `sites/<id>/regressions.js`; the shared regression runner discovers it
+   through `sites/regressions.js`.
 3. Run the live smoke check and save its report with a unique filename that
    includes the extension version and browser mode.
 4. Test the actual extension download and subtitle path separately; mark

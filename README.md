@@ -52,7 +52,8 @@ Read it before changing a failing path and update it after every handoff.
 Real site behavior by extension version, browser, and surface is tracked in
 [SITE_QA_LOG.md](SITE_QA_LOG.md); live detection is not treated as proof of
 download or subtitle success. The 0.3.76 implementation and validation record is
-in [MEDIA_RECOVERY_VALIDATION.md](MEDIA_RECOVERY_VALIDATION.md).
+in [MEDIA_RECOVERY_VALIDATION.md](MEDIA_RECOVERY_VALIDATION.md). The site/provider/downloader
+repair boundaries are documented in [MEDIA_MODULE_REFACTOR.md](MEDIA_MODULE_REFACTOR.md).
 
 ```powershell
 rtk npm test
@@ -62,9 +63,11 @@ rtk cargo test --manifest-path native-host/Cargo.toml
 rtk cargo fmt --check --manifest-path native-host/Cargo.toml
 ```
 
-The deterministic media-site fixtures cover the MissAV ad-iframe priority and
-AV19/Level5 token-session regressions. An opt-in live smoke probe is available
-with `npm run monitor:media-sites`; it writes redacted candidate and request
+Site module selection lives in `sites/<id>/profile.js`, while each site's
+deterministic and live-only cases live beside it in `sites/<id>/regressions.js`.
+The current fixtures cover the MissAV ad-iframe priority and AV19/Level5
+token-session regressions. An opt-in live smoke probe is available with
+`npm run monitor:media-sites`; it writes redacted candidate and request
 metadata to a versioned, timestamped report under `artifacts/`. Full URL queries,
 Cookie values, and Authorization values are never written. The default live target set also permanently
 includes the configured AsianPorn, OnlyJerk, Playmogo, and Beeg reproduction

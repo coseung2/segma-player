@@ -112,7 +112,7 @@
 - URL/제목/iframe 속성의 ad, preroll, VAST, banner 신호: 큰 감점
 - 여러 독립 source의 동일 후보 관측: corroboration 가산점
 
-`candidate-ranking.test.mjs`와 `media-site-regressions.json`에서 광고 iframe과 `surrit.com` 본편을 동시에 넣어 본편만 primary가 되는 조건을 고정했다.
+`candidate-ranking.test.mjs`와 `sites/missav/regressions.js`에서 광고 iframe과 `surrit.com` 본편을 동시에 넣어 본편만 primary가 되는 조건을 고정했다.
 
 ### 3.2 AV19: Level5/Hls.js 내부 token URL과 정확한 iframe Referer 필요
 
@@ -495,7 +495,9 @@ adapter는 player method를 완전히 대체하지 않고 native shape를 보존
 
 - `candidate-ranking.test.mjs`
 - `site-regression.test.mjs`
-- `media-site-regressions.json`
+- `sites/<id>/profile.js`
+- `sites/<id>/regressions.js`
+- `downloaders/registry.test.mjs`
 - `page-media-observer.test.mjs`
 - `content.test.mjs`
 - `hls-download.test.mjs`

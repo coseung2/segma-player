@@ -1,11 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-
 import { makeCandidate, normalizeOriginPath } from "./candidate.js";
 import { rankCandidates } from "./candidate-ranking.js";
-
-const fixtures = JSON.parse(await readFile(new URL("./media-site-regressions.json", import.meta.url), "utf8"));
+import { SITE_REGRESSION_FIXTURES as fixtures } from "./sites/regressions.js";
+import { siteProfileForUrls } from "./sites/registry.js";
 const PERMANENT_LIVE_TARGETS = Object.freeze([
   "https://asianporn.li/video/193189/250214-korean-bj/",
   "https://onlyjerk.net/2-asian-chicks-gets-smashed-by-latina-maximo-garcias-cock-rikakodesu-airi-minami/",
@@ -53,6 +51,7 @@ for (const fixture of fixtures) {
     const candidates = fixture.candidates.map((candidate) => makeCandidate({
       pageTitle: candidate.pageTitle,
       pageUrl: candidate.pageUrl,
+      siteUrl: candidate.siteUrl || fixture.liveUrl,
       resourceUrl: candidate.resourceUrl,
       contentType: "application/vnd.apple.mpegurl",
       tabId: 1,
@@ -74,6 +73,7 @@ for (const fixture of fixtures) {
     const primary = ranked.find((candidate) => candidate.main && !candidate.likelyAdvertisement);
     assert.ok(primary, "a non-ad primary candidate must be selected");
     assert.equal(new URL(primary.resourceUrl).hostname, fixture.expected.primaryHost);
+    assert.equal(primary.siteId, siteProfileForUrls(fixture.liveUrl)?.id);
     if (fixture.expected.primaryPlayer) assert.equal(primary.player, fixture.expected.primaryPlayer);
     if (fixture.expected.rejectedAdvertisementHost) {
       const advertisement = ranked.find((candidate) =>

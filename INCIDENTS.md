@@ -157,3 +157,13 @@
 - Code action in `0.3.88`: background now owns a session-persisted overlay job list, sends the same accumulated list to every eligible web tab, preserves terminal records until global close, and broadcasts `hide-download-overlay` after dismissal.
 - Regression test: content overlay activation and global-hide message coverage pass; full `npm test` and Pro staging build pass.
 - Live result after code action: `LIVE-UNVERIFIED`; reload the `0.3.88` staging extension and verify tab switching, accumulated records, and global close in the user's Chrome session.
+
+### INC-2026-08-17-010 DASH ContentProtection was not rejected
+
+- Status: `CODE-FIXED / LIVE-UNVERIFIED`
+- Reproduction: GitHub issue #2 describes a static DASH MPD containing `ContentProtection` (for example CENC/Widevine/PlayReady). The previous parser accepted the manifest and `dashMediaForRepresentation()` produced tracks with `keys: []`, allowing encrypted segments to enter the normal save path.
+- Confirmed root cause: `dash.js` parsed XML and segment layouts but had no DRM/`ContentProtection` guard. Unlike HLS SAMPLE-AES handling, the DASH path therefore did not fail closed before download preparation.
+- Code action in `0.3.89`: `parseDashManifest()` rejects any MPD containing `ContentProtection` with stable `DRM_PROTECTED` error code; `prepareDownloadCandidate()` maps that code to a clear user-facing DRM unsupported message. No DRM key extraction or decryption is attempted.
+- Regression test: `dash.test.mjs` includes a CENC `ContentProtection` fixture. The modular site/provider/downloader suite passes 23/23; full `npm test` passes 421 total / 417 pass / 0 fail / 4 environment-dependent skips.
+- Architecture follow-up in `0.3.89`: progressive, HLS, and DASH preparation/save dispatch moved behind `downloaders/`; reusable player/auth behavior moved behind `providers/`; each site now owns a thin `sites/<id>/profile.js` and colocated `regressions.js`. Candidates retain the top-level `siteUrl` separately from iframe referrers and expose `siteId`, `providerId`, and `downloaderId` in redacted diagnostics. Pro staging build passes with 83 files.
+- Live result after code action: `LIVE-UNVERIFIED`; no real DRM-protected DASH site or post-refactor site matrix was exercised in Chrome/Whale, so only deterministic parser, dispatch, packaging, and download preparation behavior is confirmed.

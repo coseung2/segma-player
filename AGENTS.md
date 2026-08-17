@@ -60,3 +60,20 @@ add a new versioned entry and preserve the previous result. New sites require a
 fixture, deterministic regression assertion, live smoke evidence, and a
 `SITE_QA_LOG.md` entry. Update the site log after every real-browser check and
 before calling a site regression resolved.
+
+## Media module repair boundary
+
+For a failure reported on one site, start in `sites/<site-id>/profile.js` and
+`sites/<site-id>/regressions.js`. A site profile may select downloader and
+provider modules, but must not implement transport, token, key, or file-writing
+logic.
+
+Provider-specific extraction and authentication belong in `providers/`.
+Progressive, HLS, and DASH preparation and saving belong in `downloaders/` and
+the shared media engine. Do not change a common downloader for a site-local
+failure unless the same transport failure is reproduced on another unrelated
+site or a protocol-level defect is demonstrated by a focused fixture.
+
+Keep site fixes narrow: update the site profile or its selected provider first,
+add the failing site fixture beside that profile, then run the provider,
+downloader, site-regression, and full suites before handoff.

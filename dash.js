@@ -24,6 +24,7 @@ export const DASH_ERROR_CODES = Object.freeze({
   INVALID_RANGE: "invalid-range",
   INVALID_TEMPLATE: "invalid-template",
   NO_MEDIA: "no-media",
+  DRM_PROTECTED: "drm-protected",
 });
 
 export class DashParseError extends Error {
@@ -731,6 +732,17 @@ function containsDynamicAttributes(node) {
   return node.children.some(containsDynamicAttributes);
 }
 
+function containsContentProtection(node) {
+  if (node?.name === "ContentProtection") return true;
+  return Array.isArray(node?.children) && node.children.some(containsContentProtection);
+}
+
+function rejectUnsupportedProtection(root) {
+  if (containsContentProtection(root)) {
+    fail(DASH_ERROR_CODES.DRM_PROTECTED, "DRM으로 보호된 DASH 영상은 지원하지 않습니다.");
+  }
+}
+
 function rejectDynamicManifest(root) {
   const type = (attribute(root, "type") || "static").toLowerCase();
   if (type === "dynamic" || type === "live") fail(DASH_ERROR_CODES.DYNAMIC_MPD, "Dynamic and live MPDs are not supported.");
@@ -745,6 +757,7 @@ function rejectDynamicManifest(root) {
 export function parseDashManifest(text, manifestUrl) {
   const canonicalManifestUrl = safeUrl(manifestUrl);
   const root = parseDashXml(text);
+  rejectUnsupportedProtection(root);
   rejectDynamicManifest(root);
   const mpdDuration = parseDuration(attribute(root, "mediaPresentationDuration"), "mediaPresentationDuration");
   const rootBase = applyBaseUrl(root, { url: canonicalManifestUrl, explicit: false });

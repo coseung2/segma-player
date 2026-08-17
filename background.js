@@ -16,6 +16,7 @@ import {
 } from "./candidate.js";
 import { rankCandidates } from "./candidate-ranking.js";
 import { DOWNLOAD_MENU_ID } from "./download.js";
+import { downloaderIdForMediaType, jobModeForDownloader } from "./downloaders/ids.js";
 import { candidateDownloadErrorCode } from "./download-errors.js";
 import {
   DEFAULT_FILENAME_TEMPLATE,
@@ -1185,8 +1186,9 @@ async function queueMediaDownload(candidate) {
   await downloadJobsReady;
   const plan = await resolvePlan();
   const jobId = crypto.randomUUID();
-  const mode = candidate.mediaType === "PROGRESSIVE" ? "stream"
-    : candidate.mediaType === "DASH" ? "dash" : "hls";
+  const downloaderId = candidate.downloaderId
+    || downloaderIdForMediaType(candidate.mediaType, candidate.downloadMode);
+  const mode = jobModeForDownloader(downloaderId);
   const job = createDownloadJob({
     id: jobId,
     title: candidate.pageTitle || "미디어 다운로드",
@@ -1196,6 +1198,9 @@ async function queueMediaDownload(candidate) {
       resource: candidate.displayUrl || "",
       mediaType: candidate.mediaType,
       downloadMode: candidate.downloadMode || "UNKNOWN",
+      downloaderId,
+      providerId: candidate.providerId || "generic",
+      siteId: candidate.siteId || "generic",
       frameId: candidate.frameId,
       player: candidate.player,
       sessionId: candidate.sessionId,
@@ -1451,6 +1456,7 @@ async function refreshCandidateFromSourceFrame(candidate, { force = false } = {}
   const refreshed = makeCandidate({
     pageTitle: candidate.pageTitle,
     pageUrl,
+    siteUrl: candidate.siteUrl || candidate.pageUrl,
     resourceUrl,
     contentType: candidateContentType(candidate),
     variants: candidate.variants || [],
@@ -1564,6 +1570,7 @@ async function resolvePlayerCandidate(candidate) {
   const resolvedCandidate = makeCandidate({
     pageTitle: fresh.pageTitle,
     pageUrl: resolved.referrer || fresh.pageUrl,
+    siteUrl: fresh.siteUrl || fresh.pageUrl,
     resourceUrl: resolved.url,
     contentType: resolved.type === "hls" ? "application/vnd.apple.mpegurl" : "video/mp4",
     likelyAdvertisement: fresh.likelyAdvertisement,
@@ -2533,6 +2540,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const sanitized = sanitizePageMessage({
     ...message,
     pageTitle: message.pageTitle || sender.tab.title || "",
+    siteUrl: canonicalHttpUrl(sender.tab.url)?.href || "",
     pageUrl: canonicalHttpUrl(sender.url)?.href
       || (typeof message.frameUrl === "string" ? canonicalHttpUrl(message.frameUrl)?.href : null)
       || canonicalHttpUrl(sender.tab.url)?.href

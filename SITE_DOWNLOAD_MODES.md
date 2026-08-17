@@ -1,37 +1,60 @@
-# Site download mode matrix
+# Site, provider, and downloader modules
 
-Sites are classified by the observed download mechanism before a site-specific fix is considered. The classifier is evidence-first: host names are used for reporting, while runtime mode selection comes from the candidate media type and player evidence.
+Aura separates three kinds of change so a failure on one site does not
+immediately modify a shared media pipeline.
 
-## Modes
+## Runtime layers
 
-| Mode | Detection signal | Download response |
+| Layer | Location | Responsibility |
 | --- | --- | --- |
-| `DIRECT_PROGRESSIVE` | `PROGRESSIVE` candidate from a direct media response/element | Range download, then browser-download fallback when needed |
-| `HLS_MANIFEST` | `HLS_MASTER`/`HLS_MEDIA` without a protected player context | Playlist, key, and segment saver |
-| `DASH_MANIFEST` | `DASH` candidate | MPD and segment saver |
-| `PLAYER_API` | `api-json`, fetch, or XHR player evidence | Refresh source from the API/player context, then use its media mode |
-| `PLAYER_PAGE_GRAPH` | bounded `/d/` or `/e/` player-page URL | Resolve the player graph before downloading |
-| `AUTHENTICATED_SOURCE_FRAME` | Level5/Dood/player-frame evidence, tokenized source, exact frame context | Refresh from the source frame and preserve its request context |
-| `REMOTE_SERVICE` | YouTube page/resource | Use the configured remote YouTube job flow |
-| `UNKNOWN` | No safe classification | Do not add a site-specific bypass; capture evidence first |
+| Site profile | `sites/<id>/profile.js` | Thin declaration of expected modes, primary/fallback downloader modules, and provider modules |
+| Site regression | `sites/<id>/regressions.js` | Deterministic and live-only fixtures owned by that site |
+| Provider adapter | `providers/*.js` | Player/API/token/source-frame behavior such as Dood or Level5 |
+| Downloader | `downloaders/*.js` | Progressive, HLS, and DASH preparation/save orchestration |
+| Shared engine | `hls-download.js`, protocol parsers, request-context modules | Bounded fetch, key/segment handling, checkpoints, file sinks, and common security rules |
 
-## Current site map
+`sites/registry.js` is the runtime site registry. `providers/registry.js` selects a
+provider using candidate evidence and the site's preferred provider order.
+`downloaders/registry.js` selects the actual transport from the candidate media
+type. `download-policy.js` combines those decisions into one diagnostic policy.
 
-The machine-readable registry is [site-download-modes.json](site-download-modes.json). Current user-reported status is deliberately separate for download and browser playback:
+## Download modes
 
-- AsianPorn: direct progressive; download and browser playback pass.
-- MissAV: HLS/player source; download pass, browser playback fail.
-- AV19: protected Level5 HLS/source-frame; download pass, browser playback fail.
-- OnlyJerk: structured player API to HLS; download pass, browser playback fail.
-- Beeg: direct progressive; download pass, browser playback fail.
-- Dood: authenticated/player-frame path; Aura browser playback passes, extension-download failed on `0.3.86`; `0.3.87` source-frame fix is live-unverified.
+| Mode | Downloader/provider response |
+| --- | --- |
+| `DIRECT_PROGRESSIVE` | `downloaders/progressive.js` |
+| `HLS_MANIFEST` | `downloaders/hls.js` |
+| `DASH_MANIFEST` | `downloaders/dash.js` |
+| `PLAYER_API` | A provider adapter refreshes the source, then the observed media type selects a downloader |
+| `PLAYER_PAGE_GRAPH` | The bounded player-page resolver produces a progressive or HLS candidate |
+| `AUTHENTICATED_SOURCE_FRAME` | A provider policy preserves the exact source tab/frame; the media type still selects the downloader |
+| `REMOTE_SERVICE` | Separate remote-service flow, currently YouTube |
+| `UNKNOWN` | No downloader is selected |
 
-## Adding a site
+## Site-local repair workflow
 
-1. Capture the first usable candidate and its evidence: media type, source, player, session, frame, request type, and whether the URL is tokenized.
-2. Assign one primary mode and at most two fallback modes in `site-download-modes.json`.
-3. Add a deterministic fixture or live-only target with the mode expectation.
-4. Run the separate surfaces: detect, extension-download, browser playback, progressive probe, subtitle, and overlay. Use `NOT_RUN` when a surface was not tested.
-5. Add an append-only `SITE_QA_LOG.md` entry before calling the site supported.
+For a MissAV-only failure, inspect these files first:
 
-Do not add a host-specific URL exception when a generic mode classifier or existing response/player evidence can express the behavior safely.
+1. `sites/missav/profile.js`
+2. `sites/missav/regressions.js`
+3. The provider selected by that profile, normally `providers/hlsjs.js` or
+   `providers/player-api.js`
+4. `downloaders/hls.js` only when the same HLS defect also reproduces on an
+   unrelated site or a protocol-level fixture proves a common bug
+
+A site profile must remain declarative. It must not contain HLS parsing, token
+construction, key decoding, network fetches, or file writing.
+
+## Adding or changing a site
+
+1. Add or edit only `sites/<id>/profile.js` to declare the module order.
+2. Add the reproduction to `sites/<id>/regressions.js`.
+3. Add a provider adapter only when the player/API authentication mechanism is
+   reusable across sites.
+4. Change a downloader only for a transport-level defect.
+5. Run the focused site/provider/downloader tests, the site-regression suite,
+   the full suite, and the staging build.
+6. Record live surfaces independently in `SITE_QA_LOG.md`.
+
+`site-download-modes.json` and `media-site-regressions.json` are retained only as
+compatibility pointers to the colocated JavaScript source of truth.

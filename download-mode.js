@@ -12,7 +12,6 @@ export const DOWNLOAD_MODES = Object.freeze({
 });
 
 const YOUTUBE_HOST_RE = /(?:^|\.)youtube\.com$|(?:^|\.)youtu\.be$/i;
-const DOOD_HOST_RE = /(?:^|\.)dood(?:stream|cdn)?\.|(?:^|\.)d000d\./i;
 
 function hostOf(value) {
   try { return new URL(value).hostname.toLowerCase(); } catch { return ""; }
@@ -42,8 +41,7 @@ export function classifyDownloadMode({
   if (YOUTUBE_HOST_RE.test(pageHost) || YOUTUBE_HOST_RE.test(resourceHost)) {
     return DOWNLOAD_MODES.REMOTE_SERVICE;
   }
-  if (DOOD_HOST_RE.test(pageHost) || DOOD_HOST_RE.test(resourceHost)
-    || players.some((value) => value.includes("dood"))
+  if (players.some((value) => value.includes("dood"))
     || sources.some((value) => value.includes("dood"))) {
     return DOWNLOAD_MODES.AUTHENTICATED_SOURCE_FRAME;
   }

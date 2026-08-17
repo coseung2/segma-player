@@ -1,5 +1,6 @@
 import { isStreamtapePlayerPage, looksLikePlayerPage } from "./player-page-resolver.js";
 import { classifyDownloadMode } from "./download-mode.js";
+import { downloadPolicyForCandidate } from "./download-policy.js";
 
 export const LIMITS = Object.freeze({
   urlBytes: 4096,
@@ -328,7 +329,7 @@ export function variantIdentity(variant) {
 }
 
 export function makeCandidate({
-  pageTitle = "", pageUrl, resourceUrl, contentType = "", likelyAdvertisement = false,
+  pageTitle = "", pageUrl, siteUrl = pageUrl, resourceUrl, contentType = "", likelyAdvertisement = false,
   detectedAt = new Date().toISOString(), observedAt = null, variants = [], main = false,
   explicitMain = main, tabId = null, frameId = null, fromMediaElement = false,
   evidence = [], detectionSource = "", player = "", sessionId = "", requestType = "",
@@ -338,6 +339,7 @@ export function makeCandidate({
   const blob = resourceUrl.startsWith("blob:");
   const canonical = blob ? resourceUrl : canonicalHttpUrl(resourceUrl)?.href;
   const pageCanonical = canonicalHttpUrl(pageUrl);
+  const siteCanonical = canonicalHttpUrl(siteUrl)?.href || pageCanonical?.href || "";
   const origin = pageCanonical ? `${pageCanonical.protocol}//${pageCanonical.host}` : null;
   if (!canonical || (!blob && (isImageResourceUrl(canonical) || isKnownNonMediaResourceUrl(canonical, contentType) || isLikelyHlsSegmentUrl(canonical)
     || isLikelyPreviewResourceUrl(canonical))) || !origin
@@ -387,6 +389,16 @@ export function makeCandidate({
     detectionSource,
     evidence: normalizedEvidence,
   });
+  const policy = downloadPolicyForCandidate({
+    siteUrl: siteCanonical,
+    pageUrl: pageCanonical.href,
+    resourceUrl: canonical,
+    mediaType,
+    downloadMode,
+    player,
+    detectionSource,
+    evidence: normalizedEvidence,
+  }, canonical);
   const evidencePlayer = normalizedEvidence.find((item) => item.player)?.player || "";
   const evidenceSession = normalizedEvidence.find((item) => item.sessionId)?.sessionId || "";
   const freshness = blob
@@ -399,6 +411,10 @@ export function makeCandidate({
     pageTitle,
     pageOrigin: origin,
     pageUrl: pageCanonical ? pageCanonical.href : "",
+    siteUrl: siteCanonical,
+    siteId: policy.siteId,
+    providerId: policy.providerId,
+    downloaderId: policy.downloaderId,
     main: Boolean(main),
     explicitMain: Boolean(explicitMain || main),
     classification: "alternate",
@@ -449,6 +465,10 @@ export function upsertCandidate(candidates, candidate, limit = LIMITS.candidates
       existing.pageUrl = candidate.pageUrl;
       existing.pageOrigin = candidate.pageOrigin;
     }
+    if (candidate.siteUrl) existing.siteUrl = candidate.siteUrl;
+    existing.siteId = candidate.siteId || existing.siteId || "generic";
+    existing.providerId = candidate.providerId || existing.providerId || "generic";
+    existing.downloaderId = candidate.downloaderId || existing.downloaderId || "unknown";
     existing.explicitMain = Boolean(existing.explicitMain || candidate.explicitMain || candidate.main);
     existing.downloadMode = candidate.downloadMode || existing.downloadMode || "UNKNOWN";
     existing.lastObservedAt = Math.max(
@@ -520,6 +540,9 @@ export function redactCandidateForUi(candidate) {
     score: Number.isFinite(candidate.score) ? candidate.score : 0,
     mediaType: candidate.mediaType,
     downloadMode: candidate.downloadMode || "UNKNOWN",
+    downloaderId: candidate.downloaderId || "unknown",
+    providerId: candidate.providerId || "generic",
+    siteId: candidate.siteId || "generic",
     displayUrl: candidate.displayUrl,
     detectedAt: candidate.detectedAt,
     durationMs: candidate.durationMs,
@@ -548,6 +571,7 @@ export function sanitizePageMessage(message) {
   const candidate = makeCandidate({
     pageTitle: message.pageTitle,
     pageUrl: message.pageUrl,
+    siteUrl: message.siteUrl || message.pageUrl,
     resourceUrl: message.resourceUrl,
     contentType: message.contentType,
     main: message.main,

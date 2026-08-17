@@ -185,6 +185,7 @@ test("rejects malformed, dynamic, unsafe, traversing, excessive, and unbounded M
   const cases = [
     ["malformed XML", `<MPD><Period></MPD>`, DASH_ERROR_CODES.INVALID_XML],
     ["dynamic MPD", `<MPD type="dynamic"><Period /></MPD>`, DASH_ERROR_CODES.DYNAMIC_MPD],
+    ["CENC protected MPD", `<MPD><Period><AdaptationSet mimeType="video/mp4"><ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" /><Representation><SegmentTemplate duration="1" media="seg-$Number$.m4s" /></Representation></AdaptationSet></Period></MPD>`, DASH_ERROR_CODES.DRM_PROTECTED],
     ["unsafe BaseURL scheme", `<MPD><BaseURL>data:text/plain,unsafe</BaseURL><Period><AdaptationSet contentType="video"><Representation id="v" /></AdaptationSet></Period></MPD>`, DASH_ERROR_CODES.UNSAFE_SCHEME],
     ["parent traversal", `<MPD><Period><AdaptationSet mimeType="video/mp4"><Representation><SegmentTemplate duration="1" media="../seg-$Number$.m4s" /></Representation></AdaptationSet></Period></MPD>`, DASH_ERROR_CODES.PATH_TRAVERSAL],
     ["unbounded duration template", `<MPD><Period><AdaptationSet mimeType="video/mp4"><Representation><SegmentTemplate duration="1" media="seg-$Number$.m4s" /></Representation></AdaptationSet></Period></MPD>`, DASH_ERROR_CODES.UNBOUNDED_TIMELINE],

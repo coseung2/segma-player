@@ -9,7 +9,8 @@ import {
   ivForSegment,
   parseHlsPlaylist,
 } from "./hls.js";
-import { DashParseError, parseDashManifest } from "./dash.js";
+import { chooseDashRepresentation, dashTracksForPlan } from "./downloaders/dash.js";
+import { createDownloaderRegistry } from "./downloaders/registry.js";
 import { filenameForDownload } from "./download.js";
 import {
   DEFAULT_FILENAME_TEMPLATE,
@@ -27,6 +28,7 @@ import {
   setDownloadCheckpoint,
 } from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
+import { downloadPolicyForCandidate } from "./download-policy.js";
 
 export const MAX_HLS_SEGMENTS = 10_000;
 const SUPPORTED_KEY_METHODS = new Set(["AES-128", "AES-256"]);
@@ -39,60 +41,9 @@ const SEGMENT_RETRY_STATUSES = new Set([403, 408, 425, 429, 500, 502, 503, 504])
 export const MAX_SUBTITLE_AUDIO_UPLOAD_BYTES = 80 * 1024 * 1024;
 const CURRENT_PLAN = productPlan(PRODUCT_EDITION);
 let activePlan = CURRENT_PLAN;
-const DOOD_MEDIA_HOST_RE = /(?:doodcdn|doimg|d000d|dood\.|playmogo|cloudatacdn)\./i;
 const keyMaterialCache = new Map();
 
-function dashRepresentationScore(representation) {
-  const pixels = Number(representation?.width || 0) * Number(representation?.height || 0);
-  return pixels * 1_000_000 + Number(representation?.bandwidth || 0);
-}
-
-export function chooseDashRepresentation(representations, kind) {
-  return [...(Array.isArray(representations) ? representations : [])]
-    .filter((representation) => representation?.kind === kind)
-    .sort((left, right) => dashRepresentationScore(right) - dashRepresentationScore(left))[0] || null;
-}
-
-function dashMediaForRepresentation(representation) {
-  if (!representation || !Array.isArray(representation.segments) || !representation.segments.length) {
-    throw new Error(representation?.index
-      ? "이 DASH 영상은 SegmentBase 인덱스 분석이 필요해 아직 저장할 수 없습니다."
-      : "DASH 영상 구간을 찾지 못했습니다.");
-  }
-  return {
-    initUrl: representation.initialization?.url || null,
-    initByterange: representation.initialization?.range || null,
-    segments: representation.segments.map((segment) => segment.url),
-    byteranges: representation.segments.map((segment) => segment.range || null),
-    keys: [],
-    mediaSequence: 0,
-  };
-}
-
-export function dashTracksForPlan(plan, title = "DASH 영상") {
-  const tracks = [];
-  const periods = Array.isArray(plan?.periods) ? plan.periods : [];
-  for (let periodIndex = 0; periodIndex < periods.length; periodIndex += 1) {
-    const representations = periods[periodIndex].adaptationSets
-      .flatMap((adaptation) => adaptation.representations || []);
-    for (const kind of ["video", "audio"]) {
-      const representation = chooseDashRepresentation(representations, kind);
-      if (!representation) continue;
-      const suffix = `${periods.length > 1 ? `-p${periodIndex + 1}` : ""}-${kind}`;
-      tracks.push({
-        kind,
-        periodIndex,
-        representation,
-        media: dashMediaForRepresentation(representation),
-        title: `${title}${suffix}`,
-        extension: kind === "audio" ? "m4a" : "mp4",
-        filename: filenameFor(`${title}${suffix}`, kind === "audio" ? "m4a" : "mp4"),
-      });
-    }
-  }
-  if (!tracks.length) throw new Error("DASH 비디오·오디오 트랙을 찾지 못했습니다.");
-  return tracks;
-}
+export { chooseDashRepresentation, dashTracksForPlan };
 
 export function setRuntimePlan(plan) {
   if (plan && typeof plan === "object") activePlan = plan;
@@ -367,14 +318,6 @@ function hostForMessage(url) {
     return new URL(url).hostname;
   } catch {
     return "";
-  }
-}
-
-function isDoodLikeHost(url) {
-  try {
-    return DOOD_MEDIA_HOST_RE.test(new URL(url).hostname);
-  } catch {
-    return false;
   }
 }
 
@@ -1182,11 +1125,9 @@ async function cancelProbeResponse(response) {
 }
 
 async function prepareProgressiveFetch(session, context = defaultDownloadContext) {
+  const policy = downloadPolicyForCandidate(context.candidate, session.url);
   if (!session.authenticatedProbeRequired) {
-    // Dood-compatible URLs are authorized by the player frame. Keep the
-    // download on that exact frame instead of probing from the extension
-    // origin, even when the CDN happens to answer the probe.
-    if (isDoodLikeHost(session.url)
+    if (policy.preferSourceFrameProgressive
       && Number.isInteger(context.tabId) && Number.isInteger(context.frameId)) {
       return {
         ...session,
@@ -1223,7 +1164,7 @@ async function prepareProgressiveFetch(session, context = defaultDownloadContext
     // explicit method/status response such as HTTP 405. Preserve the fresh URL
     // and let saveProgressive use the source-frame handoff instead of failing
     // before the already-supported fallback can run.
-    if (isDoodLikeHost(session.url) && error?.name !== "AbortError") {
+    if (policy.preferSourceFrameProgressive && error?.name !== "AbortError") {
       return {
         ...session,
         authenticatedProbeRequired: false,
@@ -1245,8 +1186,16 @@ async function prepareProgressiveFetch(session, context = defaultDownloadContext
   return { ...session, url: finalUrl, authenticatedProbeRequired: false };
 }
 
-async function requestSourceFrameDownload(url, filename, videoTabId, videoFrameId = null, signal = null) {
-  if (!Number.isInteger(videoTabId) || videoTabId <= 0 || !isDoodLikeHost(url)) return null;
+async function requestSourceFrameDownload(
+  url,
+  filename,
+  videoTabId,
+  videoFrameId = null,
+  signal = null,
+  candidate = null,
+) {
+  const policy = downloadPolicyForCandidate(candidate, url);
+  if (!Number.isInteger(videoTabId) || videoTabId <= 0 || !policy.preferSourceFrameProgressive) return null;
   const requestId = globalThis.crypto?.randomUUID?.() || `source-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const cancel = () => {
     void chrome.runtime.sendMessage({ type: "cancel-browser-download", requestId }).catch(() => {});
@@ -1394,6 +1343,7 @@ async function saveProgressive(
       videoTabId,
       context.frameId,
       context.signal,
+      context.candidate,
     );
     if (fallback) return fallback;
   }
@@ -1492,6 +1442,7 @@ async function saveProgressive(
         videoTabId,
         context.frameId,
         context.signal,
+        context.candidate,
       );
       if (fallback) {
         await removeAllocatedFile();
@@ -1636,14 +1587,35 @@ export {
   writeChunk,
 };
 
+const downloaderRegistry = createDownloaderRegistry({
+  activePlan: () => activePlan,
+  configuredFilenameTemplate,
+  ensureMediaRoutes,
+  fetchText,
+  filenameFor,
+  filenameFromTemplate,
+  loadMediaPlaylist,
+  prepareHlsKeys,
+  prepareProgressiveFetch,
+  probeDownloadTotalBytes,
+  progressiveFilenameFor,
+  progressiveSession,
+  refreshableHttpFailure,
+  requestFreshDownloadCandidate,
+  saveHlsToNative,
+  saveProgressive,
+  setStatus,
+});
+
 export async function prepareDownloadCandidate(candidate, {
   onStatus = null,
   pauseGate = null,
   paceBytes = null,
   signal = null,
 } = {}) {
-  if (!candidate || typeof candidate.resourceUrl !== "string") throw new Error("다운로드 후보가 올바르지 않습니다.");
-
+  if (!candidate || typeof candidate.resourceUrl !== "string") {
+    throw new Error("다운로드 후보가 올바르지 않습니다.");
+  }
   const context = createDownloadContext({
     onStatus,
     pauseGate,
@@ -1656,163 +1628,21 @@ export async function prepareDownloadCandidate(candidate, {
     consumer: "download-media",
   });
   await loadRecordedHeaders(context);
-  const progressive = candidate.mediaType === "PROGRESSIVE";
-  if (progressive) {
-    const fallbackFilename = progressiveFilenameFor(candidate);
-    const extension = /\.([a-z0-9]{2,5})$/i.exec(fallbackFilename)?.[1] || "mp4";
-    const filename = filenameFromTemplate(
-      await configuredFilenameTemplate(),
-      candidate,
-      candidate.pageTitle && candidate.pageTitle !== "직접 입력한 주소" ? candidate.pageTitle : fallbackFilename.replace(/\.[^.]+$/, ""),
-      extension,
-      fallbackFilename,
-    );
-    setStatus("영상을 확인하는 중…", false, context);
-    const session = await prepareProgressiveFetch(
-      await progressiveSession(
-        candidate.resourceUrl,
-        candidate.pageUrl,
-        candidate.tabId,
-        context.signal,
-        context.frameId,
-      ),
-      context,
-    );
-    setStatus(activePlan.backgroundDownloads
-      ? "영상 준비 완료. 원본 페이지를 벗어나도 다운로드가 계속됩니다."
-      : "영상 준비 완료. 다운로드가 끝날 때까지 원본 페이지를 열어두세요.", false, context);
-    let probed = null;
-    try { probed = await probeDownloadTotalBytes(session.url, session.referrer, context); } catch { probed = null; }
-    if (probed) {
-      const contentType = String(probed.contentType || "");
-      if (contentType && !/^(video|audio)\//i.test(contentType) && !/octet-stream/i.test(contentType)) {
-        throw new Error("이 주소는 영상 파일이 아니라 웹페이지입니다. 실제 미디어 주소를 입력해 주세요.");
-      }
-      context.totalBytes = Number.isFinite(probed.total) && probed.total >= 0 ? probed.total : null;
-      context.rangeSupported = probed.rangeSupported === true;
-    }
-    return {
-      type: "progressive",
-      candidate,
-      context,
-      filename,
-      session,
-    };
-  }
-
-  if (candidate.mediaType === "DASH") {
-    setStatus("DASH 영상 정보를 확인하는 중…", false, context);
-    const loaded = await fetchText(candidate.resourceUrl, candidate.pageUrl, context);
-    let plan;
-    try {
-      plan = parseDashManifest(loaded.text, loaded.url);
-    } catch (error) {
-      if (error instanceof DashParseError) {
-        const wrapped = new Error(`DASH 정보를 분석하지 못했습니다 (${error.code}).`);
-        wrapped.code = `dash-${error.code}`;
-        throw wrapped;
-      }
-      throw error;
-    }
-    const filenameTemplate = await configuredFilenameTemplate();
-    const tracks = dashTracksForPlan(plan, candidate.pageTitle || "DASH 영상").map((track) => ({
-      ...track,
-      filename: filenameFromTemplate(filenameTemplate, candidate, track.title, track.extension, track.filename),
-    }));
-    await ensureMediaRoutes(tracks.flatMap((track) => [
-      track.media.initUrl,
-      ...track.media.segments,
-    ]));
-    const segments = tracks.reduce((sum, track) => sum + track.media.segments.length, 0);
-    setStatus(`DASH 정보 확인 완료 · ${tracks.length}개 트랙 · ${segments}개 구간.`, false, context);
-    return { type: "dash", candidate, context, plan, tracks };
-  }
-
-  if (candidate.mediaType !== "HLS_MASTER" && candidate.mediaType !== "HLS_MEDIA") {
-    throw new Error("unsupported-media");
-  }
-  setStatus("영상 정보를 확인하는 중…", false, context);
-  let media;
-  try {
-    media = await loadMediaPlaylist(candidate.resourceUrl, 0, candidate.pageUrl, context);
-  } catch (error) {
-    if (!refreshableHttpFailure(error)) throw error;
-    const refreshedCandidate = await requestFreshDownloadCandidate(context);
-    if (!refreshedCandidate) throw error;
-    Object.assign(candidate, refreshedCandidate);
-    Object.assign(context.candidate, refreshedCandidate);
-    media = await loadMediaPlaylist(candidate.resourceUrl, 0, candidate.pageUrl, context);
-  }
-  const extension = hlsFileExtension(media.initUrl, media.segments);
-  const filename = filenameFromTemplate(
-    await configuredFilenameTemplate(),
-    candidate,
-    candidate.pageTitle,
-    extension,
-    filenameFor(candidate.pageTitle, extension),
-  );
-  setStatus(`영상 정보 확인 완료 (${media.segments.length}개 구간).`, false, context);
-  await prepareHlsKeys(media, candidate.pageUrl, candidate.tabId, context);
-  return { type: "hls", candidate, context, filename, media };
+  const downloader = downloaderRegistry.forCandidate(candidate);
+  if (!downloader) throw new Error("unsupported-media");
+  return downloader.prepare(candidate, context);
 }
 
 export async function downloadPreparedCandidate(prepared) {
-  if (!prepared?.candidate || !prepared.context) throw new Error("준비된 다운로드 작업이 올바르지 않습니다.");
-  const { candidate, context, filename, dirHandle = null } = prepared;
-  const checkpointKey = typeof candidate?.id === "string" && candidate.id
-    ? `media:${candidate.id}`
+  if (!prepared?.candidate || !prepared.context) {
+    throw new Error("준비된 다운로드 작업이 올바르지 않습니다.");
+  }
+  const checkpointKey = typeof prepared.candidate?.id === "string" && prepared.candidate.id
+    ? `media:${prepared.candidate.id}`
     : null;
-  if (prepared.type === "progressive") {
-    const result = await saveProgressive(
-      candidate.resourceUrl,
-      filename,
-      candidate.pageUrl,
-      candidate.tabId,
-      context,
-      prepared.session,
-      dirHandle,
-      checkpointKey,
-    );
-    return {
-      statusText: result.fallback
-        ? `브라우저 기본 다운로드 폴더에 저장을 완료했습니다 (${Math.round(result.bytes / 1048576)} MB).`
-        : `다운로드를 완료했습니다 (${Math.round(result.bytes / 1048576)} MB).`,
-    };
-  }
-  if (prepared.type === "dash" && Array.isArray(prepared.tracks)) {
-    for (let index = 0; index < prepared.tracks.length; index += 1) {
-      const track = prepared.tracks[index];
-      setStatus(`DASH ${track.kind === "audio" ? "오디오" : "비디오"} 저장 중… ${index + 1}/${prepared.tracks.length}`, false, context);
-      await saveHlsToNative(
-        track.media,
-        track.filename,
-        candidate.pageUrl,
-        candidate.tabId,
-        context,
-        dirHandle,
-        checkpointKey,
-        `track-${index}`,
-      );
-    }
-    return {
-      statusText: prepared.tracks.length > 1
-        ? `DASH 다운로드를 완료했습니다. 비디오·오디오 ${prepared.tracks.length}개 파일로 저장했습니다.`
-        : "DASH 다운로드를 완료했습니다.",
-    };
-  }
-  if (prepared.type !== "hls" || !prepared.media) throw new Error("준비된 다운로드 형식을 지원하지 않습니다.");
-  const saved = await saveHlsToNative(
-    prepared.media,
-    filename,
-    candidate.pageUrl,
-    candidate.tabId,
-    context,
-    dirHandle,
-    checkpointKey,
-  );
-  return {
-    statusText: "다운로드를 완료했습니다. 저장 폴더에서 확인하세요.",
-  };
+  const downloader = downloaderRegistry.forPrepared(prepared);
+  if (!downloader) throw new Error("준비된 다운로드 형식을 지원하지 않습니다.");
+  return downloader.download(prepared, { checkpointKey });
 }
 
 export async function downloadCandidate(candidate, options = {}) {

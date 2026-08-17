@@ -93,6 +93,57 @@ test("progressive preparation disconnects its runtime port when cancelled", asyn
   assert.equal(disconnects, 1);
 });
 
+test("progressive preparation carries the exact source frame to Dood refresh", async () => {
+  let posted = null;
+  let onMessage = null;
+  globalThis.chrome = {
+    runtime: {
+      connect: () => ({
+        disconnect: () => {},
+        onDisconnect: { addListener: () => {} },
+        onMessage: { addListener: (listener) => { onMessage = listener; } },
+        postMessage: (message) => {
+          posted = message;
+          queueMicrotask(() => onMessage?.({
+            type: "fetch-required",
+            url: message.url,
+            referrer: message.pageUrl,
+            authenticatedProbeRequired: false,
+          }));
+        },
+      }),
+    },
+  };
+  const session = await progressiveSession(
+    "https://cloudatacdn.example/video.mp4",
+    "https://dood.example/e/player",
+    21,
+    null,
+    7,
+  );
+  assert.equal(session.url, "https://cloudatacdn.example/video.mp4");
+  assert.equal(posted.videoTabId, 21);
+  assert.equal(posted.videoFrameId, 7);
+  delete globalThis.chrome;
+});
+
+test("Dood progressive candidates prefer the authenticated source frame", async () => {
+  const session = await prepareProgressiveFetch(
+    {
+      url: "https://asw188q.cloudatacdn.com/video.mp4",
+      referrer: "https://dood.example/e/player",
+      authenticatedProbeRequired: false,
+    },
+    createDownloadContext({
+      tabId: 21,
+      frameId: 7,
+      candidate: { downloadMode: "AUTHENTICATED_SOURCE_FRAME" },
+    }),
+  );
+  assert.equal(session.sourceFrameFallbackPreferred, true);
+  assert.equal(session.sourceFrameFallbackReason, "authenticated-source-frame");
+});
+
 test("loadMediaPlaylist accepts EXT-X-BYTERANGE playlists", async () => {
   globalThis.chrome = {
     runtime: {

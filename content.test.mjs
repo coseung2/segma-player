@@ -466,6 +466,16 @@ test("download overlay acknowledges its top-frame activation after the first ref
   assert.ok(env.sent.some((message) => message.type === "list-download-jobs"));
 });
 
+test("download overlay hide message stops the local timer and removes the host", async () => {
+  const env = baseEnvironment();
+  await importFreshContent();
+  const result = await new Promise((resolve) => {
+    const keepAlive = env.onMessage({ type: "hide-download-overlay" }, {}, resolve);
+    assert.equal(keepAlive, false);
+  });
+  assert.deepEqual(result, { ok: true, hidden: true });
+});
+
 test("an explicit rescan interrupts a pending debounce without double scanning", async () => {
   const env = baseEnvironment();
   await import(`./content.js?test=${++moduleCounter}`);

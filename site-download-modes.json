@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "modeDefinitions": {
+    "DIRECT_PROGRESSIVE": "Direct video/audio URL with range or browser-download handling",
+    "HLS_MANIFEST": "HLS playlist observed from response or player adapter",
+    "DASH_MANIFEST": "DASH MPD observed from response or player adapter",
+    "PLAYER_API": "Structured player API source that must be refreshed from the API/player context",
+    "PLAYER_PAGE_GRAPH": "Player-page URL that requires bounded graph resolution before download",
+    "AUTHENTICATED_SOURCE_FRAME": "Tokenized or protected source requiring the exact player frame context",
+    "REMOTE_SERVICE": "Remote download service flow, currently YouTube",
+    "UNKNOWN": "No safe strategy selected yet"
+  },
+  "sites": [
+    {
+      "id": "asianporn",
+      "hosts": ["asianporn.li"],
+      "primaryMode": "DIRECT_PROGRESSIVE",
+      "fallbackModes": ["HLS_MANIFEST"],
+      "userStatus": {"extensionDownload": "PASS", "browserPlayback": "PASS"}
+    },
+    {
+      "id": "missav",
+      "hosts": ["missav123.com"],
+      "primaryMode": "HLS_MANIFEST",
+      "fallbackModes": ["PLAYER_API", "AUTHENTICATED_SOURCE_FRAME"],
+      "userStatus": {"extensionDownload": "PASS", "browserPlayback": "FAIL"}
+    },
+    {
+      "id": "av19",
+      "hosts": ["av19t.com", "p.nnvivi.site", "k.vdnext.com"],
+      "primaryMode": "AUTHENTICATED_SOURCE_FRAME",
+      "fallbackModes": ["HLS_MANIFEST"],
+      "userStatus": {"extensionDownload": "PASS", "browserPlayback": "FAIL"}
+    },
+    {
+      "id": "onlyjerk",
+      "hosts": ["onlyjerk.net"],
+      "primaryMode": "PLAYER_API",
+      "fallbackModes": ["HLS_MANIFEST"],
+      "userStatus": {"extensionDownload": "PASS", "browserPlayback": "FAIL"}
+    },
+    {
+      "id": "beeg",
+      "hosts": ["beeg.com"],
+      "primaryMode": "DIRECT_PROGRESSIVE",
+      "fallbackModes": ["HLS_MANIFEST"],
+      "userStatus": {"extensionDownload": "PASS", "browserPlayback": "FAIL"}
+    },
+    {
+      "id": "dood",
+      "hosts": ["doodstream.com", "doodcdn.io", "d000d.com"],
+      "primaryMode": "AUTHENTICATED_SOURCE_FRAME",
+      "fallbackModes": ["PLAYER_PAGE_GRAPH", "DIRECT_PROGRESSIVE"],
+      "userStatus": {"extensionDownload": "FAIL_LIVE_UNVERIFIED", "browserPlayback": "PASS"}
+    },
+    {
+      "id": "youtube",
+      "hosts": ["youtube.com", "youtu.be"],
+      "primaryMode": "REMOTE_SERVICE",
+      "fallbackModes": [],
+      "userStatus": {"extensionDownload": "SEPARATE_REMOTE_FLOW", "browserPlayback": "NOT_CLASSIFIED"}
+    }
+  ]
+}

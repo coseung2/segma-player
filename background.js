@@ -8,6 +8,7 @@ import {
   makeCandidate,
   mediaTypeForResource,
   normalizeOriginPath,
+  redactUrl,
   redactCandidateForUi,
   sanitizePageMessage,
   toTextOnlyRows,
@@ -89,6 +90,8 @@ const PROGRESSIVE_REDIRECT_TARGET_LIMIT = 1000;
 const PROGRESSIVE_REDIRECT_TARGET_TTL_MS = 60_000;
 const requestHeaderStore = createRequestHeaderStore({ maxEntries: 1000, ttlMs: 10 * 60 * 1000 });
 const mediaRequestDiagnostics = createMediaRequestDiagnosticStore();
+const qaRequestTraceByKey = new Map();
+const QA_REQUEST_TRACE_LIMIT = 512;
 const progressiveRedirectTargets = new Map();
 const mainFramesByTab = new Map();
 const frameLayoutsByTab = new Map();
@@ -100,8 +103,10 @@ const tabTitleCache = new Map();
 const DOWNLOAD_JOBS_KEY = "downloadJobs";
 const DOWNLOAD_INTENTS_KEY = "downloadIntents";
 const PLAYBACK_SESSIONS_KEY = "playbackSessions";
+const DOWNLOAD_OVERLAY_KEY = "downloadOverlayJobIds";
 const downloadJobs = new Map();
 const downloadIntents = new Map();
+const downloadOverlayJobIds = new Set();
 const playbackSessions = createPlaybackSessionStore();
 const youtubeBrowserDownloads = new Map();
 const youtubeJobControllers = new Map();
@@ -110,6 +115,32 @@ const MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWeb
 const mobileUaRulesByTab = new Map();
 let mobileUaRuleIds = null;
 const workerHeartbeatPorts = new Set();
+
+function rememberQaRequestTrace(details, patch = {}) {
+  if (!Number.isInteger(details?.tabId) || details.tabId <= 0 || typeof details?.url !== "string") return;
+  const resource = redactUrl(details.url);
+  if (resource === "[redacted-invalid-url]") return;
+  const key = `${details.tabId}:${details.requestId || resource}`;
+  const previous = qaRequestTraceByKey.get(key) || {
+    tabId: details.tabId,
+    requestId: typeof details.requestId === "string" ? details.requestId : "",
+    frameId: Number.isInteger(details.frameId) ? details.frameId : null,
+    parentFrameId: Number.isInteger(details.parentFrameId) ? details.parentFrameId : null,
+    resource,
+    documentUrl: typeof details.documentUrl === "string" ? redactUrl(details.documentUrl) : "",
+    type: typeof details.type === "string" ? details.type : "",
+    phases: [],
+  };
+  previous.resource = resource;
+  previous.phases = [...new Set([...previous.phases, patch.phase].filter(Boolean))].slice(-8);
+  Object.assign(previous, patch);
+  previous.updatedAt = Number.isFinite(details.timeStamp) ? details.timeStamp : Date.now();
+  qaRequestTraceByKey.delete(key);
+  qaRequestTraceByKey.set(key, previous);
+  while (qaRequestTraceByKey.size > QA_REQUEST_TRACE_LIMIT) {
+    qaRequestTraceByKey.delete(qaRequestTraceByKey.keys().next().value);
+  }
+}
 
 try {
   const sessionAccess = chrome.storage.session.setAccessLevel?.({
@@ -209,6 +240,7 @@ const downloadJobsReady = chrome.storage.session.get({
   [DOWNLOAD_JOBS_KEY]: [],
   [DOWNLOAD_INTENTS_KEY]: [],
   [PLAYBACK_SESSIONS_KEY]: [],
+  [DOWNLOAD_OVERLAY_KEY]: [],
 }).then((stored) => {
   for (const job of stored[DOWNLOAD_JOBS_KEY] || []) {
     if (job && typeof job.id === "string") downloadJobs.set(job.id, job);
@@ -217,6 +249,9 @@ const downloadJobsReady = chrome.storage.session.get({
     if (intent && typeof intent.jobId === "string" && intent.candidate && typeof intent.candidate === "object") {
       downloadIntents.set(intent.jobId, intent);
     }
+  }
+  for (const jobId of stored[DOWNLOAD_OVERLAY_KEY] || []) {
+    if (typeof jobId === "string" && jobId) downloadOverlayJobIds.add(jobId);
   }
   playbackSessions.restore(stored[PLAYBACK_SESSIONS_KEY]);
   syncWorkerLifecycleAlarm();
@@ -236,6 +271,18 @@ async function persistPlaybackSessions() {
   await chrome.storage.session.set({
     [PLAYBACK_SESSIONS_KEY]: playbackSessions.serialized(),
   });
+}
+
+async function persistDownloadOverlay() {
+  await chrome.storage.session.set({
+    [DOWNLOAD_OVERLAY_KEY]: [...downloadOverlayJobIds].slice(-50),
+  });
+}
+
+async function rememberDownloadOverlayJob(jobId) {
+  if (typeof jobId !== "string" || !jobId) return;
+  downloadOverlayJobIds.add(jobId);
+  await persistDownloadOverlay();
 }
 
 async function rememberDownloadIntent(jobId, candidate) {
@@ -267,16 +314,17 @@ async function syncDownloadOverlayForTab(tabId, jobIds = []) {
   } catch {
     // Restricted browser pages cannot host an in-page overlay.
   }
-  const visibleJobIds = [...new Set((Array.isArray(jobIds) ? jobIds : [])
-    .filter((jobId) => typeof jobId === "string" && jobId))]
-    .slice(0, 3);
+  const visibleJobIds = [...new Set([
+    ...downloadOverlayJobIds,
+    ...(Array.isArray(jobIds) ? jobIds : []),
+  ].filter((jobId) => typeof jobId === "string" && jobId))].slice(-50);
+  const overlayMessage = visibleJobIds.length
+    ? { type: "show-download-overlay", jobIds: visibleJobIds }
+    : { type: "hide-download-overlay" };
   const deliver = async () => {
     const response = await chrome.tabs.sendMessage(
       tabId,
-      {
-        type: "show-download-overlay",
-        ...(visibleJobIds.length ? { jobIds: visibleJobIds } : {}),
-      },
+      overlayMessage,
       { frameId: 0 },
     );
     return response?.ok === true;
@@ -345,7 +393,7 @@ async function syncDownloadOverlayForActiveTab(changedJobId = "") {
     // Fall through with whatever source tabs were already collected.
   }
   for (const tabId of targetTabIds) {
-    await syncDownloadOverlayForTab(tabId, changedJobId ? [changedJobId] : []);
+    await syncDownloadOverlayForTab(tabId);
   }
 }
 
@@ -1007,6 +1055,7 @@ async function startSubtitleGeneration(input) {
   }));
   if (sourceTabId !== null) jobSourceTabs.set(jobId, sourceTabId);
   await persistDownloadJobs();
+  await rememberDownloadOverlayJob(jobId);
   void syncDownloadOverlayForAllTabs([jobId]);
   await ensureDownloadWorker();
   const accepted = await chrome.runtime.sendMessage({
@@ -1143,6 +1192,18 @@ async function queueMediaDownload(candidate) {
     title: candidate.pageTitle || "미디어 다운로드",
     mediaType: candidate.mediaType,
     candidateId: candidate.id,
+    diagnostic: {
+      resource: candidate.displayUrl || "",
+      mediaType: candidate.mediaType,
+      downloadMode: candidate.downloadMode || "UNKNOWN",
+      frameId: candidate.frameId,
+      player: candidate.player,
+      sessionId: candidate.sessionId,
+      source: candidate.evidence?.[0]?.source,
+      requestType: candidate.evidence?.[0]?.requestType,
+      main: candidate.main,
+      score: candidate.score,
+    },
     retryPayload: { kind: "media", candidate: structuredClone(candidate) },
   });
   downloadJobs.set(jobId, job);
@@ -1152,6 +1213,7 @@ async function queueMediaDownload(candidate) {
   await Promise.all([
     persistDownloadJobs(),
     rememberDownloadIntent(jobId, candidate).catch(() => {}),
+    rememberDownloadOverlayJob(jobId),
   ]);
   syncWorkerLifecycleAlarm();
   void syncDownloadOverlayForAllTabs([jobId]);
@@ -1238,6 +1300,7 @@ async function clearDownloadJobs(surface = "all") {
     if (!terminalDownloadJob(job) || (surface !== "all" && surface !== jobSurface)) continue;
     downloadJobs.delete(jobId);
     downloadIntents.delete(jobId);
+    downloadOverlayJobIds.delete(jobId);
     jobSourceTabs.delete(jobId);
     cleared += 1;
   }
@@ -1245,6 +1308,7 @@ async function clearDownloadJobs(surface = "all") {
     await Promise.all([
       persistDownloadJobs().catch(() => {}),
       persistDownloadIntents().catch(() => {}),
+      persistDownloadOverlay().catch(() => {}),
     ]);
     void chrome.runtime.sendMessage({ type: "download-jobs-changed" }).catch(() => {});
   }
@@ -1720,7 +1784,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "complete") {
-    if (hasActiveDownloadJobs()) void syncDownloadOverlayForTab(tabId);
+    if (downloadOverlayJobIds.size) void syncDownloadOverlayForTab(tabId);
     return;
   }
   if (changeInfo.status !== "loading" || !changeInfo.url) return;
@@ -1763,6 +1827,7 @@ chrome.contextMenus.onClicked.addListener((info) => {
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
+    rememberQaRequestTrace(details, { phase: "request" });
     void tabTitle(details.tabId).then((title) => {
       observeResource({
         pageTitle: title,
@@ -1791,6 +1856,11 @@ chrome.webRequest.onBeforeRequest.addListener(
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     const contentType = (details.responseHeaders || []).find((header) => header.name.toLowerCase() === "content-type")?.value || "";
+    rememberQaRequestTrace(details, {
+      phase: "headers",
+      statusCode: Number.isInteger(details.statusCode) ? details.statusCode : null,
+      contentType: contentType.slice(0, 128),
+    });
     if (!contentType) return;
     void tabTitle(details.tabId).then((title) => {
       observeResource({
@@ -1810,6 +1880,27 @@ chrome.webRequest.onHeadersReceived.addListener(
   },
   { urls: ["http://*/*", "https://*/*"] },
   ["responseHeaders"],
+);
+
+chrome.webRequest.onCompleted?.addListener(
+  (details) => {
+    rememberQaRequestTrace(details, {
+      phase: "completed",
+      statusCode: Number.isInteger(details.statusCode) ? details.statusCode : null,
+      fromCache: details.fromCache === true,
+    });
+  },
+  { urls: ["http://*/*", "https://*/*"], types: ["media", "xmlhttprequest", "other"] },
+);
+
+chrome.webRequest.onErrorOccurred?.addListener(
+  (details) => {
+    rememberQaRequestTrace(details, {
+      phase: "error",
+      error: typeof details.error === "string" ? details.error.slice(0, 160) : "",
+    });
+  },
+  { urls: ["http://*/*", "https://*/*"], types: ["media", "xmlhttprequest", "other"] },
 );
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -1835,6 +1926,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "cancel-download-job" && sender.id === chrome.runtime.id) {
     cancelDownloadJob(message.jobId).then(sendResponse, () => sendResponse({ ok: false, error: "cancel-failed" }));
+    return true;
+  }
+
+  if (message?.type === "dismiss-download-overlay" && sender.id === chrome.runtime.id && sender.tab?.id) {
+    downloadJobsReady.then(async () => {
+      downloadOverlayJobIds.clear();
+      await persistDownloadOverlay();
+      await syncDownloadOverlayForAllTabs();
+      sendResponse({ ok: true });
+    }).catch(() => sendResponse({ ok: false, error: "overlay-dismiss-failed" }));
     return true;
   }
 
@@ -1940,6 +2041,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     && playerOwnsPlaybackSession(sender, message.sessionId)) {
     closePlaybackSession(message.sessionId).then(sendResponse, () => sendResponse({ ok: false }));
     return true;
+  }
+
+  if (message?.type === "qa-list-candidates" && Number.isInteger(sender.tab?.id)) {
+    const tabId = sender.tab.id;
+    rerankTabCandidates(tabId);
+    const filtered = [...candidates.values()]
+      .filter((candidate) => candidate.tabId === tabId
+        && isDownloadableMediaType(candidate.mediaType)
+        && !isLikelyHlsSegmentUrl(candidate.resourceUrl)
+        && !isYouTubeDetectionCandidate(candidate))
+      .sort((left, right) => (Number(right.score) - Number(left.score))
+        || (Number(right.lastObservedAt) - Number(left.lastObservedAt)))
+      .map(redactCandidateForUi);
+    sendResponse({ ok: true, candidates: filtered });
+    return false;
+  }
+
+  if (message?.type === "qa-list-request-trace" && Number.isInteger(sender.tab?.id)) {
+    const tabId = sender.tab.id;
+    const trace = [...qaRequestTraceByKey.values()]
+      .filter((entry) => entry.tabId === tabId)
+      .slice(-160)
+      .map((entry) => ({ ...entry, phases: [...entry.phases] }));
+    sendResponse({ ok: true, requests: trace });
+    return false;
   }
 
   if (message?.type === "list-candidates" && playbackLauncherSender(sender)) {
@@ -2443,7 +2569,15 @@ chrome.runtime.onConnect.addListener((port) => {
         // The player iframe's content script re-resolves /pass_md5 in its own
         // context, giving a fresh token URL and the exact Referer the CDN
         // expects (the /e/ player frame, not the outer page).
-        const fresh = await sendTabMessageWithTimeout(message.videoTabId, { type: "get-dood-direct" });
+        const frameOptions = Number.isInteger(message.videoFrameId) && message.videoFrameId >= 0
+          ? { frameId: message.videoFrameId }
+          : null;
+        const fresh = await sendTabMessageWithTimeout(
+          message.videoTabId,
+          { type: "get-dood-direct" },
+          8_000,
+          frameOptions,
+        );
         const freshUrl = fresh?.ok && typeof fresh.url === "string" ? canonicalHttpUrl(fresh.url)?.href : null;
         const freshFrameUrl = typeof fresh?.frameUrl === "string" ? canonicalHttpUrl(fresh.frameUrl)?.href : null;
         if (freshUrl) {

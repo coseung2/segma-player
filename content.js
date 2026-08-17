@@ -549,6 +549,11 @@
       );
       return true;
     }
+    if (message?.type === "hide-download-overlay") {
+      cleanDownloadOverlay();
+      sendResponse({ ok: true, hidden: true });
+      return false;
+    }
     if (message?.type === "rescan") {
       scheduleScan(true);
       return false;
@@ -569,7 +574,12 @@
       downloadOverlayTimer = null;
     }
     shownDownloadJobIds.clear();
-    document.getElementById("aura-media-progress-host")?.remove();
+    document.getElementById?.("aura-media-progress-host")?.remove();
+  }
+
+  function dismissDownloadOverlay() {
+    cleanDownloadOverlay();
+    void chrome.runtime.sendMessage({ type: "dismiss-download-overlay" }).catch(() => {});
   }
 
   function downloadOverlayHost() {
@@ -712,17 +722,54 @@
     } catch {
       // The background may be waking; the timer will retry on the next tick.
     }
-    const now = Date.now();
-    const recent = jobs.filter((job) => ACTIVE_DOWNLOAD_STATUSES.has(job.status)
-      || (typeof job.updatedAt === "number" && now - job.updatedAt < 15 * 1000));
-    for (const job of recent) shownDownloadJobIds.add(job.id);
+    const qaCandidates = jobs
+      .filter((job) => job?.diagnostic && typeof job.diagnostic === "object")
+      .map((job) => ({
+        id: job.id,
+        title: job.title,
+        status: job.status,
+        statusText: job.statusText,
+        updatedAt: job.updatedAt,
+        diagnostic: job.diagnostic,
+      }));
+    if (qaCandidates.length) document.documentElement.dataset.auraQaCandidates = JSON.stringify(qaCandidates);
+    try {
+      const detected = await chrome.runtime.sendMessage({ type: "qa-list-candidates" });
+      if (detected?.ok && Array.isArray(detected.candidates)) {
+        document.documentElement.dataset.auraQaDetectedCandidates = JSON.stringify(detected.candidates);
+      }
+    } catch {
+      // QA diagnostics are optional and never affect the overlay.
+    }
+    try {
+      const trace = await chrome.runtime.sendMessage({ type: "qa-list-request-trace" });
+      if (trace?.ok && Array.isArray(trace.requests)) {
+        document.documentElement.dataset.auraQaRequestTrace = JSON.stringify(trace.requests);
+      }
+    } catch {
+      // QA diagnostics are optional and never affect the overlay.
+    }
     const visible = jobs.filter((job) => shownDownloadJobIds.has(job.id));
-    if (!jobs.length) return;
+    if (!jobs.length) {
+      cleanDownloadOverlay();
+      return;
+    }
     if (!visible.length) {
       cleanDownloadOverlay();
       return;
     }
     const host = downloadOverlayHost();
+    const visibleQaCandidates = visible
+      .filter((job) => job?.diagnostic && typeof job.diagnostic === "object")
+      .map((job) => ({
+        id: job.id,
+        title: job.title,
+        status: job.status,
+        statusText: job.statusText,
+        diagnostic: job.diagnostic,
+      }));
+    if (visibleQaCandidates.length) host.dataset.auraQaCandidates = JSON.stringify(visibleQaCandidates);
+    else delete host.dataset.auraQaCandidates;
     host.replaceChildren();
     const panel = document.createElement("div");
     panel.setAttribute("style", "overflow:hidden;background:#10141c;border:1px solid #2a3444;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.45);");
@@ -736,7 +783,7 @@
     close.textContent = "×";
     close.setAttribute("aria-label", overlayText("close"));
     close.setAttribute("style", "appearance:none;-webkit-appearance:none;border:0;background:transparent;color:#8b9ab0;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;");
-    close.addEventListener("click", cleanDownloadOverlay);
+    close.addEventListener("click", dismissDownloadOverlay);
     head.append(heading, close);
     panel.append(head);
     for (const job of visible.slice(0, 3)) panel.append(buildDownloadOverlayRow(job));
@@ -893,5 +940,6 @@
   } catch {
     // Some test or embedded realms do not expose interval timers.
   }
+  void refreshDownloadOverlay();
   scan();
 })();

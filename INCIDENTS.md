@@ -82,7 +82,19 @@
 - 회귀 테스트: 정적 자산·player page 거부, JSON `streaming_url` 검출, 기존 observer 보안 제약과 전체 회귀 통과
 - live 결과: Playmogo의 기존 false-positive 후보는 사라졌고 현재 페이지는 visible challenge 때문에 `BLOCKED`됨. OnlyJerk에서는 실제 HLS 후보와 manifest HTTP 200을 확인했지만 ARM64 test Chromium이 codec을 지원하지 않아 playback은 `BLOCKED`됨
 - staging 버전: `0.3.76`
-- 남은 검증: Windows Chrome/Whale에서 OnlyJerk 실제 frame 재생과 Playmogo challenge 통과 후 감지·다운로드를 확인해야 함
+- 0.3.77 조치: `.vtt`, `.srt`, `.ass` 등 자막 text-track 확장자와 `text/vtt`·TTML 계열 MIME을 known non-media로 분류함. URL 확장자가 없더라도 MIME으로 차단해 media-element fallback이 자막을 `PROGRESSIVE` 후보로 승격하지 않도록 함
+- 회귀 테스트: 자막 text-track URL과 extensionless `text/vtt` 모두 `isKnownNonMediaResourceUrl`, `mediaTypeForResource`, `makeCandidate` 단계에서 거부; focused 22 pass, 전체 399 pass, site fixture 16 pass
+- 0.3.77 live recheck: av19 Level5 iframe의 native video는 `readyState=4`, `currentTime=14.3s`, `1080x460`, HTTP 206으로 재생됐고 `thumbs.vtt` false-positive는 사라졌지만, 확장 후보가 0개가 되어 Level5 HLS primary 선택까지는 확인하지 못함
+- staging 버전: `0.3.77`
+- 남은 검증: 현재 공급자 frame에서 Level5 HLS source가 후보로 다시 노출되는 경로를 Windows Chrome/Whale에서 확인하고, `thumbs.vtt` 제거와 Level5 HLS primary 선택을 함께 통과한 뒤에만 `RESOLVED`로 전환함
+
+#### 결론 및 변동 사이트 대응 원칙
+
+- 결론: 2026-08-16에는 같은 av19 계열 페이지에서 native playback과 Level5 HLS 후보 2개가 관측됐지만, 2026-08-17에는 native playback은 계속 성공하는 동안 Level5 HLS source가 확장에 노출되지 않아 후보가 0개가 됐다. 이는 현재 증거만으로 확장 회귀라고 단정할 수 없고, 공급자 player/source 노출 방식의 변동 가능성이 우선이다.
+- `.vtt` false-positive 차단은 유지하되, 이 하루의 관측만으로 provider-specific URL rule이나 더 공격적인 후보 승격을 추가하지 않는다.
+- 실사이트 판정은 `native-page playback`, `detect`, `progressive-probe`, `extension-download`, `subtitle`, `overlay`를 독립 surface로 기록한다. native playback 성공 + detect 0은 provider drift 후보로 분류하고, main/control과 후보 빌드의 동일 시점 A/B가 없으면 제품 회귀로 확정하지 않는다.
+- 대응 전략: bounded generic adapter(플레이어 source, manifest MIME, JSON의 제한된 stream 키)와 text-track/정적 자산 차단을 유지하고, URL·host·DOM selector를 고정하는 사이트별 예외는 추가하지 않는다.
+- 운영 전략: known-good main artifact와 후보 artifact를 같은 브라우저·같은 URL·같은 AdBlock/VPN 모드로 비교하고, 이틀 연속 또는 main 대비 후보만 실패할 때만 코드 수정 incident를 연다. Cloudflare, 연결 리셋, codec, source 비노출은 별도 환경/provider 상태로 분류한다.
 
 ## 회귀 방지 체크리스트
 
@@ -115,3 +127,33 @@
 - The user later confirmed that the native site player and Aura download path succeeded while Aura Player failed. Treat the player-specific request or media pipeline as the primary remaining scope.
 - Evidence: `artifacts/live-media-0.3.75-docp-259-old-compat.json`; `C:\Users\coseung2\AppData\Local\Temp\aura-mdownloader-054\artifacts\live-media-0.3.54-docp-259-package.json`.
 - Status remains `CODE-FIXED / LIVE-UNVERIFIED`; do not mark resolved until the same Windows Chrome/Whale user path passes with 0.3.76 or later.
+- QA 진단 조치: 0MB 후보의 redacted `host/path`, media type, frame, player/session/source metadata를 download job에 보존하고 source-page overlay host와 document root의 `data-aura-qa-candidates`에 노출한다. 토큰 query 값은 기록하지 않는다. staging `0.3.79`; live retest `LIVE-UNVERIFIED`.
+- INC-2026-08-17-007 follow-up: live trace on `https://av19t.com/korea/97526` confirmed `https://cdn.plyr.io/static/blank.mp4` as the `main=true` `PROGRESSIVE` candidate (`frameId=164`, `source=web-response`, `score=67`) and the source of the 0MB completion. Added generic placeholder-media rejection in `candidate.js` plus a focused regression test. Staging `0.3.80`; status `CODE-FIXED / LIVE-UNVERIFIED` until the user Chrome path is retested.
+- INC-2026-08-17-007 follow-up: staging `0.3.81` adds a tab-scoped QA candidate query from the content script, stored as `document.documentElement.dataset.auraQaDetectedCandidates`, so zero-candidate detection can be distinguished from expired overlay diagnostics. Live result `LIVE-UNVERIFIED`.
+- INC-2026-08-17-007 follow-up: staging `0.3.82` triggers the tab-scoped candidate diagnostic once at page load, not only when a download overlay exists. Live result `LIVE-UNVERIFIED`.
+- INC-2026-08-17-007 live result: staging `0.3.82` correctly removes `cdn.plyr.io/static/blank.mp4`, but the user Chrome page then reports zero downloadable candidates while the cross-origin AV19 player visibly plays. Status remains `CODE-FIXED / LIVE-UNVERIFIED`; next scope is player-frame source exposure, not candidate ranking.
+- INC-2026-08-17-007 follow-up: staging `0.3.83` exposes a bounded token-redacted `webRequest` trace at `document.documentElement.dataset.auraQaRequestTrace` to locate player-frame media requests that never become candidates. Live result `LIVE-UNVERIFIED`.
+- INC-2026-08-17-007 follow-up: staging `0.3.84` adds bounded inline Level5 source extraction for player initialization URLs. On the live AV19 iframe, the extracted `v.html` URL returns `application/vnd.apple.mpegurl` HLS when requested with the player-frame referrer; focused Level5 bridge tests pass. Live extension detect/download retest remains pending.
+- INC-2026-08-17-007 live evidence: after the 0.3.84 reload, the AV19 player frame emitted the real `v.html` HLS request with HTTP 200 and `application/vnd.apple.mpegurl`, followed by `v/session` and encrypted media-chunk requests. The persistent QA candidate attribute was still the page-load snapshot taken before those requests, so it is inconclusive rather than a confirmed zero-candidate result. Extension-download remains unverified.
+- INC-2026-08-17-007 follow-up: staging `0.3.85` fixes the confirmed candidate rejection: `isKnownNonMediaResourceUrl()` treated the provider's `.html` HLS endpoint as static HTML before honoring its explicit HLS MIME. Explicit HLS/DASH MIME now overrides only that static-extension check; blank media and text tracks remain rejected. Candidate regression 25/25, full test suite pass, staging build pass. Live Chrome reload/download verification remains pending.
+- Download-mode follow-up: staging `0.3.86` adds evidence-based `downloadMode` classification to candidates and the download diagnostic, plus a machine-readable site mode registry. Full test suite and 60-file Pro staging build pass; no live behavior change is claimed from the taxonomy alone.
+- INC-2026-08-17-007 live closure evidence: user confirmed that the staged Chrome extension download path now works on both MissAV and AV19. Keep subtitle, progressive-probe, and Aura playback as separate unverified surfaces until tested directly.
+
+### INC-2026-08-17-008 Dood authenticated source-frame download failure
+
+- Status: `CODE-FIXED / LIVE-UNVERIFIED`
+- Reproduction: user's headed Chrome session with extension `0.3.86` Pro; Dood candidate is detected and Aura browser playback succeeds. DevTools shows a tokenized CDN media URL, but opening that URL in a new tab is blocked. The extension-download surface still fails.
+- Confirmed behavior: the Dood CDN authorizes the media request from the player frame context. A top-level navigation is not an equivalent test and is expected to be hotlink-blocked.
+- Confirmed code gap: the download `media-stream` path carried the source tab but dropped the candidate `frameId` before requesting a fresh Dood URL, allowing the refresh to target the wrong frame and losing the exact player-frame context.
+- Code action in `0.3.87`: carry `videoFrameId` through the progressive session and target `get-dood-direct` at that frame; Dood-compatible progressive candidates now prefer the source-frame browser-download handoff instead of an extension-origin probe.
+- Regression test: `hls-download.test.mjs` covers frame propagation and source-frame preference; focused suite passes.
+- Live result after code action: `LIVE-UNVERIFIED`; the real Chrome Dood tab must be reloaded and the extension-download surface retested. Do not infer download success from Aura playback or from a direct new-tab test.
+
+### INC-2026-08-17-009 download overlay was tab-local and close was not global
+
+- Status: `CODE-FIXED / LIVE-UNVERIFIED`
+- Reproduction: extension `0.3.87` in the user's headed Chrome session; a download or subtitle-generation overlay appeared per tab, and closing it in one tab did not prevent it from returning after switching tabs.
+- Confirmed root cause: each content script owned its own `shownDownloadJobIds` set and timer. The close button only removed that tab's host; tab activation could repopulate another tab from active/recent jobs.
+- Code action in `0.3.88`: background now owns a session-persisted overlay job list, sends the same accumulated list to every eligible web tab, preserves terminal records until global close, and broadcasts `hide-download-overlay` after dismissal.
+- Regression test: content overlay activation and global-hide message coverage pass; full `npm test` and Pro staging build pass.
+- Live result after code action: `LIVE-UNVERIFIED`; reload the `0.3.88` staging extension and verify tab switching, accumulated records, and global close in the user's Chrome session.

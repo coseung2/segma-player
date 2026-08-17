@@ -1,4 +1,5 @@
 import { isStreamtapePlayerPage, looksLikePlayerPage } from "./player-page-resolver.js";
+import { classifyDownloadMode } from "./download-mode.js";
 
 export const LIMITS = Object.freeze({
   urlBytes: 4096,
@@ -21,6 +22,9 @@ export const MEDIA_TYPES = Object.freeze({
 const TOKEN_QUERY_NAME_RE = /(?:^|[-_])(?:auth|authorization|expires?|expiry|hdnts?|jwt|key|policy|session|sig|signature|ticket|token)(?:$|[-_])/i;
 const EXPIRY_QUERY_NAME_RE = /^(?:e|exp|expires?|expiry|token_expiry)$/i;
 const SAFE_METADATA_TOKEN_RE = /^[a-z0-9][a-z0-9._:-]{0,127}$/i;
+const TEXT_TRACK_PATH_RE = /\.(?:ass|dfxp|lrc|sbv|srt|ssa|sub|ttml|vtt)$/i;
+const TEXT_TRACK_CONTENT_TYPE_RE = /^(?:text\/(?:vtt|srt|ssa|ass)|application\/(?:ttml\+xml|x-ass|x-subrip|x-srt))(?:\s*;|$)/i;
+const PLACEHOLDER_MEDIA_PATH_RE = /(?:^|\/)(?:blank|empty|placeholder)\.(?:m4v|mp4|webm)$/i;
 
 export function isDownloadableMediaType(value) {
   return value === MEDIA_TYPES.PROGRESSIVE || value === MEDIA_TYPES.HLS_MASTER
@@ -179,15 +183,20 @@ export function isImageResourceUrl(value) {
   return Boolean(url && /\.(?:avif|gif|ico|jpe?g|png|webp)$/i.test(url.pathname));
 }
 
-export function isKnownNonMediaResourceUrl(value) {
+export function isKnownNonMediaResourceUrl(value, contentType = "") {
   const url = canonicalHttpUrl(value);
   if (!url) return false;
   const pathname = url.pathname.toLowerCase();
+  const normalizedContentType = typeof contentType === "string" ? contentType.trim() : "";
+  const explicitManifestType = /mpegurl|dash\+xml/i.test(normalizedContentType);
   return pathname === "/favicon.ico"
     || pathname.startsWith("/cdn-cgi/challenge-platform/")
     || pathname === "/cdn-cgi/rum"
     || pathname === "/cdn-cgi/speculation"
-    || /\.(?:css|eot|html?|js|json|map|otf|svg|text|ttf|txt|woff2?|xml)$/i.test(pathname);
+    || TEXT_TRACK_PATH_RE.test(pathname)
+    || TEXT_TRACK_CONTENT_TYPE_RE.test(normalizedContentType)
+    || PLACEHOLDER_MEDIA_PATH_RE.test(pathname)
+    || (!explicitManifestType && /\.(?:css|eot|html?|js|json|map|otf|svg|text|ttf|txt|woff2?|xml)$/i.test(pathname));
 }
 
 export function isLikelyHlsSegmentUrl(value) {
@@ -213,9 +222,10 @@ export function mediaTypeForResource(resourceUrl, contentType = "") {
     pathname = parsed.pathname.toLowerCase();
     const explicitMediaPath = /\.(?:aac|flac|m3u8|m4a|m4v|mkv|mov|mp3|mp4|mpd|ogg|ogv|opus|ts|webm)$/i
       .test(pathname);
+    const explicitManifestType = /mpegurl|dash\+xml/i.test(lowerType);
     if (isStreamtapePlayerPage(parsed.href)) return MEDIA_TYPES.UNKNOWN;
-    if (looksLikePlayerPage(parsed.href) && !explicitMediaPath) return MEDIA_TYPES.UNKNOWN;
-    if (isKnownNonMediaResourceUrl(parsed.href)) return MEDIA_TYPES.UNKNOWN;
+    if (looksLikePlayerPage(parsed.href) && !explicitMediaPath && !explicitManifestType) return MEDIA_TYPES.UNKNOWN;
+    if (isKnownNonMediaResourceUrl(parsed.href, contentType)) return MEDIA_TYPES.UNKNOWN;
   } catch {
     return MEDIA_TYPES.UNKNOWN;
   }
@@ -329,7 +339,7 @@ export function makeCandidate({
   const canonical = blob ? resourceUrl : canonicalHttpUrl(resourceUrl)?.href;
   const pageCanonical = canonicalHttpUrl(pageUrl);
   const origin = pageCanonical ? `${pageCanonical.protocol}//${pageCanonical.host}` : null;
-  if (!canonical || (!blob && (isImageResourceUrl(canonical) || isKnownNonMediaResourceUrl(canonical) || isLikelyHlsSegmentUrl(canonical)
+  if (!canonical || (!blob && (isImageResourceUrl(canonical) || isKnownNonMediaResourceUrl(canonical, contentType) || isLikelyHlsSegmentUrl(canonical)
     || isLikelyPreviewResourceUrl(canonical))) || !origin
     || typeof pageTitle !== "string" || [...pageTitle].length > LIMITS.titleCharacters
     || /[\u0000-\u001f\u007f]/.test(pageTitle) || typeof contentType !== "string"
@@ -342,7 +352,7 @@ export function makeCandidate({
   // no ".mp4" extension and an application/octet-stream Content-Type, which
   // extension/content-type matching alone would drop.
   if (mediaType === MEDIA_TYPES.UNKNOWN && fromMediaElement && !blob
-    && !isImageResourceUrl(canonical) && !isKnownNonMediaResourceUrl(canonical)
+    && !isImageResourceUrl(canonical) && !isKnownNonMediaResourceUrl(canonical, contentType)
     && !looksLikePlayerPage(canonical)) {
     mediaType = MEDIA_TYPES.PROGRESSIVE;
   }
@@ -369,6 +379,14 @@ export function makeCandidate({
     confidence: confidence ?? (fromMediaElement ? 80 : 50),
     at: observationTime,
   });
+  const downloadMode = classifyDownloadMode({
+    pageUrl: pageCanonical.href,
+    resourceUrl: canonical,
+    mediaType,
+    player,
+    detectionSource,
+    evidence: normalizedEvidence,
+  });
   const evidencePlayer = normalizedEvidence.find((item) => item.player)?.player || "";
   const evidenceSession = normalizedEvidence.find((item) => item.sessionId)?.sessionId || "";
   const freshness = blob
@@ -387,6 +405,7 @@ export function makeCandidate({
     score: 0,
     scoreReasons: [],
     mediaType,
+    downloadMode,
     resourceUrl: canonical,
     displayUrl: redactUrl(canonical),
     detectedAt: new Date(observationTime).toISOString(),
@@ -431,6 +450,7 @@ export function upsertCandidate(candidates, candidate, limit = LIMITS.candidates
       existing.pageOrigin = candidate.pageOrigin;
     }
     existing.explicitMain = Boolean(existing.explicitMain || candidate.explicitMain || candidate.main);
+    existing.downloadMode = candidate.downloadMode || existing.downloadMode || "UNKNOWN";
     existing.lastObservedAt = Math.max(
       Number(existing.lastObservedAt) || 0,
       Number(candidate.lastObservedAt) || Date.now(),
@@ -499,6 +519,7 @@ export function redactCandidateForUi(candidate) {
     classification: typeof candidate.classification === "string" ? candidate.classification : "alternate",
     score: Number.isFinite(candidate.score) ? candidate.score : 0,
     mediaType: candidate.mediaType,
+    downloadMode: candidate.downloadMode || "UNKNOWN",
     displayUrl: candidate.displayUrl,
     detectedAt: candidate.detectedAt,
     durationMs: candidate.durationMs,

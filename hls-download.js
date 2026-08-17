@@ -276,7 +276,13 @@ export async function probeProgressiveCandidateSize(candidate) {
   });
   await loadRecordedHeaders(context);
   const session = await prepareProgressiveFetch(
-    await progressiveSession(candidate.resourceUrl, candidate.pageUrl, candidate.tabId, context.signal),
+    await progressiveSession(
+      candidate.resourceUrl,
+      candidate.pageUrl,
+      candidate.tabId,
+      context.signal,
+      context.frameId,
+    ),
     context,
   );
   if (session.sourceFrameFallbackPreferred) {
@@ -1120,7 +1126,7 @@ async function createCheckpointingSink({
   };
 }
 
-function progressiveSession(url, pageUrl, videoTabId, signal = null) {
+function progressiveSession(url, pageUrl, videoTabId, signal = null, videoFrameId = null) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(abortError());
@@ -1152,7 +1158,13 @@ function progressiveSession(url, pageUrl, videoTabId, signal = null) {
         finish(null, new Error(message.message || "다운로드에 실패했습니다."));
       }
     });
-    port.postMessage({ type: "start", url, pageUrl, videoTabId });
+    port.postMessage({
+      type: "start",
+      url,
+      pageUrl,
+      videoTabId,
+      ...(Number.isInteger(videoFrameId) && videoFrameId >= 0 ? { videoFrameId } : {}),
+    });
   });
 }
 
@@ -1170,7 +1182,20 @@ async function cancelProbeResponse(response) {
 }
 
 async function prepareProgressiveFetch(session, context = defaultDownloadContext) {
-  if (!session.authenticatedProbeRequired) return session;
+  if (!session.authenticatedProbeRequired) {
+    // Dood-compatible URLs are authorized by the player frame. Keep the
+    // download on that exact frame instead of probing from the extension
+    // origin, even when the CDN happens to answer the probe.
+    if (isDoodLikeHost(session.url)
+      && Number.isInteger(context.tabId) && Number.isInteger(context.frameId)) {
+      return {
+        ...session,
+        sourceFrameFallbackPreferred: true,
+        sourceFrameFallbackReason: "authenticated-source-frame",
+      };
+    }
+    return session;
+  }
 
   let finalUrl;
   try {
@@ -1318,7 +1343,10 @@ async function saveProgressive(
   checkpointKey = null,
 ) {
   const session = preparedSession
-    || await prepareProgressiveFetch(await progressiveSession(url, pageUrl, videoTabId, context.signal), context);
+    || await prepareProgressiveFetch(
+      await progressiveSession(url, pageUrl, videoTabId, context.signal, context.frameId),
+      context,
+    );
   let saveHandle = dirHandle || await getStoredSaveDirectory();
   if (saveHandle && !(await hasReadWritePermission(saveHandle))) saveHandle = null;
 
@@ -1641,7 +1669,13 @@ export async function prepareDownloadCandidate(candidate, {
     );
     setStatus("영상을 확인하는 중…", false, context);
     const session = await prepareProgressiveFetch(
-      await progressiveSession(candidate.resourceUrl, candidate.pageUrl, candidate.tabId, context.signal),
+      await progressiveSession(
+        candidate.resourceUrl,
+        candidate.pageUrl,
+        candidate.tabId,
+        context.signal,
+        context.frameId,
+      ),
       context,
     );
     setStatus(activePlan.backgroundDownloads

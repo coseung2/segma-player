@@ -11,6 +11,7 @@ export function createDownloadJob({
   candidateId = "",
   folderName = "",
   source = "media",
+  diagnostic = null,
   retryPayload = null,
   now = Date.now(),
 }) {
@@ -26,6 +27,17 @@ export function createDownloadJob({
     error: "",
     errorCode: "",
     folderName: safeText(folderName),
+    diagnostic: diagnostic && typeof diagnostic === "object" ? Object.freeze({
+      resource: safeText(diagnostic.resource),
+      mediaType: safeText(diagnostic.mediaType, "UNKNOWN"),
+      frameId: Number.isInteger(diagnostic.frameId) ? diagnostic.frameId : null,
+      player: safeText(diagnostic.player),
+      sessionId: safeText(diagnostic.sessionId),
+      source: safeText(diagnostic.source),
+      requestType: safeText(diagnostic.requestType),
+      main: Boolean(diagnostic.main),
+      score: Number.isFinite(diagnostic.score) ? diagnostic.score : 0,
+    }) : null,
     retryPayload: retryPayload && typeof retryPayload === "object" ? retryPayload : null,
     createdAt: now,
     updatedAt: now,
@@ -55,8 +67,10 @@ export function publicDownloadJobs(jobs, limit = 30) {
   return [...jobs]
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, limit)
-    .map(({ id, title, mediaType, candidateId, status, statusText, error, errorCode, folderName, createdAt, updatedAt, source, retryPayload }) => ({
-      id, title, mediaType, candidateId, status, statusText, error, errorCode, folderName, createdAt, updatedAt, source,
+    .map(({ id, title, mediaType, candidateId, status, statusText, error, errorCode, folderName, diagnostic, createdAt, updatedAt, source, retryPayload }) => ({
+      id, title, mediaType, candidateId, status, statusText, error, errorCode, folderName,
+      ...(diagnostic ? { diagnostic } : {}),
+      createdAt, updatedAt, source,
       retryable: (status === "failed" || status === "cancelled") && Boolean(retryPayload),
     }));
 }

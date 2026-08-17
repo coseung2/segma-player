@@ -17,6 +17,7 @@ export const STORE_RUNTIME_FILES = Object.freeze([
   "download-errors.js",
   "download-job-view.js",
   "download-jobs.js",
+  "download-mode.js",
   "download-scheduler.js",
   "download-worker.html",
   "download-worker.js",

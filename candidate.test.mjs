@@ -158,6 +158,44 @@ test("rejects Cloudflare telemetry and static assets even when observed as media
   }
 });
 
+test("rejects subtitle text tracks before media-element fallback can promote them", () => {
+  const vttUrl = "https://k.vdnext.com/cast2/abc123/thumbs.vtt";
+  const extensionlessTrackUrl = "https://k.vdnext.com/cast2/abc123/captions?id=main";
+  assert.equal(isKnownNonMediaResourceUrl(vttUrl), true);
+  assert.equal(isKnownNonMediaResourceUrl(extensionlessTrackUrl, "text/vtt; charset=utf-8"), true);
+  assert.equal(mediaTypeForResource(vttUrl, ""), MEDIA_TYPES.UNKNOWN);
+  assert.equal(mediaTypeForResource(extensionlessTrackUrl, "text/vtt; charset=utf-8"), MEDIA_TYPES.UNKNOWN);
+  for (const [resourceUrl, contentType] of [
+    [vttUrl, ""],
+    [extensionlessTrackUrl, "text/vtt; charset=utf-8"],
+  ]) {
+    assert.equal(makeCandidate({
+      pageTitle: "Level5 video",
+      pageUrl: "https://av19t.com/bj/39141",
+      resourceUrl,
+      contentType,
+      fromMediaElement: true,
+    }), null);
+  }
+});
+
+test("rejects generic blank media placeholders before they become the primary candidate", () => {
+  const url = "https://cdn.plyr.io/static/blank.mp4";
+  assert.equal(isKnownNonMediaResourceUrl(url, "video/mp4"), true);
+  assert.equal(mediaTypeForResource(url, "video/mp4"), MEDIA_TYPES.UNKNOWN);
+  assert.equal(makeCandidate({
+    pageTitle: "AV19",
+    pageUrl: "https://av19t.com/korea/97526",
+    resourceUrl: url,
+    contentType: "video/mp4",
+    main: true,
+    explicitMain: true,
+    tabId: 1,
+    frameId: 164,
+    detectionSource: "web-response",
+  }), null);
+});
+
 test("rejects generic /d/ and /e/ player pages as progressive media", () => {
   for (const resourceUrl of [
     "https://playmogo.com/d/example",
@@ -179,6 +217,41 @@ test("keeps an explicit media file under a player-like path", () => {
     mediaTypeForResource("https://cdn.example/d/movie.mp4", "video/mp4"),
     MEDIA_TYPES.PROGRESSIVE,
   );
+});
+
+test("keeps an HLS manifest under a player-like path when its MIME is explicit", () => {
+  assert.equal(
+    mediaTypeForResource("https://media.example/e/session", "application/vnd.apple.mpegurl"),
+    MEDIA_TYPES.HLS_MEDIA,
+  );
+  const candidate = makeCandidate({
+    pageTitle: "Level5 video",
+    pageUrl: "https://av19t.com/bj/39141",
+    resourceUrl: "https://media.example/e/session",
+    contentType: "application/vnd.apple.mpegurl",
+    player: "level5",
+    detectionSource: "player-adapter",
+  });
+  assert.equal(candidate?.mediaType, MEDIA_TYPES.HLS_MEDIA);
+  assert.equal(candidate?.downloadMode, "AUTHENTICATED_SOURCE_FRAME");
+});
+
+test("keeps an HLS response whose provider path ends in .html", () => {
+  const url = "https://k.vdnext.com/cast2/id/v.html?tok=short-lived";
+  assert.equal(isKnownNonMediaResourceUrl(url), true);
+  assert.equal(isKnownNonMediaResourceUrl(url, "application/vnd.apple.mpegurl"), false);
+  const candidate = makeCandidate({
+    pageTitle: "AV19 Level5",
+    pageUrl: "https://p.nnvivi.site/player.php?k=session",
+    resourceUrl: url,
+    contentType: "application/vnd.apple.mpegurl",
+    tabId: 12,
+    frameId: 4,
+    detectionSource: "web-response",
+    requestType: "xmlhttprequest",
+  });
+  assert.equal(candidate?.mediaType, MEDIA_TYPES.HLS_MEDIA);
+  assert.equal(candidate?.downloadMode, "HLS_MANIFEST");
 });
 
 test("canonical media URLs reject IPv6 forms that embed private IPv4", () => {

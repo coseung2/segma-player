@@ -45,6 +45,37 @@ test("download job list is newest first and contains popup-safe fields", () => {
   }]);
 });
 
+test("download job diagnostics expose only redacted candidate metadata", () => {
+  const job = createDownloadJob({
+    id: "diagnostic-job",
+    title: "AV19",
+    mediaType: "PROGRESSIVE",
+    candidateId: "candidate-1",
+    diagnostic: {
+      resource: "https://media.example/cast2/abc/video.mp4?token=[redacted]",
+      mediaType: "PROGRESSIVE",
+      frameId: 2,
+      player: "nnvivi",
+      sessionId: "session-1",
+      source: "media-element",
+      requestType: "media",
+      main: false,
+      score: 41,
+    },
+  });
+  assert.deepEqual(publicDownloadJobs([job])[0].diagnostic, {
+    resource: "https://media.example/cast2/abc/video.mp4?token=[redacted]",
+    mediaType: "PROGRESSIVE",
+    frameId: 2,
+    player: "nnvivi",
+    sessionId: "session-1",
+    source: "media-element",
+    requestType: "media",
+    main: false,
+    score: 41,
+  });
+});
+
 test("failed jobs expose retry capability without exposing the private payload", () => {
   const retryPayload = { kind: "media", candidate: { resourceUrl: "https://media.example/video.mp4" } };
   const queued = createDownloadJob({

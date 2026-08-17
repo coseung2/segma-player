@@ -716,8 +716,34 @@
     }
   }
 
+  function reportInlineLevel5Sources() {
+    let scripts = [];
+    try { scripts = [...(root.document?.scripts || [])]; } catch { return; }
+    const sourcePattern = /\burl\s*:\s*(["'])((?:\\.|(?!\1)[^\\])*)\1/g;
+    for (const script of scripts) {
+      const text = typeof script?.textContent === "string" ? script.textContent : "";
+      if (!/Level5Player\s*\.\s*play\s*\(/.test(text)) continue;
+      let match;
+      while ((match = sourcePattern.exec(text))) {
+        const raw = match[2].replace(/\\\//g, "/");
+        try {
+          const url = new URL(raw, root.location?.href);
+          if (!/^https?:$/.test(url.protocol) || url.href.length > LIMITS.maxUrlBytes) continue;
+          reportPlayerSource(url.href, {
+            player: "level5",
+            contentType: "application/vnd.apple.mpegurl",
+            confidence: 100,
+          });
+        } catch {
+          // Ignore non-URL player options.
+        }
+      }
+    }
+  }
+
   function discoverPlayerAdapters() {
     playerDiscoveryPasses += 1;
+    try { reportInlineLevel5Sources(); } catch { /* optional inline config */ }
     try { installHlsAdapter(root.Hls, "hls.js"); } catch { /* optional player */ }
     try { installHlsAdapter(root.hls?.constructor, "hls.js"); } catch { /* optional player */ }
     try { inspectVideoJs(); } catch { /* optional player */ }

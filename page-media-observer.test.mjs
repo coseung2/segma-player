@@ -14,6 +14,7 @@ function createEnvironment({
   contentType = "application/vnd.apple.mpegurl",
   responseUrl = null,
   Hls = null,
+  scripts = [],
 } = {}) {
   const messages = [];
   const listeners = new Map();
@@ -143,6 +144,7 @@ function createEnvironment({
   windowObject.window = windowObject;
   windowObject.globalThis = windowObject;
   windowObject.location = location;
+  windowObject.document = { scripts };
   windowObject.URL = URL;
   windowObject.ArrayBuffer = ArrayBuffer;
   windowObject.ArrayBuffer.isView = ArrayBuffer.isView;
@@ -360,6 +362,25 @@ test("hls.js adapter reports the loadSource manifest and serves bounded refresh 
   assert.equal(snapshots.length, 1);
   assert.equal(snapshots[0].snapshot, true);
   assert.equal(completed?.count, 1);
+});
+
+test("reports the inline Level5 HLS source before the player exposes its session", () => {
+  const env = createEnvironment({
+    scripts: [{
+      textContent: String.raw`(async () => {
+        await window.Level5Player.play({
+          video,
+          url: "https:\/\/k.vdnext.com\/cast2\/id\/v.html?tok=secret&exp=123",
+        });
+      })();`,
+    }],
+  });
+  const [sourceMessage] = eventMessages(env, env.protocol.events.playerSource);
+  assert.ok(sourceMessage);
+  assert.equal(sourceMessage.url, "https://k.vdnext.com/cast2/id/v.html?tok=secret&exp=123");
+  assert.equal(sourceMessage.contentType, "application/vnd.apple.mpegurl");
+  assert.equal(sourceMessage.player, "level5");
+  assert.equal(sourceMessage.confidence, 100);
 });
 
 test("the observer does not replace JSON or Array prototype behavior and avoids forbidden capabilities", () => {

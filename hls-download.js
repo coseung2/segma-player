@@ -28,6 +28,7 @@ import {
   setDownloadCheckpoint,
 } from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
+import { createNativeFileWriter } from "./native-file-writer.js";
 import { downloadPolicyForCandidate } from "./download-policy.js";
 
 export const MAX_HLS_SEGMENTS = 10_000;
@@ -1363,6 +1364,27 @@ async function saveProgressive(
       sinkError = error;
     }
   }
+  if (!sink && !saveHandle) {
+    let nativeWriter = null;
+    try {
+      nativeWriter = await createNativeFileWriter(filename);
+      const referrer = referrerFor(session.url, session.referrer || pageUrl, context);
+      const bytes = await streamFetchToWritable(
+        session.url,
+        referrer,
+        nativeWriter,
+        (value) => setStatus(saveProgressText(value, context.totalBytes), false, context),
+        context,
+        0,
+      );
+      await nativeWriter.close();
+      if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
+      return { bytes, native: true };
+    } catch (error) {
+      try { await nativeWriter?.abort(); } catch { /* best effort */ }
+      sinkError = error;
+    }
+  }
   if (!sink) {
     await removeAllocatedFile();
     const downloaded = await tryBrowserDownloadFallback(
@@ -1376,7 +1398,7 @@ async function saveProgressive(
     const permissionExpired = sinkError?.name === "NotAllowedError";
     const sinkFailure = new Error(permissionExpired
       ? "저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 누르면 폴더를 다시 선택합니다."
-      : "저장 폴더에 쓸 수 없습니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
+      : "저장 폴더와 Aura Companion을 모두 사용할 수 없습니다. Companion 설치 또는 저장 폴더 권한을 확인해 주세요.");
     if (permissionExpired) sinkFailure.code = "save-permission-required";
     throw sinkFailure;
   }
@@ -1454,6 +1476,27 @@ async function saveProgressive(
   }
 }
 
+async function saveHlsWithCompanion(media, filename, referrer, videoTabId, context) {
+  let writer = null;
+  let bytes = 0;
+  let count = 0;
+  try {
+    writer = await createNativeFileWriter(filename);
+    for await (const chunk of mediaChunks(media, referrer, videoTabId, context)) {
+      await writeChunk(writer, chunk);
+      bytes += chunk.byteLength;
+      count += 1;
+      setStatus(saveProgressText(bytes, context.totalBytes), false, context);
+    }
+    if (bytes === 0) throw new Error("저장된 파일이 비어 있습니다. 주소가 만료되었거나 접근 권한이 필요할 수 있습니다.");
+    await writer.close();
+    return { count, native: true };
+  } catch (error) {
+    try { await writer?.abort(); } catch { /* best effort */ }
+    throw error;
+  }
+}
+
 async function saveHlsToNative(
   media,
   filename,
@@ -1466,7 +1509,7 @@ async function saveHlsToNative(
 ) {
   const saveHandle = dirHandle || await getStoredSaveDirectory();
   if (!saveHandle) {
-    throw new Error("분할 형식 영상은 저장 폴더 연결이 필요합니다. 다운로드 버튼을 다시 누르면 폴더 선택이 열립니다.");
+    return saveHlsWithCompanion(media, filename, referrer, videoTabId, context);
   }
   if (!(await hasReadWritePermission(saveHandle))) {
     const error = new Error("저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 권한을 확인해 주세요.");

@@ -15,12 +15,13 @@ This checklist is the release gate for the commercial store distribution. Bracke
 | Product website | `[OWNER INPUT: PRODUCT_WEBSITE_URL]` |
 | Primary language, category, visibility, and distribution countries | `[OWNER INPUT: LISTING_DISTRIBUTION_CHOICES]` |
 | Store screenshots and promotional images | Prepared under `assets/store-listing`; owner visual approval required |
-| Extension store ID | `kniniopdkceodiddkijnddnggdgmjmmo` |
+| Chrome Web Store extension ID | `kniniopdkceodiddkijnddnggdgmjmmo` |
+| Microsoft Edge Add-ons extension ID | `[OWNER INPUT: EDGE_EXTENSION_ID]` |
 | Native companion code-signing certificate | `[OWNER INPUT: CERTIFICATE_THUMBPRINT_AND_SIGNING_OWNER]` |
 | Hosted native companion installer URL | `[OWNER INPUT: NATIVE_INSTALLER_HTTPS_URL]` |
 | Published companion download/tool license notices | `[OWNER INPUT: COMPANION_LICENSE_URLS]` |
 
-The extension store ID is needed to write the final `allowed_origins` entry in the separately hosted native-host manifest. The native installer must be code-signed and must register `com.aura.media_companion` for the exact published origin; it is not part of the Chrome Web Store ZIP.
+Each published extension ID is needed to write the final `allowed_origins` entries in the separately hosted native-host manifest. The native installer must be code-signed and must register `com.aura.media_companion` for the exact Chrome and/or Edge published origins; it is not part of either extension-store ZIP.
 
 ## Build and artifact gate
 
@@ -50,7 +51,7 @@ The extension store ID is needed to write the final `allowed_origins` entry in t
 
 - [ ] Manifest is MV3, branded Aura Media Downloader, versioned with a valid Chrome Web Store version, and contains no `key` field.
 - [ ] Manifest contains no static `declarative_net_request` rule resource and no static site-specific redirect rule.
-- [ ] Content scripts contain exactly the bundled `level5-page-bridge.js` at `world: "MAIN"`, `run_at: "document_start"`, followed by the isolated `content.js` detector at `run_at: "document_idle"`; there are no other content-script entries.
+- [ ] Content scripts contain exactly the bundled `level5-page-bridge.js` at `world: "MAIN"`, `run_at: "document_start"`, followed by the isolated `content.js` detector at `run_at: "document_start"`; there are no other content-script entries.
 - [ ] Permissions match `store/manifest.json` and the justifications in `store/SINGLE_PURPOSE_AND_PERMISSIONS.md`; remove any permission not required by the current runtime before release.
 - [ ] The background runtime uses the `com.aura.media_companion` native messaging name.
 
@@ -68,9 +69,9 @@ The extension store ID is needed to write the final `allowed_origins` entry in t
 
 - [ ] Build and sign the Windows companion with the owner’s code-signing certificate.
 - [ ] Host the installer and any required tools at the owner’s HTTPS installer URL with checksums and license notices.
-- [ ] Generate the native-host manifest with the exact `chrome-extension://kniniopdkceodiddkijnddnggdgmjmmo/` allowed origin.
+- [ ] Generate the native-host manifest with the exact Chrome origin `chrome-extension://kniniopdkceodiddkijnddnggdgmjmmo/` and, when Edge distribution is enabled, the exact published Edge extension origin.
 - [ ] Test installation for a clean Windows user account and confirm current-user-only registration; do not require HKLM or claim that the extension installs the companion automatically.
-- [ ] Verify the companion can perform local writing through `com.aura.media_companion`.
+- [ ] Verify the companion can perform local writing through `com.aura.media_companion`, run a detached YouTube job after the browser closes, restore that active job after browser restart, cancel it, and open the `--manager` download window.
 
 ## Submission and post-upload gate
 

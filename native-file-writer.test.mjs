@@ -13,14 +13,15 @@ test("native file chunks stay below Chrome native-message limits and round-trip"
   assert.ok(chunks.every((chunk) => bytesToBase64(chunk).length < 1024 * 1024));
 });
 
-test("the extension save path no longer depends on the native companion", async () => {
-  const [writer, background] = await Promise.all([
+test("the extension restores the reviewed native companion writer as a fallback", async () => {
+  const [writer, background, companion] = await Promise.all([
     readFile(new URL("./native-file-writer.js", import.meta.url), "utf8"),
     readFile(new URL("./background.js", import.meta.url), "utf8"),
+    readFile(new URL("./companion-client.js", import.meta.url), "utf8"),
   ]);
-  assert.doesNotMatch(writer, /connectNative/);
-  assert.doesNotMatch(background, /connectNative/);
-  assert.doesNotMatch(background, /com\.aura\.media_companion/);
-  assert.doesNotMatch(background, /native-file-writer/);
+  assert.match(writer, /native-file-writer/);
+  assert.match(background, /connectNative/);
+  assert.match(background, /native-file-writer/);
+  assert.match(companion, /com\.aura\.media_companion/);
   assert.match(background, /getStoredSaveDirectory/);
 });

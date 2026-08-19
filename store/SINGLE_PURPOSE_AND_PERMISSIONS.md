@@ -12,8 +12,9 @@ The extension has one user-facing purpose: detect compatible media resources in 
 | `alarms` | Registers a short periodic heartbeat only while a download is active, so the MV3 service worker and the offscreen download worker stay alive long enough to finish saving. The alarm is cleared as soon as no download work remains. |
 | `contextMenus` | Adds the user-invoked “Aura Media로 다운로드” action for video and audio elements. |
 | `declarativeNetRequest` | Creates and removes short-lived, exact media-fetch session rules so requests can carry the page referrer and language preference. Authentication, cookie, and API-key headers are not retained or replayed. The store manifest has no static site-specific rule resource. |
-| `downloads` | Uses the browser download manager as a fallback to save a completed media file when the offscreen worker path cannot write directly, and to monitor its completion. |
-| `offscreen` | Runs the hidden download worker needed to consume media streams and write them without opening a visible tab. |
+| `downloads` | Uses the browser download manager as a fallback to save a completed media file when the native/local worker path cannot write directly, and to monitor its completion. |
+| `nativeMessaging` | Connects only to the separately installed `com.aura.media_companion` Windows host after a user starts a download. The host runs local media tools, persists local job state, writes to `Downloads\\Aura Media`, and returns bounded status/progress messages. |
+| `offscreen` | Runs the hidden download worker needed to consume authenticated media streams without opening a visible tab. When the Companion is installed, the worker can pass already-fetched bytes to its local file writer; otherwise the browser file-system path remains available. |
 | `scripting` | Injects the isolated detector after a user action or extension reload when a content script is not already present. |
 | `storage` | Stores session-scoped candidate and download-job state. No sync storage or remote account database is used. |
 | `webRequest` | Observes HTTP(S) media responses and retains only the page referrer and language preference needed to identify compatible media and perform a user-requested fetch. Authentication, cookie, and API-key headers are discarded. It does not modify page content. |
@@ -22,6 +23,6 @@ The extension has one user-facing purpose: detect compatible media resources in 
 
 HTTP and HTTPS host access is required because the detector is intentionally useful on the current page across arbitrary sites, and the background service worker registers its request observers before optional host permissions can be granted. The extension filters and redacts candidate data before showing it in the popup. Host access does not grant permission to download content the user is not authorized to use.
 
-## Extension-only saving
+## Companion and fallback saving
 
-The Chrome Web Store ZIP contains only extension runtime files. Saving is performed by the extension's offscreen download worker and the browser download fallback; no native companion is required or bundled.
+The Chrome Web Store ZIP contains only extension runtime files and does not bundle an executable. On Windows, the separately installed Aura Media Companion is the preferred local execution/file-writing path and is reached only through the declared Native Messaging host. If the Companion is unavailable, existing browser File System Access and browser-download fallbacks remain available for compatible media. Browser-observed authentication and token context stays in the extension; the Companion does not implement a VPN or media-route broker.

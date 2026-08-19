@@ -1,7 +1,12 @@
 param(
-  [Parameter(Mandatory = $true)]
+  [Parameter(Mandatory = $false)]
   [ValidatePattern('^[a-p]{32}$')]
-  [string]$ExtensionId,
+  [Alias('ExtensionId')]
+  [string]$ChromeExtensionId = '',
+
+  [Parameter(Mandatory = $false)]
+  [ValidatePattern('^[a-p]{32}$')]
+  [string]$EdgeExtensionId = '',
 
   [Parameter(Mandatory = $true)]
   [string]$ToolsDirectory,
@@ -14,6 +19,10 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $ToolsDirectory = [System.IO.Path]::GetFullPath($ToolsDirectory)
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
+
+if ([string]::IsNullOrWhiteSpace($ChromeExtensionId) -and [string]::IsNullOrWhiteSpace($EdgeExtensionId)) {
+  throw 'At least one ChromeExtensionId or EdgeExtensionId must be supplied.'
+}
 
 $required = @(
   (Join-Path $ToolsDirectory 'ffmpeg\ffmpeg.exe'),
@@ -42,10 +51,15 @@ if ($null -eq $compiler) {
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $arguments = @(
-  "/DExtensionId=$ExtensionId",
   "/DToolsDirectory=$ToolsDirectory",
   "/DOutputDirectory=$OutputDirectory"
 )
+if (-not [string]::IsNullOrWhiteSpace($ChromeExtensionId)) {
+  $arguments += "/DChromeExtensionId=$ChromeExtensionId"
+}
+if (-not [string]::IsNullOrWhiteSpace($EdgeExtensionId)) {
+  $arguments += "/DEdgeExtensionId=$EdgeExtensionId"
+}
 if (-not [string]::IsNullOrWhiteSpace($SignToolName)) {
   $arguments += "/DSignToolName=$SignToolName"
 }

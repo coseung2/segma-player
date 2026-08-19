@@ -47,6 +47,7 @@ $runtimeFiles = @(
   'aes-cbc.js',
   'background.js',
   'browser-download-monitor.js',
+  'companion-client.js',
   'candidate.js',
   'candidate-ranking.js',
   'content.js',
@@ -80,6 +81,7 @@ $runtimeFiles = @(
   'media-fetch-lease.js',
   'media-request-context.js',
   'mobile-user-agent.js',
+  'native-file-writer.js',
   'options.html',
   'options.js',
   'parallel-download.js',
@@ -191,7 +193,7 @@ function Replace-StoreOnlyPrivateBridge([string]$RelativePath) {
 function Write-AuditedManifest {
   $requiredPermissions = @(
     'activeTab', 'alarms', 'contextMenus', 'declarativeNetRequest',
-    'downloads', 'offscreen', 'scripting', 'storage', 'webRequest'
+    'downloads', 'nativeMessaging', 'offscreen', 'scripting', 'storage', 'webRequest'
   )
   if ($auditedManifest.manifest_version -ne 3) { throw 'Store manifest must be Manifest V3.' }
   if ([int]$auditedManifest.minimum_chrome_version -lt 111) {
@@ -313,8 +315,12 @@ function Invoke-StoreAudit([string[]]$ExpectedFiles) {
     throw 'Store audit did not find the bundled page bridge cache and loader key paths.'
   }
   $auditedBackground = Read-Utf8 (Join-Path $StageDirectory 'background.js')
-  if ($auditedBackground -match 'connectNative|com\.aura\.media_companion|native-file-writer') {
-    throw 'Store audit found a native companion dependency in the background runtime.'
+  $auditedCompanion = Read-Utf8 (Join-Path $StageDirectory 'companion-client.js')
+  if ($auditedBackground -notmatch 'native-file-writer' -or $auditedCompanion -notmatch 'com\.aura\.media_companion') {
+    throw 'Store audit did not find the reviewed Aura Companion bridge.'
+  }
+  if (@($manifest.permissions) -notcontains 'nativeMessaging') {
+    throw 'Store audit requires nativeMessaging for the reviewed Aura Companion bridge.'
   }
 }
 

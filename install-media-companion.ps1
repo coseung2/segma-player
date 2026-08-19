@@ -1,13 +1,18 @@
 param(
-  [Parameter(Mandatory = $true)]
+  [Parameter(Mandatory = $false)]
   [ValidatePattern('^[a-p]{32}$')]
-  [string]$ExtensionId,
+  [Alias('ExtensionId')]
+  [string]$ChromeExtensionId = '',
+
+  [Parameter(Mandatory = $false)]
+  [ValidatePattern('^[a-p]{32}$')]
+  [string]$EdgeExtensionId = '',
 
   [Parameter(Mandatory = $true)]
   [string]$ToolsArchive,
 
   [ValidateSet('Chrome', 'Edge', 'Both')]
-  [string]$Browser = 'Chrome'
+  [string]$Browser = 'Both'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +24,9 @@ $ProjectRoot = $PSScriptRoot
 $BuiltHost = Join-Path $ProjectRoot 'native-host\target\release\aura-media-companion.exe'
 $InstalledHost = Join-Path $InstallRoot 'aura-media-companion.exe'
 
+if ([string]::IsNullOrWhiteSpace($ChromeExtensionId) -and [string]::IsNullOrWhiteSpace($EdgeExtensionId)) {
+  throw 'At least one ChromeExtensionId or EdgeExtensionId must be supplied.'
+}
 if (-not (Test-Path -LiteralPath $ToolsArchive -PathType Leaf)) {
   throw "Tools archive not found: $ToolsArchive"
 }
@@ -63,12 +71,19 @@ foreach ($tool in $requiredTools) {
   }
 }
 
+$allowedOrigins = @()
+if (-not [string]::IsNullOrWhiteSpace($ChromeExtensionId)) {
+  $allowedOrigins += "chrome-extension://$ChromeExtensionId/"
+}
+if (-not [string]::IsNullOrWhiteSpace($EdgeExtensionId) -and $EdgeExtensionId -ne $ChromeExtensionId) {
+  $allowedOrigins += "chrome-extension://$EdgeExtensionId/"
+}
 $manifest = [ordered]@{
   name = $HostName
   description = 'Aura Media Companion'
   path = $InstalledHost
   type = 'stdio'
-  allowed_origins = @("chrome-extension://$ExtensionId/")
+  allowed_origins = $allowedOrigins
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 4
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)

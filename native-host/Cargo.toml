@@ -1,6 +1,6 @@
 [package]
 name = "aura-media-companion"
-version = "0.2.48"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]

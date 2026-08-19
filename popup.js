@@ -4,6 +4,7 @@ import { downloadJobView, retryableDownloadJob } from "./download-job-view.js";
 import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
 import { productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
+import { companionStatus, companionYouTubeInfo } from "./companion-client.js";
 import { ensureSaveDirectory, getStoredSaveDirectory, renewSaveDirectoryPermission } from "./save-directory.js";
 import {
   LOCALE_NAMES,
@@ -157,8 +158,13 @@ byId("youtube-quality")?.addEventListener("change", () => {
 });
 
 async function refreshAvailableQualities(url) {
-  const result = await listYouTubeQualities(url);
-  const normalized = result.ok ? normalizedDetectedQualities(result.qualities) : [];
+  let result = null;
+  try {
+    result = await companionYouTubeInfo(url);
+  } catch {
+    result = await listYouTubeQualities(url);
+  }
+  const normalized = result?.ok !== false ? normalizedDetectedQualities(result?.qualities) : [];
   lastDetectedQualities = normalized.length ? normalized : null;
   renderQualityOptions();
 }
@@ -220,6 +226,13 @@ async function verifySaveFolderWritable(handle) {
   } catch {
     return false;
   }
+}
+
+async function ensureDownloadDestination() {
+  const companion = await companionStatus();
+  if (companion.ok) return { kind: "companion" };
+  const folder = await ensureSaveFolder();
+  return folder ? { kind: "folder", folder } : null;
 }
 
 async function ensureSaveFolder({ forcePick = false } = {}) {
@@ -442,10 +455,8 @@ function renderCandidates(candidates) {
       try {
         button.textContent = t("action.requesting");
         button.removeAttribute("aria-label");
-        const folder = await ensureSaveFolder();
-        if (!folder) {
-          throw new Error(t("save.needFolderHint"));
-        }
+        const destination = await ensureDownloadDestination();
+        if (!destination) throw new Error(t("save.needFolderHint"));
         const response = await chrome.runtime.sendMessage({
           type: "download-candidate",
           candidateId: candidate.id,
@@ -544,10 +555,8 @@ function buildJobCard(job, { inline = false } = {}) {
             // Reuse the stored handle first. A worker restart/update can make
             // its permission appear stale, but the popup click can renew that
             // permission without asking the user to choose the same folder.
-            const folder = await ensureSaveFolder();
-            if (!folder) {
-              throw new Error(t("save.needFolder"));
-            }
+            const destination = await ensureDownloadDestination();
+            if (!destination) throw new Error(t("save.needFolder"));
           }
           const response = await chrome.runtime.sendMessage({
             type: "retry-download-job",
@@ -666,11 +675,6 @@ async function directDownload() {
   setDirectStatus(t("link.checking"));
   try {
     const value = input.value.trim();
-    const folder = await ensureSaveFolder();
-    if (!folder) {
-      setDirectStatus(t("save.needFolderHint"));
-      return;
-    }
     if (isYouTubeUrl(value)) {
       const response = await chrome.runtime.sendMessage({
         type: "youtube-download",
@@ -687,6 +691,11 @@ async function directDownload() {
         throw new Error(t("link.youtubeFailed"));
       }
     } else {
+      const destination = await ensureDownloadDestination();
+      if (!destination) {
+        setDirectStatus(t("save.needFolderHint"));
+        return;
+      }
       const response = await chrome.runtime.sendMessage({
         type: "download-url",
         url: value,

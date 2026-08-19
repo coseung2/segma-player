@@ -82,6 +82,14 @@ import {
 } from "./progressive-redirect.js";
 import { createBrowserDownloadMonitor } from "./browser-download-monitor.js";
 import {
+  MEDIA_COMPANION_NATIVE_HOST,
+  cancelCompanionJob,
+  companionStatus,
+  listCompanionJobs,
+  onCompanionEvent,
+  startCompanionYouTubeDownload,
+} from "./companion-client.js";
+import {
   createMediaRequestDiagnosticStore,
   resolveMediaRequestContext,
 } from "./media-request-context.js";
@@ -256,6 +264,9 @@ const downloadJobsReady = chrome.storage.session.get({
   }
   playbackSessions.restore(stored[PLAYBACK_SESSIONS_KEY]);
   syncWorkerLifecycleAlarm();
+  for (const job of downloadJobs.values()) {
+    if (job?.source === "youtube" && !terminalDownloadJob(job)) watchCompanionJob(job.id);
+  }
 }).catch(() => {});
 
 async function persistDownloadJobs() {
@@ -443,15 +454,88 @@ function isYouTubeDetectionCandidate(candidate) {
 
 const YOUTUBE_QUALITIES = new Set(["best", "4320", "2160", "1440", "1080", "720", "480", "360", "240", "144"]);
 
+const companionJobPollers = new Map();
+
+async function syncCompanionJob(jobId) {
+  const listed = await listCompanionJobs();
+  const remote = Array.isArray(listed?.jobs)
+    ? listed.jobs.find((job) => job?.jobId === jobId)
+    : null;
+  if (!remote) return false;
+  const current = downloadJobs.get(jobId);
+  if (!current || terminalDownloadJob(current)) return true;
+  const status = ["queued", "running", "completed", "failed", "cancelled"].includes(remote.status)
+    ? remote.status
+    : "running";
+  await patchDownloadJob(jobId, {
+    ...(typeof remote.title === "string" && remote.title.trim() ? { title: remote.title.trim().slice(0, 500) } : {}),
+    status,
+    statusText: typeof remote.statusText === "string" && remote.statusText
+      ? remote.statusText
+      : "Aura Companion에서 다운로드 중…",
+    error: typeof remote.error === "string" ? remote.error.slice(0, 500) : "",
+    folderName: "Downloads\\Aura Media",
+  });
+  return ["completed", "failed", "cancelled"].includes(status);
+}
+
+async function restoreActiveCompanionJobs() {
+  const status = await companionStatus();
+  if (!status.ok) return;
+  const listed = await listCompanionJobs();
+  if (!Array.isArray(listed?.jobs)) return;
+  for (const remote of listed.jobs) {
+    if (!remote || typeof remote.jobId !== "string" || !remote.jobId) continue;
+    if (!["queued", "running"].includes(remote.status)) continue;
+    if (!downloadJobs.has(remote.jobId)) {
+      downloadJobs.set(remote.jobId, createDownloadJob({
+        id: remote.jobId,
+        title: typeof remote.title === "string" && remote.title.trim() ? remote.title.trim() : "Aura Companion 다운로드",
+        mediaType: "YOUTUBE",
+        source: "youtube",
+        folderName: "Downloads\\Aura Media",
+        now: Number.isFinite(Number(remote.updatedAt)) ? Number(remote.updatedAt) : Date.now(),
+      }));
+    }
+    await syncCompanionJob(remote.jobId);
+    watchCompanionJob(remote.jobId);
+  }
+  await persistDownloadJobs();
+}
+
+function watchCompanionJob(jobId) {
+  if (companionJobPollers.has(jobId)) return;
+  const poll = async () => {
+    try {
+      if (await syncCompanionJob(jobId)) {
+        clearInterval(companionJobPollers.get(jobId));
+        companionJobPollers.delete(jobId);
+      }
+    } catch {
+      // A detached Companion job keeps running even if the browser/native port
+      // briefly restarts. The next poll or extension restart will resync it.
+    }
+  };
+  const timer = setInterval(() => { void poll(); }, 750);
+  companionJobPollers.set(jobId, timer);
+  void poll();
+}
+
+onCompanionEvent((message) => {
+  if (message?.type !== "companion-disconnected") return;
+  // Do not mark active local jobs failed: job runners are detached from the
+  // native bridge and can outlive the browser. Polling resumes on reconnect.
+});
+
+void downloadJobsReady.then(() => restoreActiveCompanionJobs()).catch(() => {});
+
 async function startYouTubeDownload(rawUrl, rawQuality = "best", { resumeFromJobId = null } = {}) {
   const url = canonicalYouTubeUrl(rawUrl);
   if (!url) throw new Error("invalid-youtube-url");
   const quality = String(rawQuality || "best");
   if (!YOUTUBE_QUALITIES.has(quality)) throw new Error("invalid-youtube-quality");
   const plan = await resolvePlan();
-  if (!youtubeQualityAllowed(plan, quality)) {
-    throw new Error("pro-feature-required");
-  }
+  if (!youtubeQualityAllowed(plan, quality)) throw new Error("pro-feature-required");
 
   await downloadJobsReady;
   const jobId = crypto.randomUUID();
@@ -460,7 +544,7 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best", { resumeFromJob
     title: "제목 확인 중…",
     mediaType: "YOUTUBE",
     source: "youtube",
-    folderName: "Downloads",
+    folderName: "Downloads\\Aura Media",
     retryPayload: { kind: "youtube", url, quality },
   }));
   await persistDownloadJobs();
@@ -469,150 +553,104 @@ async function startYouTubeDownload(rawUrl, rawQuality = "best", { resumeFromJob
   }
   await patchDownloadJob(jobId, {
     status: "running",
-    statusText: "서버에 요청하는 중…",
+    statusText: "Aura Companion에 요청하는 중…",
   });
 
+  const companion = await companionStatus();
+  if (companion.ok && companion.toolsReady !== false) {
+    try {
+      const accepted = await startCompanionYouTubeDownload({ jobId, url, quality });
+      if (accepted?.accepted) {
+        await patchDownloadJob(jobId, {
+          status: "running",
+          statusText: "Aura Companion에서 다운로드를 시작했습니다.",
+          folderName: "Downloads\\Aura Media",
+        });
+        watchCompanionJob(jobId);
+        return { mode: "youtube-companion", jobId };
+      }
+    } catch {
+      // Keep the notebook/cloud path as a migration fallback until the local
+      // Companion path is proven on store builds and real Windows machines.
+    }
+  }
+
+  await patchDownloadJob(jobId, {
+    status: "running",
+    statusText: "로컬 Companion을 사용할 수 없어 서버 경로로 전환합니다…",
+  });
   const serverUrl = await getYouTubeServerUrl();
   if (serverUrl) {
     const metadataTitlePromise = listYouTubeQualities(url, serverUrl).then(async (metadata) => {
-      const title = metadata?.ok && typeof metadata.title === "string"
-        ? metadata.title.trim()
-        : "";
+      const title = metadata?.ok && typeof metadata.title === "string" ? metadata.title.trim() : "";
       if (title) await patchDownloadJob(jobId, { title });
       return title;
     }).catch(() => "");
     const controller = new AbortController();
     youtubeJobControllers.set(jobId, controller);
     try {
-    const submitted = await submitYouTubeJob(url, quality, serverUrl, { signal: controller.signal });
-    if (submitted.ok) {
-      const waited = await waitForYouTubeJob(submitted.jobId, serverUrl, {
-        signal: controller.signal,
-        onProgress: (percent, { speedMBps = null, etaSeconds = null } = {}) => {
-          const speed = Number.isFinite(speedMBps) ? ` · ${speedMBps.toFixed(1)}MB/s` : "";
-          const eta = Number.isFinite(etaSeconds) && etaSeconds > 0 ? ` · ETA ${etaSeconds}초` : "";
-          void patchDownloadJob(jobId, {
-            status: "running",
-            statusText: `서버 처리 중… ${percent}%${speed}${eta}`,
-          });
-        },
-      });
-      if (controller.signal.aborted) throw new Error("download-cancelled");
-      if (waited.ok) {
-        const metadataTitle = typeof waited.title === "string" && waited.title.trim()
-          ? ""
-          : await metadataTitlePromise;
-        const recognizedTitle = downloadJobs.get(jobId)?.title;
-        const title = typeof waited.title === "string" && waited.title.trim()
-          ? waited.title.trim()
-          : (metadataTitle || (recognizedTitle && recognizedTitle !== "제목 확인 중…" ? recognizedTitle : ""));
-        if (!title) {
-          await patchDownloadJob(jobId, {
-            status: "failed",
-            statusText: "영상 제목을 인식하지 못했습니다.",
-            error: "youtube-title-unavailable",
-          });
-          throw new Error("YouTube 영상 제목을 인식하지 못했습니다. 잠시 후 다시 시도해 주세요.");
-        }
-        if (waited.localFile && await isServerOnThisMachine(serverUrl)) {
-          await patchDownloadJob(jobId, {
-            title,
-            status: "completed",
-            statusText: "저장 완료 — 이 PC의 Downloads\\Aura Media 폴더에 저장했습니다.",
-          });
-          return { mode: "youtube-local", jobId };
-        }
-        const fileUrl = await youtubeJobFileUrl(submitted.jobId, serverUrl);
-        await patchDownloadJob(jobId, {
-          title,
-          status: "running",
-          statusText: "서버 처리 완료 — 저장 준비 중…",
+      const submitted = await submitYouTubeJob(url, quality, serverUrl, { signal: controller.signal });
+      if (submitted.ok) {
+        const waited = await waitForYouTubeJob(submitted.jobId, serverUrl, {
+          signal: controller.signal,
+          onProgress: (percent, { speedMBps = null, etaSeconds = null } = {}) => {
+            const speed = Number.isFinite(speedMBps) ? ` · ${speedMBps.toFixed(1)}MB/s` : "";
+            const eta = Number.isFinite(etaSeconds) && etaSeconds > 0 ? ` · ETA ${etaSeconds}초` : "";
+            void patchDownloadJob(jobId, { status: "running", statusText: `서버 처리 중… ${percent}%${speed}${eta}` });
+          },
         });
-        const outputFilename = await configuredOutputFilename(title, "mp4", url);
-        const saveHandle = await getStoredSaveDirectory();
-        if (saveHandle) {
-          if (terminalDownloadJob(downloadJobs.get(jobId))) throw new Error("download-cancelled");
-          await ensureDownloadWorker().catch(() => {});
-          if (terminalDownloadJob(downloadJobs.get(jobId))) throw new Error("download-cancelled");
-          const dispatched = await chrome.runtime.sendMessage({
-            type: "parallel-save",
-            jobId,
-            url: fileUrl,
-            filename: outputFilename,
-          }).catch(() => null);
-          if (terminalDownloadJob(downloadJobs.get(jobId))) throw new Error("download-cancelled");
-          if (dispatched?.ok) {
-            return { mode: "youtube-parallel", jobId };
+        if (controller.signal.aborted) throw new Error("download-cancelled");
+        if (waited.ok) {
+          const metadataTitle = typeof waited.title === "string" && waited.title.trim() ? "" : await metadataTitlePromise;
+          const recognizedTitle = downloadJobs.get(jobId)?.title;
+          const title = typeof waited.title === "string" && waited.title.trim()
+            ? waited.title.trim()
+            : (metadataTitle || (recognizedTitle && recognizedTitle !== "제목 확인 중…" ? recognizedTitle : ""));
+          if (!title) throw new Error("YouTube 영상 제목을 인식하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+          if (waited.localFile && await isServerOnThisMachine(serverUrl)) {
+            await patchDownloadJob(jobId, { title, status: "completed", statusText: "저장 완료 — 이 PC의 Downloads\\Aura Media 폴더에 저장했습니다." });
+            return { mode: "youtube-local", jobId };
           }
-        }
-        if (terminalDownloadJob(downloadJobs.get(jobId))) throw new Error("download-cancelled");
-        let downloadId;
-        try {
-          downloadId = await chrome.downloads.download({
+          const fileUrl = await youtubeJobFileUrl(submitted.jobId, serverUrl);
+          await patchDownloadJob(jobId, { title, status: "running", statusText: "서버 처리 완료 — 저장 준비 중…" });
+          const outputFilename = await configuredOutputFilename(title, "mp4", url);
+          const saveHandle = await getStoredSaveDirectory();
+          if (saveHandle) {
+            if (terminalDownloadJob(downloadJobs.get(jobId))) throw new Error("download-cancelled");
+            await ensureDownloadWorker().catch(() => {});
+            const dispatched = await chrome.runtime.sendMessage({ type: "parallel-save", jobId, url: fileUrl, filename: outputFilename }).catch(() => null);
+            if (dispatched?.ok) return { mode: "youtube-parallel", jobId };
+          }
+          if (terminalDownloadJob(downloadJobs.get(jobId))) throw new Error("download-cancelled");
+          const downloadId = await chrome.downloads.download({
             url: fileUrl,
             filename: `Aura Media/${outputFilename}`,
             conflictAction: "uniquify",
             saveAs: false,
           });
-        } catch (error) {
-          await patchDownloadJob(jobId, {
-            status: "failed",
-            statusText: "브라우저 다운로드 실패",
-            error: error?.message || "download-failed",
-          });
-          throw new Error(`브라우저 다운로드로 저장하지 못했습니다 (${error?.message || "download-failed"}).`);
+          youtubeBrowserDownloads.set(downloadId, jobId);
+          await patchDownloadJob(jobId, { status: "running", statusText: "브라우저 다운로드를 시작했습니다." });
+          return { mode: "youtube-browser", jobId };
         }
-        youtubeBrowserDownloads.set(downloadId, jobId);
-        await patchDownloadJob(jobId, {
-          status: "running",
-          statusText: "브라우저 다운로드를 시작했습니다.",
-        });
-        if (typeof chrome.downloads.search === "function") {
-          const [current] = await chrome.downloads.search({ id: downloadId }).catch(() => []);
-          if (current?.state === "complete") {
-            youtubeBrowserDownloads.delete(downloadId);
-            await patchDownloadJob(jobId, {
-              status: "completed",
-              statusText: "다운로드를 완료했습니다 (브라우저 Downloads 폴더).",
-            });
-          } else if (current?.state === "interrupted") {
-            youtubeBrowserDownloads.delete(downloadId);
-            await patchDownloadJob(jobId, {
-              status: "failed",
-              statusText: "브라우저 다운로드가 중단되었습니다.",
-              error: current.error || "download-interrupted",
-            });
-          }
-        }
-        return { mode: "youtube-browser", jobId };
+        const detail = typeof waited.error === "string" && waited.error ? waited.error : "job-failed";
+        throw new Error(`Aura YouTube 서버 처리 실패 (${detail.slice(0, 300)})`);
       }
-      const detail = typeof waited.error === "string" && waited.error ? waited.error : "job-failed";
-      await patchDownloadJob(jobId, {
-        status: "failed",
-        statusText: "서버 처리 실패",
-        error: detail.slice(0, 500),
-      });
-      throw new Error(`Aura YouTube 서버 처리 실패 (${detail.slice(0, 300)})`);
-    }
-    if (submitted.error === "monthly-limit-reached") {
-      const limit = Number.isInteger(submitted.limit) ? ` (${submitted.limit}개)` : "";
-      const edition = await resolveEdition();
-      await patchDownloadJob(jobId, {
-        status: "failed",
-        statusText: "월간 한도 도달",
-        error: "monthly-limit-reached",
-      });
-      if (edition === "pro") {
-        throw new Error("Pro 빌드가 YouTube 서버에 Pro 키로 인증되지 않았습니다. 설정 → Pro 라이선스에서 키를 등록하거나 다시 확인해 주세요.");
+      if (submitted.error === "monthly-limit-reached") {
+        const limit = Number.isInteger(submitted.limit) ? ` (${submitted.limit}개)` : "";
+        const edition = await resolveEdition();
+        if (edition === "pro") throw new Error("Pro 빌드가 YouTube 서버에 Pro 키로 인증되지 않았습니다. 설정 → Pro 라이선스에서 키를 등록하거나 다시 확인해 주세요.");
+        throw new Error(`이번 달 Aura YouTube 무료 다운로드 한도를 사용했습니다${limit}. Pro 라이선스를 등록하면 제한이 풀립니다.`);
       }
-      throw new Error(`이번 달 Aura YouTube 무료 다운로드 한도를 사용했습니다${limit}. Pro 라이선스를 등록하면 제한이 풀립니다.`);
-    }
-    // The server is the only YouTube execution path; no native helper is used.
     } finally {
       youtubeJobControllers.delete(jobId);
     }
   }
-  throw new Error("YouTube 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.");
+  await patchDownloadJob(jobId, {
+    status: "failed",
+    statusText: "Aura Companion과 서버에 모두 연결할 수 없습니다.",
+    error: "youtube-backend-unavailable",
+  });
+  throw new Error("YouTube 서버에 연결할 수 없습니다. Aura Companion 설치 또는 서버 연결을 확인해 주세요.");
 }
 
 async function isServerOnThisMachine(serverUrl) {
@@ -1264,6 +1302,14 @@ async function cancelDownloadJob(jobId) {
   if (terminalDownloadJob(job)) return { ok: true, alreadyTerminal: true };
 
   youtubeJobControllers.get(jobId)?.abort();
+  if (job.source === "youtube") {
+    await cancelCompanionJob(jobId).catch(() => null);
+    const poller = companionJobPollers.get(jobId);
+    if (poller) {
+      clearInterval(poller);
+      companionJobPollers.delete(jobId);
+    }
+  }
   await patchDownloadJob(jobId, {
     status: "cancelled",
     statusText: "사용자가 다운로드를 취소했습니다.",
@@ -2557,6 +2603,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === "native-file-writer"
+    && port.sender?.id === chrome.runtime.id
+    && port.sender?.url === chrome.runtime.getURL("download-worker.html")) {
+    let relayClosed = false;
+    let writerPort;
+    try {
+      writerPort = chrome.runtime.connectNative(MEDIA_COMPANION_NATIVE_HOST);
+    } catch {
+      port.disconnect();
+      return;
+    }
+    port.onMessage.addListener((message) => {
+      if (relayClosed) return;
+      try { writerPort.postMessage(message); } catch { port.disconnect(); }
+    });
+    writerPort.onMessage.addListener((message) => {
+      if (relayClosed) return;
+      try { port.postMessage(message); } catch { writerPort.disconnect(); }
+    });
+    port.onDisconnect.addListener(() => {
+      void chrome.runtime.lastError;
+      if (relayClosed) return;
+      relayClosed = true;
+      try { writerPort.disconnect(); } catch { /* already disconnected */ }
+    });
+    writerPort.onDisconnect.addListener(() => {
+      void chrome.runtime.lastError;
+      if (relayClosed) return;
+      relayClosed = true;
+      try { port.disconnect(); } catch { /* already disconnected */ }
+    });
+    return;
+  }
   if (isHeartbeatPortName(port.name) && port.sender?.id === chrome.runtime.id) {
     workerHeartbeatPorts.add(port);
     syncWorkerLifecycleAlarm();

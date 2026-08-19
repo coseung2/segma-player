@@ -1,6 +1,3 @@
-#ifndef ExtensionId
-  #error ExtensionId must be supplied by build-companion-installer.ps1
-#endif
 #ifndef ToolsDirectory
   #error ToolsDirectory must be supplied by build-companion-installer.ps1
 #endif
@@ -9,7 +6,7 @@
 #endif
 
 #define AppName "Aura Media Companion"
-#define AppVersion "0.2.48"
+#define AppVersion "0.3.0"
 #define NativeHostName "com.aura.media_companion"
 
 [Setup]
@@ -36,6 +33,9 @@ SignedUninstaller=yes
 Source: "..\native-host\target\release\aura-media-companion.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ToolsDirectory}\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[Icons]
+Name: "{autoprograms}\Aura Media Companion"; Filename: "{app}\aura-media-companion.exe"; Parameters: "--manager"; WorkingDir: "{app}"
+
 [Registry]
 Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\{#NativeHostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\{#NativeHostName}.json"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\{#NativeHostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\{#NativeHostName}.json"; Flags: uninsdeletekey
@@ -55,6 +55,18 @@ begin
   end;
 end;
 
+function AllowedOriginsJson(): String;
+begin
+  Result := '';
+#ifdef ChromeExtensionId
+  Result := Result + '"chrome-extension://{#ChromeExtensionId}/"';
+#endif
+#ifdef EdgeExtensionId
+  if Result <> '' then Result := Result + ',';
+  Result := Result + '"chrome-extension://{#EdgeExtensionId}/"';
+#endif
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   HostPath: String;
@@ -69,7 +81,7 @@ begin
     '  "description": "Aura Media Companion",' + #13#10 +
     '  "path": "' + JsonEscape(HostPath) + '",' + #13#10 +
     '  "type": "stdio",' + #13#10 +
-    '  "allowed_origins": ["chrome-extension://{#ExtensionId}/"]' + #13#10 +
+    '  "allowed_origins": [' + AllowedOriginsJson() + ']' + #13#10 +
     '}' + #13#10;
   if not SaveStringToFile(ManifestPath, ManifestJson, False) then
     RaiseException('Native messaging manifest could not be written.');

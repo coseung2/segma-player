@@ -1,8 +1,6 @@
 # Aura Media Downloader
 
-Chrome/Whale Manifest V3 extension for detecting compatible media resources
-and saving media the user is authorized to download. Saving runs entirely
-inside the extension — no native helper or companion app is required.
+Chrome/Whale Manifest V3 extension plus an optional Windows Aura Media Companion for detecting compatible media resources and saving media the user is authorized to download. The extension keeps browser-context media detection and authenticated request preparation; the Companion owns local YouTube execution, persistent jobs, native file writing, and the Windows download UI when installed.
 
 ## Editions
 
@@ -30,18 +28,19 @@ The development checkout uses the Pro profile in `edition.js`. The Chrome Web St
   context to each manifest, segment, and key request made by the browser player;
   `hls-playback-recovery.js` separates network failures from nonfatal internal
   aborts before consuming Aura's one-shot recovery.
-- `save-directory.js` keeps a one-time File System Access folder handle so the
-  extension writes files itself with 6-way parallel reception
-  (`parallel-download.js`) — no native helper is involved.
+- `save-directory.js` keeps the browser File System Access fallback, while
+  `companion-client.js` and `native-file-writer.js` prefer the reviewed Windows
+  Companion for local writing when it is available. Progressive/HLS requests
+  still originate in the browser so captured request context is preserved.
 - Subtitle generation prefers a separate HLS audio rendition when available,
   uploads only that bounded audio input, normalizes it in a CPU Modal function,
   and starts the GPU only for ASR and translation. Sources without a separate
   audio rendition retain the URL-based fallback.
-- The notebook YouTube server accepts only HMAC capability tokens issued by the
-  license worker (`/api/youtube-token`); free tokens are quota- and
-  rate-limited, Pro tokens require an approved key, and the server enforces a
-  global daily cap, queue cap, and disk guard.
-- The commercial runtime has no VPN, proxy, private egress, or private native bridge dependency.
+- YouTube uses the local Companion first. During migration the notebook server
+  remains as a fallback and still accepts only HMAC capability tokens issued by
+  the license worker (`/api/youtube-token`).
+- Media-route/VPN ownership remains outside this project; the downloader does
+  not recreate a second route broker inside the Companion.
 
 The store ZIP excludes private page-key code, static site-specific redirect rules, tests, native source, build scripts, and fixed extension keys.
 
@@ -98,10 +97,10 @@ the temporary browser forward and pauses for one user verification. It never
 automates CAPTCHA interaction; after the challenge disappears, playback,
 detection, and reporting resume automatically.
 
-Load the repository root as an unpacked extension for development. No
-companion installation is needed; the first download asks for a save folder
-once (create a new empty folder under Downloads) and every later download
-saves silently with parallel reception. `npm run build:dev-staging` refreshes
+Load the repository root as an unpacked extension for development. Without the
+Companion the existing File System Access/browser fallbacks remain available.
+With the Companion installed, YouTube and local file writing prefer the native
+path and save under `Downloads\\Aura Media`. `npm run build:dev-staging` refreshes
 the audited Pro directory under `artifacts/chrome-web-store/staging-pro` on any
 Node-supported platform and intentionally creates no ZIP.
 
@@ -122,16 +121,18 @@ rtk pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-store-package.
 
 The deterministic ZIP is written under `artifacts/chrome-web-store`. Follow `STORE_SUBMISSION_CHECKLIST.md` before upload.
 
-## Legacy companion (optional)
+## Windows Companion
 
-The extension no longer uses the native companion (`com.aura.media_companion`)
-for saving. The `native-host/`, `install-media-companion.ps1`, and
-`scripts/build-companion-installer.ps1` files remain only as legacy references
-for older deployments and are not required by the current runtime.
+`com.aura.media_companion` is the reviewed Native Messaging bridge. YouTube jobs
+are detached into Companion job-runner processes so downloads can continue if
+the browser or native bridge restarts. Each local YouTube job gets a small
+Windows progress window, and `--manager` opens the persistent download manager
+view. Job state is stored under the user's local Aura Media Companion directory.
 
 ```powershell
 rtk pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-companion-installer.ps1 `
-  -ExtensionId "<published-store-id>" `
+  -ChromeExtensionId "<published-chrome-store-id>" `
+  -EdgeExtensionId "<published-edge-addons-id>" `
   -ToolsDirectory "<reviewed-tools-directory>" `
   -SignToolName "<configured-inno-sign-tool>"
 ```

@@ -119,3 +119,38 @@ test("resumes from a start offset and only fetches the remaining ranges", async 
   assert.equal(written, 4 * 1024 * 1024);
   assert.deepEqual(progress.at(-1), [total, total]);
 });
+
+test("uses a prepared total and authenticated fetch implementation without an extra probe", async () => {
+  const ranges = [];
+  let globalFetchCalls = 0;
+  globalThis.fetch = async () => {
+    globalFetchCalls += 1;
+    throw new Error("global fetch must not be used");
+  };
+  const fetchImpl = async (_url, options = {}) => {
+    const headers = options.headers || {};
+    const range = typeof headers.get === "function" ? headers.get("range") : headers.Range;
+    ranges.push(range);
+    const match = /^bytes=(\d+)-(\d+)$/.exec(String(range || ""));
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(new Uint8Array(end - start + 1), {
+      status: 206,
+      headers: { "content-range": `bytes ${start}-${end}/10` },
+    });
+  };
+  const sink = fakeSink();
+  const result = await parallelDownload({
+    url: "http://server.test/file",
+    filename: "T.mp4",
+    createSink: async () => sink,
+    totalBytes: 10,
+    chunkBytes: 5,
+    fetchImpl,
+  });
+  assert.deepEqual(result, { bytes: 10 });
+  assert.equal(globalFetchCalls, 0);
+  assert.deepEqual(ranges, ["bytes=0-4", "bytes=5-9"]);
+  delete globalThis.fetch;
+});

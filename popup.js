@@ -1,7 +1,7 @@
 import { candidateDownloadErrorMessage } from "./download-errors.js";
 import { isDownloadableMediaType } from "./candidate.js";
 import { downloadJobView, retryableDownloadJob } from "./download-job-view.js";
-import { PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
+import { COMPANION_INSTALL_URL, PRODUCT_EDITION, UPGRADE_URL } from "./edition.js";
 import { productPlan, youtubeQualityAllowed } from "./product-plan.js";
 import { listYouTubeQualities } from "./youtube-server.js";
 import { companionStatus, companionYouTubeInfo } from "./companion-client.js";
@@ -191,12 +191,34 @@ function renderPlan() {
 }
 
 async function refreshSaveStatus() {
+  const companion = await companionStatus().catch(() => null);
+  if (companion?.ok) {
+    for (const el of saveStatusElements) el.textContent = t("save.companion");
+    syncLinkActivityState();
+    return;
+  }
   const handle = await getStoredSaveDirectory();
   const statusText = handle
     ? t("save.path", { name: handle.name })
     : t("save.missing");
   for (const el of saveStatusElements) el.textContent = statusText;
   syncLinkActivityState();
+}
+
+async function refreshCompanionHelp() {
+  const link = byId("companion-help");
+  if (!link) return;
+  link.hidden = true;
+  if (!/^https:\/\//i.test(COMPANION_INSTALL_URL)) return;
+  try {
+    const status = await companionStatus();
+    if (status?.ok) return;
+    link.href = COMPANION_INSTALL_URL;
+    link.hidden = false;
+  } catch {
+    link.href = COMPANION_INSTALL_URL;
+    link.hidden = false;
+  }
 }
 
 function setDirectStatus(message = "") {
@@ -747,12 +769,22 @@ function applyLocale(locale) {
   renderCandidates(lastCandidates);
   renderJobs(lastJobs);
   void refreshSaveStatus();
+  void refreshCompanionHelp();
 }
 
 chrome.storage?.onChanged?.addListener((changes, area) => {
   if (area !== "local" || !changes[LOCALE_STORAGE_KEY]) return;
   const next = normalizeLocale(changes[LOCALE_STORAGE_KEY].newValue);
   if (next && next !== t.locale) applyLocale(next);
+});
+
+function refreshCompanionAvailability() {
+  void refreshCompanionHelp();
+}
+
+window.addEventListener("focus", refreshCompanionAvailability);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshCompanionAvailability();
 });
 
 async function start() {

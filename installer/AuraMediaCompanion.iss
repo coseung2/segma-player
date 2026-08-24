@@ -6,7 +6,12 @@
 #endif
 
 #define AppName "Aura Media Companion"
-#define AppVersion "0.3.0"
+#ifndef AppVersion
+  #error AppVersion must be supplied by build-companion-installer.ps1
+#endif
+#ifndef AllowedExtensionIds
+  #error AllowedExtensionIds must be supplied by build-companion-installer.ps1
+#endif
 #define NativeHostName "com.aura.media_companion"
 
 [Setup]
@@ -14,6 +19,7 @@ AppId={{7C7709F1-21E7-4AF4-BB0C-9E5E582F2D0B}
 AppName={#AppName}
 AppVersion={#AppVersion}
 DefaultDirName={localappdata}\Aura Media\Companion
+UsePreviousAppDir=no
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
@@ -31,10 +37,13 @@ SignedUninstaller=yes
 
 [Files]
 Source: "..\native-host\target\release\aura-media-companion.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\companion-gui\target\release\aura-media-manager.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ToolsDirectory}\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\Aura Media Companion"; Filename: "{app}\aura-media-companion.exe"; Parameters: "--manager"; WorkingDir: "{app}"
+; Points straight at the GUI binary. The host still accepts `--manager` and
+; relaunches this executable, so an old shortcut keeps working.
+Name: "{autoprograms}\Aura Media Companion"; Filename: "{app}\aura-media-manager.exe"; WorkingDir: "{app}"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\{#NativeHostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\{#NativeHostName}.json"; Flags: uninsdeletekey
@@ -55,34 +64,55 @@ begin
   end;
 end;
 
+procedure AddAllowedOrigin(var Json: String; ExtensionId: String);
+var
+  Origin: String;
+begin
+  if ExtensionId = '' then Exit;
+  Origin := '"chrome-extension://' + ExtensionId + '/"';
+  if Pos(Origin, Json) > 0 then Exit;
+  if Json <> '' then Json := Json + ',';
+  Json := Json + Origin;
+end;
+
 function AllowedOriginsJson(): String;
+var
+  Remaining: String;
+  ExtensionId: String;
+  DelimiterPos: Integer;
 begin
   Result := '';
-#ifdef ChromeExtensionId
-  Result := Result + '"chrome-extension://{#ChromeExtensionId}/"';
-#endif
-#ifdef EdgeExtensionId
-  if Result <> '' then Result := Result + ',';
-  Result := Result + '"chrome-extension://{#EdgeExtensionId}/"';
-#endif
+  Remaining := '{#AllowedExtensionIds}';
+  while Remaining <> '' do begin
+    DelimiterPos := Pos('|', Remaining);
+    if DelimiterPos > 0 then begin
+      ExtensionId := Copy(Remaining, 1, DelimiterPos - 1);
+      Delete(Remaining, 1, DelimiterPos);
+    end else begin
+      ExtensionId := Remaining;
+      Remaining := '';
+    end;
+    AddAllowedOrigin(Result, ExtensionId);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   HostPath: String;
   ManifestPath: String;
-  ManifestJson: String;
+  ManifestLines: TArrayOfString;
 begin
   if CurStep <> ssPostInstall then Exit;
   HostPath := ExpandConstant('{app}\aura-media-companion.exe');
   ManifestPath := ExpandConstant('{app}\{#NativeHostName}.json');
-  ManifestJson := '{' + #13#10 +
-    '  "name": "{#NativeHostName}",' + #13#10 +
-    '  "description": "Aura Media Companion",' + #13#10 +
-    '  "path": "' + JsonEscape(HostPath) + '",' + #13#10 +
-    '  "type": "stdio",' + #13#10 +
-    '  "allowed_origins": [' + AllowedOriginsJson() + ']' + #13#10 +
-    '}' + #13#10;
-  if not SaveStringToFile(ManifestPath, ManifestJson, False) then
+  SetArrayLength(ManifestLines, 7);
+  ManifestLines[0] := '{';
+  ManifestLines[1] := '  "name": "{#NativeHostName}",';
+  ManifestLines[2] := '  "description": "Aura Media Companion",';
+  ManifestLines[3] := '  "path": "' + JsonEscape(HostPath) + '",';
+  ManifestLines[4] := '  "type": "stdio",';
+  ManifestLines[5] := '  "allowed_origins": [' + AllowedOriginsJson() + ']';
+  ManifestLines[6] := '}';
+  if not SaveStringsToUTF8FileWithoutBOM(ManifestPath, ManifestLines, False) then
     RaiseException('Native messaging manifest could not be written.');
 end;

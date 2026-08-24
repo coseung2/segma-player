@@ -1,5 +1,10 @@
 # Aura Media Downloader Terms of Use
 
+> [!WARNING]
+> Migration draft: this text describes the extension-primary product and must
+> be reviewed and rewritten for the Companion-first product before publication.
+> Do not treat unresolved owner placeholders as release-ready legal text.
+
 **Effective date:** `[OWNER INPUT: EFFECTIVE_DATE]`  
 **Publisher:** `[OWNER INPUT: LEGAL_PUBLISHER_NAME]`  
 **Contact:** `[OWNER INPUT: SUPPORT_EMAIL]`
@@ -14,7 +19,7 @@ You are responsible for having the rights, permission, or other lawful authoriza
 
 Aura Media Downloader is intended for compatible media resources. The General edition includes YouTube downloads capped at 1080p. It does not bypass DRM, authentication, paywalls, private-video controls, or other access restrictions. Compatibility is not universal and may change when a site, browser, or media format changes.
 
-The free edition provides one concurrent media job and a 1 GiB limit per download. Pro provides three concurrent jobs, no artificial byte cap, and the highest available quality for supported media. Plan features are subject to the published product configuration and applicable purchase terms.
+The free edition provides one concurrent media job and a 1 GiB limit per download. Pro has no concurrent-job limit, no artificial byte cap, and provides the highest available quality for supported media. Plan features are subject to the published product configuration and applicable purchase terms.
 
 ## Third-party services
 

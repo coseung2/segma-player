@@ -46,13 +46,77 @@ function baseEnvironment({
   const mutationObservers = [];
   const performanceObservers = [];
   const documentHtml = { text: doodHtml, reads: 0 };
+  const elementsById = new Map();
   let getEntriesCalls = 0;
   let onMessage = null;
 
   delete globalThis.__auraMediaDetectorInstalledV3;
   delete globalThis.__auraMediaDetectorInstalledV4;
   delete globalThis.__personalVpnMediaDetectorInstalledV3;
-  globalThis.Element = class MockElement {};
+  class MockShadowRoot {
+    constructor(host) {
+      this.host = host;
+      this.children = [];
+    }
+
+    replaceChildren(...children) {
+      this.children = [...children];
+    }
+
+    append(...children) {
+      this.children.push(...children);
+    }
+  }
+  globalThis.Element = class MockElement {
+    constructor(tagName = "DIV") {
+      this.tagName = String(tagName).toUpperCase();
+      this.children = [];
+      this.dataset = {};
+      this.attributes = {};
+      this.style = {
+        setProperty(name, value) {
+          this[name] = value;
+        },
+      };
+      this.shadowRoot = null;
+      this.eventHandlers = {};
+      this.id = "";
+      this.textContent = "";
+    }
+
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    }
+
+    getAttribute(name) {
+      return this.attributes[name] ?? null;
+    }
+
+    append(...children) {
+      this.children.push(...children);
+      for (const child of children) {
+        if (child?.id) elementsById.set(child.id, child);
+      }
+    }
+
+    replaceChildren(...children) {
+      this.children = [...children];
+    }
+
+    addEventListener(name, handler) {
+      this.eventHandlers[name] = handler;
+    }
+
+    attachShadow() {
+      this.shadowRoot = new MockShadowRoot(this);
+      return this.shadowRoot;
+    }
+
+    remove() {
+      if (this.id) elementsById.delete(this.id);
+      this.removed = true;
+    }
+  };
   globalThis.window = globalThis;
   globalThis.top = globalThis;
   globalThis.addEventListener = (name, handler) => {
@@ -75,18 +139,49 @@ function baseEnvironment({
       return [];
     },
   };
+  const documentElement = new globalThis.Element("HTML");
+  Object.defineProperty(documentElement, "outerHTML", {
+    get() {
+      documentHtml.reads += 1;
+      return documentHtml.text;
+    },
+  });
+  function doodSourceNodes() {
+    documentHtml.reads += 1;
+    const nodes = [...scripts];
+    for (const match of documentHtml.text.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)) {
+      const src = /\bsrc=["']([^"']+)["']/i.exec(match[1])?.[1] || "";
+      nodes.push({
+        tagName: "SCRIPT",
+        textContent: match[2],
+        src,
+        getAttribute: (name) => name === "src" ? src : null,
+      });
+    }
+    for (const match of documentHtml.text.matchAll(/<a[^>]*\bhref=["']([^"']*\/pass_md5\/[^"']+)["'][^>]*>/gi)) {
+      const href = match[1];
+      nodes.push({
+        tagName: "A",
+        href: new URL(href, location.href).href,
+        getAttribute: (name) => name === "href" ? href : null,
+      });
+    }
+    return nodes;
+  }
   globalThis.document = {
     title: "Test video",
-    documentElement: {
-      get outerHTML() {
-        documentHtml.reads += 1;
-        return documentHtml.text;
-      },
+    documentElement,
+    createElement(tagName) {
+      return new globalThis.Element(tagName);
+    },
+    getElementById(id) {
+      return elementsById.get(id) || null;
     },
     querySelectorAll(selector) {
       if (selector === "video, audio, source") return [...videos];
       if (selector === "iframe") return [...iframes];
       if (selector === "script") return [...scripts];
+      if (selector === 'script, a[href*="/pass_md5/"]') return doodSourceNodes();
       return [];
     },
     addEventListener(name, handler) {
@@ -137,6 +232,9 @@ function baseEnvironment({
     mutationObservers,
     performanceObservers,
     documentHtml,
+    get overlayHost() {
+      return elementsById.get("aura-media-progress-host") || null;
+    },
     get countScans() {
       return getEntriesCalls;
     },
@@ -311,6 +409,70 @@ test("Dood pass_md5 is cached, skipped on irrelevant mutations, and re-detected 
   });
 });
 
+test("Dood discovery ignores Aura diagnostic attributes and selects the real player script", async () => {
+  const stale = JSON.stringify([{ resource: "https://playmogo.com/pass_md5/stale-token" }])
+    .replaceAll('"', "&quot;");
+  const env = baseEnvironment({
+    locationHref: "https://playmogo.com/e/abc123",
+    doodHtml: `<html data-aura-qa-detected-candidates="${stale}"><script>const pass = "/pass_md5/real-token";</script></html>`,
+  });
+  const fetched = [];
+  globalThis.fetch = async (url) => {
+    fetched.push(String(url));
+    return {
+      ok: true,
+      headers: { get: () => "text/plain" },
+      text: async () => "https://cdn.dood.example/real.mp4",
+    };
+  };
+
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(0);
+
+  assert.deepEqual(fetched, ["https://playmogo.com/pass_md5/real-token"]);
+  assert.ok(env.sent.some((message) => message.type === "dood-direct"
+    && message.url === "https://cdn.dood.example/real.mp4"));
+});
+
+test("Dood accepts its historical text/html MIME when the body is one exact media URL", async () => {
+  const env = baseEnvironment({
+    locationHref: "https://playmogo.com/e/html-response",
+    doodHtml: '<script>const pass = "/pass_md5/html-token";</script>',
+  });
+  globalThis.fetch = async () => ({
+    ok: true,
+    headers: { get: () => "text/html; charset=UTF-8" },
+    text: async () => "https://cdn.dood.example/historical-contract.mp4",
+  });
+
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(0);
+
+  assert.ok(env.sent.some((message) => message.type === "dood-direct"
+    && message.url === "https://cdn.dood.example/historical-contract.mp4"));
+});
+
+test("Dood rejects a pass response contaminated with HTML markup", async () => {
+  const env = baseEnvironment({
+    locationHref: "https://playmogo.com/e/contaminated-response",
+    doodHtml: '<script>const pass = "/pass_md5/contaminated-token";</script>',
+  });
+  globalThis.fetch = async () => ({
+    ok: true,
+    headers: { get: () => "text/html; charset=UTF-8" },
+    text: async () => "https://cdn.dood.example/should-not-be-used.mp4<html></html>",
+  });
+
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(0);
+
+  assert.equal(env.sent.some((message) => message.type === "dood-direct"), false);
+  const response = await new Promise((resolve) => {
+    env.onMessage({ type: "get-dood-direct" }, {}, resolve);
+  });
+  assert.deepEqual(response, { ok: false });
+});
+
 test("Dood backoff survives mutations while a forced request retries immediately", async () => {
   const env = baseEnvironment({
     locationHref: "https://dood.example/e/abc123#player",
@@ -464,6 +626,34 @@ test("download overlay acknowledges its top-frame activation after the first ref
   });
   assert.deepEqual(result, { ok: true, shown: true });
   assert.ok(env.sent.some((message) => message.type === "list-download-jobs"));
+});
+
+test("download overlay keeps diagnostics on the host and renders into its ShadowRoot", async () => {
+  const job = {
+    id: "job-shadow-root",
+    title: "Dood download",
+    status: "running",
+    statusText: "Running 20%",
+    diagnostic: { providerId: "dood", frameId: 8 },
+  };
+  const env = baseEnvironment({
+    runtimeHandler(message) {
+      if (message.type === "list-download-jobs") return { jobs: [job] };
+      if (message.type === "qa-list-candidates") return { ok: true, candidates: [] };
+      if (message.type === "qa-list-request-trace") return { ok: true, requests: [] };
+      return undefined;
+    },
+  });
+  await importFreshContent();
+  const result = await new Promise((resolve) => {
+    const keepAlive = env.onMessage({ type: "show-download-overlay", jobIds: [job.id] }, {}, resolve);
+    assert.equal(keepAlive, true);
+  });
+
+  assert.deepEqual(result, { ok: true, shown: true });
+  assert.equal(JSON.parse(env.overlayHost.dataset.auraQaCandidates)[0].id, job.id);
+  assert.equal(env.overlayHost.shadowRoot.children.length, 1);
+  await new Promise((resolve) => env.onMessage({ type: "hide-download-overlay" }, {}, resolve));
 });
 
 test("download overlay hide message stops the local timer and removes the host", async () => {

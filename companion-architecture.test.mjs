@@ -32,14 +32,28 @@ test("companion exposes persistent job recovery and cancellation to the extensio
   assert.match(background, /source: subtitleJob \? "companion" : "youtube"/);
 });
 
-test("companion installers register both Chrome and Edge origins when supplied", async () => {
-  const [script, installer] = await Promise.all([
+test("companion installers include the store and current development extension origins", async () => {
+  const [script, manualInstaller, installer, originConfig] = await Promise.all([
     read("./scripts/build-companion-installer.ps1"),
+    read("./install-media-companion.ps1"),
     read("./installer/AuraMediaCompanion.iss"),
+    read("./installer/companion-extension-origins.json").then(JSON.parse),
   ]);
-  assert.match(script, /ChromeExtensionId/);
-  assert.match(script, /EdgeExtensionId/);
+  assert.equal(originConfig.chromeStoreExtensionId, "kniniopdkceodiddkijnddnggdgmjmmo");
+  assert.ok(originConfig.developmentExtensionIds.includes("fnnilboncpjgaachejfhednccmfflmkl"));
+  for (const source of [script, manualInstaller]) {
+    assert.match(source, /companion-extension-origins\.json/);
+    assert.match(source, /developmentExtensionIds/);
+  }
+  assert.match(script, /AllowedExtensionIds/);
+  assert.match(script, /Select-Object -Unique/);
+  assert.match(script, /Inno Setup 7/);
   assert.match(installer, /Google\\Chrome\\NativeMessagingHosts/);
   assert.match(installer, /Microsoft\\Edge\\NativeMessagingHosts/);
   assert.match(installer, /AllowedOriginsJson/);
+  assert.match(installer, /AllowedExtensionIds/);
+  assert.match(installer, /AddAllowedOrigin/);
+  assert.match(installer, /DefaultDirName=\{localappdata\}\\Aura Media\\Companion/);
+  assert.match(installer, /UsePreviousAppDir=no/);
+  assert.match(installer, /SaveStringsToUTF8FileWithoutBOM\(ManifestPath, ManifestLines, False\)/);
 });

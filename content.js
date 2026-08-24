@@ -10,6 +10,10 @@
   const DOOD_RETRY_MAX_ATTEMPTS = 4;
   const DOOD_FETCH_TIMEOUT_MS = 12_000;
   const DOOD_NONCE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const DOOD_PASS_PATH_RE = /\/pass_md5\/[a-z0-9._~%/-]{1,2048}/i;
+  const DOOD_PASS_PATH_EXACT_RE = /^\/pass_md5\/[a-z0-9._~%/-]{1,2048}$/i;
+  const DOOD_SOURCE_NODE_LIMIT = 256;
+  const DOOD_SOURCE_TEXT_LIMIT = 1_000_000;
   const PAGE_MEDIA_EVENT_TYPE = "aura-media-observer-event-v1";
   const LEVEL5_MEDIA_DISCOVERY_REQUEST = "aura-level5-media-discovery-request-v1";
   const PAGE_MEDIA_SNAPSHOT_REQUEST_TYPE = "aura-media-observer-snapshot-request-v1";
@@ -274,18 +278,58 @@
     send({ type: "main-frame", urls: [sorted[0].src], frames: sorted });
   }
 
+  function doodPlayerClue() {
+    let pageOrigin;
+    try {
+      pageOrigin = new URL(location.href).origin;
+    } catch {
+      return null;
+    }
+    const nodes = [...(document.querySelectorAll?.('script, a[href*="/pass_md5/"]') || [])]
+      .slice(0, DOOD_SOURCE_NODE_LIMIT);
+    const sourceParts = [];
+    let passUrl = "";
+    let sourceLength = 0;
+    for (const node of nodes) {
+      const tagName = String(node?.tagName || "").toUpperCase();
+      const values = tagName === "A"
+        ? [node.getAttribute?.("href"), node.href]
+        : [node.textContent, node.getAttribute?.("src"), node.src];
+      for (const value of values) {
+        const source = typeof value === "string" ? value : "";
+        if (!source) continue;
+        if (sourceLength < DOOD_SOURCE_TEXT_LIMIT) {
+          const part = source.slice(0, DOOD_SOURCE_TEXT_LIMIT - sourceLength);
+          sourceParts.push(part);
+          sourceLength += part.length;
+        }
+        if (passUrl) continue;
+        const clue = DOOD_PASS_PATH_RE.exec(source)?.[0] || "";
+        if (!clue) continue;
+        try {
+          const parsed = new URL(clue, location.href);
+          if (parsed.origin !== pageOrigin || parsed.username || parsed.password || parsed.search || parsed.hash
+            || !DOOD_PASS_PATH_EXACT_RE.test(parsed.pathname) || parsed.href.length > MAX_URL_BYTES) continue;
+          passUrl = parsed.href;
+        } catch {
+          // Keep searching bounded, trusted player nodes.
+        }
+      }
+    }
+    return passUrl ? { passUrl, playerSource: sourceParts.join("\n") } : null;
+  }
+
   async function resolveDoodDirectOnce(force) {
     try {
       if (!force && !doodDirty) return doodDirectCache;
-      const text = document.documentElement?.outerHTML || "";
-      const match = text.match(/(\/pass_md5\/[^"')\s<>]+)/);
+      const clue = doodPlayerClue();
       doodDirty = false;
-      if (!match) {
+      if (!clue) {
         lastDoodPassUrl = "";
         doodDirectCache = null;
         return null;
       }
-      const passUrl = new URL(match[1], location.href).href;
+      const { passUrl, playerSource } = clue;
       if (!force && passUrl === lastDoodPassUrl && doodDirectCache) return doodDirectCache;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), DOOD_FETCH_TIMEOUT_MS);
@@ -305,7 +349,7 @@
             direct = object.f || object.url || object.src || object.file || direct;
           } catch { /* not JSON */ }
         }
-        direct = completeDoodDirectUrl(String(direct).replace(/^["']|["']$/g, "").trim(), text);
+        direct = completeDoodDirectUrl(String(direct).replace(/^["']|["']$/g, "").trim(), playerSource);
         if (!direct) {
           doodDirty = true;
           backoffDoodRetry();
@@ -383,9 +427,11 @@
   }
 
   function completeDoodDirectUrl(value, pageSource) {
+    const raw = String(value || "").trim();
+    if (!raw || raw.length > MAX_URL_BYTES || /[\s<>"']/.test(raw)) return null;
     let direct;
     try {
-      direct = new URL(String(value || "").trim());
+      direct = new URL(raw);
     } catch {
       return null;
     }
@@ -597,7 +643,7 @@
     if (!host.shadowRoot) {
       try { host.attachShadow({ mode: "open" }); } catch { /* keep the light DOM fallback */ }
     }
-    return host.shadowRoot || host;
+    return { host, root: host.shadowRoot || host };
   }
 
   // The content script is a classic script and cannot import i18n.js, so the
@@ -758,7 +804,7 @@
       cleanDownloadOverlay();
       return;
     }
-    const host = downloadOverlayHost();
+    const { host, root } = downloadOverlayHost();
     const visibleQaCandidates = visible
       .filter((job) => job?.diagnostic && typeof job.diagnostic === "object")
       .map((job) => ({
@@ -770,7 +816,7 @@
       }));
     if (visibleQaCandidates.length) host.dataset.auraQaCandidates = JSON.stringify(visibleQaCandidates);
     else delete host.dataset.auraQaCandidates;
-    host.replaceChildren();
+    root.replaceChildren();
     const panel = document.createElement("div");
     panel.setAttribute("style", "overflow:hidden;background:#10141c;border:1px solid #2a3444;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.45);");
     const head = document.createElement("div");
@@ -787,7 +833,7 @@
     head.append(heading, close);
     panel.append(head);
     for (const job of visible.slice(0, 3)) panel.append(buildDownloadOverlayRow(job));
-    host.append(panel);
+    root.append(panel);
   }
 
   async function showDownloadOverlay(jobIds = []) {

@@ -21,7 +21,9 @@ const downloadListeners = { created: [], changed: [] };
 const downloadItems = new Map();
 let lastCandidatesSnapshot = null;
 let tabsSendResponse = null;
+let tabsSendHandler = null;
 let fetchHandler = null;
+let nativeConnectHandler = null;
 const fetchCalls = [];
 
 globalThis.fetch = async (input, options = {}) => {
@@ -37,7 +39,10 @@ globalThis.chrome = {
     getURL: (path) => `chrome-extension://${runtimeId}/${path}`,
     getManifest: () => ({ version: "0.0.0-test" }),
     lastError: null,
-    connectNative: () => { throw new Error("unexpected native connection"); },
+    connectNative: (...args) => {
+      if (!nativeConnectHandler) throw new Error("unexpected native connection");
+      return nativeConnectHandler(...args);
+    },
     sendMessage: async (message) => {
       runtimeMessages.push(message);
       return { ok: true };
@@ -84,7 +89,7 @@ globalThis.chrome = {
   tabs: {
     query: async () => [{ id: 1, url: "https://outer.example/", title: "Outer" }],
     get: async () => ({ title: "Outer" }),
-    sendMessage: async () => tabsSendResponse,
+    sendMessage: async (...args) => tabsSendHandler ? tabsSendHandler(...args) : tabsSendResponse,
     onUpdated: { addListener: (fn) => tabsListeners.onUpdated.push(fn) },
     onRemoved: { addListener: (fn) => tabsListeners.onRemoved.push(fn) },
     onActivated: { addListener: () => {} },
@@ -171,6 +176,30 @@ async function runtimeMessage(message, sender = {}) {
   const keepAlive = runtimeListeners.onMessage[0](message, sender, resolveResponse);
   if (keepAlive !== true) return { keepAlive, response: undefined };
   return { keepAlive, response: await response };
+}
+
+function nativeCompanionPort(responder) {
+  const messageListeners = [];
+  const disconnectListeners = [];
+  let disconnected = false;
+  return {
+    onMessage: { addListener: (fn) => messageListeners.push(fn) },
+    onDisconnect: { addListener: (fn) => disconnectListeners.push(fn) },
+    postMessage(message) {
+      queueMicrotask(() => {
+        if (disconnected) return;
+        const response = responder(message);
+        for (const listener of messageListeners) {
+          listener({ ...response, requestId: message.requestId });
+        }
+      });
+    },
+    disconnect() {
+      if (disconnected) return;
+      disconnected = true;
+      for (const listener of disconnectListeners) listener();
+    },
+  };
 }
 
 function mediaStreamPort() {
@@ -318,7 +347,7 @@ test("media-stream keeps in-frame dood priority above the static graph fallback"
   tabsSendResponse = null;
   runtimeListeners.onMessage[0](
     { type: "dood-direct", url: "https://doodcdn.example/cached.mp4", frameUrl: "https://player.example/e/cached" },
-    { id: runtimeId, tab: { id: 7 } },
+    { id: runtimeId, tab: { id: 7 }, frameId: 3 },
     () => {},
   );
   const cachedPort = mediaStreamPort();
@@ -327,12 +356,38 @@ test("media-stream keeps in-frame dood priority above the static graph fallback"
     url: "https://doodcdn.example/stale.mp4",
     pageUrl,
     videoTabId: 7,
+    videoFrameId: 3,
   });
   assert.equal(cachedPort.messages.length, 1);
   assert.equal(cachedPort.messages[0].type, "fetch-required");
   assert.equal(cachedPort.messages[0].url, "https://doodcdn.example/cached.mp4");
   assert.equal(cachedPort.messages[0].referrer, "https://player.example/e/cached");
-  assert.equal(graphFetches, 0, "cached doodDirectByTab must also win over the static graph fallback");
+  assert.equal(graphFetches, 0, "the same-frame Dood cache must win over the static graph fallback");
+});
+
+test("media-stream rebinds a stale Dood candidate to the currently playing frame", async () => {
+  const handler = runtimeListeners.onMessage[0];
+  handler({ type: "frame-media-state", playing: false, visibleArea: 10, observedAt: Date.now() },
+    { id: runtimeId, tab: { id: 19 }, frameId: 3 }, () => {});
+  handler({ type: "frame-media-state", playing: true, visibleArea: 500_000, observedAt: Date.now() },
+    { id: runtimeId, tab: { id: 19 }, frameId: 8 }, () => {});
+  tabsSendHandler = async (_tabId, message, options) => {
+    if (message.type !== "get-dood-direct" || options?.frameId !== 8) return null;
+    return { ok: true, url: "https://doodcdn.example/current/token.mp4", frameUrl: "https://player.example/e/current" };
+  };
+  fetchHandler = () => okResponse();
+  const port = mediaStreamPort();
+  await port.start({
+    type: "start",
+    url: "https://doodcdn.example/stale/token.mp4",
+    pageUrl: "https://playmogo.com/d/replaced-frame",
+    videoTabId: 19,
+    videoFrameId: 3,
+  });
+  assert.equal(port.messages[0].url, "https://doodcdn.example/current/token.mp4");
+  assert.equal(port.messages[0].referrer, "https://player.example/e/current");
+  assert.equal(port.messages[0].videoFrameId, 8);
+  tabsSendHandler = null;
 });
 
 test("source-frame Dood handoff waits for a non-empty Chrome download", async () => {
@@ -742,4 +797,192 @@ test("youtube downloads fail with a server error when the server is unreachable"
   assert.equal(result.keepAlive, true);
   assert.equal(result.response.ok, false);
   assert.match(result.response.error || "", /YouTube 서버에 연결할 수 없습니다|서버 주소를 확인/);
+});
+
+test("configured Companion owns subtitle execution and the extension only tracks its job", async () => {
+  localStorage.delete("auraLicense");
+  runtimeMessages.length = 0;
+  fetchCalls.length = 0;
+  fetchHandler = (call) => { throw new Error(`unexpected fetch: ${call.url}`); };
+  const nativeMessages = [];
+  const jobId = "subtitle-native-1";
+  const port = nativeCompanionPort((message) => {
+    nativeMessages.push(message);
+    if (message.type === "hello") return { ok: true, protocol: 2 };
+    if (message.type === "status") {
+      return { ok: true, protocol: 2, entitlementOwner: "companion", licenseConfigured: true };
+    }
+    if (message.type === "subtitle.create") {
+      assert.match(message.candidateId, /^subtitle-[A-Za-z0-9-]+$/);
+      assert.equal(message.sourceLanguage, "ja");
+      assert.equal(message.targetLanguage, "ko");
+      assert.deepEqual(message.media, {
+        type: "hls",
+        title: "Companion subtitle test",
+        pageUrl: "https://page.example/watch/1",
+        resourceUrl: "https://media.example/master.m3u8",
+        audioRenditionUrl: "",
+      });
+      assert.equal(JSON.stringify(message).includes("licenseKey"), false);
+      return { ok: true, accepted: true, jobId, status: "preparing" };
+    }
+    if (message.type === "list-jobs") {
+      return {
+        ok: true,
+        jobs: [{
+          jobId,
+          jobType: "subtitle",
+          status: "running",
+          statusText: "Subtitle generation is running.",
+          title: "Companion subtitle test",
+          updatedAt: Date.now(),
+        }],
+      };
+    }
+    if (message.type === "cancel-job") return { ok: true, cancelled: true, jobId };
+    throw new Error(`unexpected native message: ${message.type}`);
+  });
+  nativeConnectHandler = (host) => {
+    assert.equal(host, "com.aura.media_companion");
+    return port;
+  };
+
+  try {
+    const result = await runtimeMessage({
+      type: "start-subtitle-generation",
+      input: {
+        mediaUrl: "https://media.example/master.m3u8",
+        sourceUrl: "https://page.example/watch/1",
+        title: "Companion subtitle test",
+        sourceLanguage: "ja",
+        mediaType: "HLS_MASTER",
+        sourceTabId: 71,
+        sourceFrameId: 4,
+      },
+    }, {
+      id: runtimeId,
+      tab: { id: 71 },
+      url: `chrome-extension://${runtimeId}/player.html?session=subtitle-test`,
+    });
+    assert.equal(result.keepAlive, true);
+    assert.deepEqual(result.response, { ok: true, jobId, mode: "subtitle-companion" });
+    await settle();
+    await settle();
+
+    const stored = (sessionStorage.get("downloadJobs") || []).find((job) => job.id === jobId);
+    assert.equal(stored?.source, "companion");
+    assert.equal(stored?.mediaType, "SUBTITLE");
+    assert.equal(stored?.folderName, "Downloads\\Aura Media\\Subtitles");
+    assert.equal(runtimeMessages.some((message) => message.type === "run-subtitle-job"), false);
+    assert.equal(nativeMessages.some((message) => message.type === "subtitle.create"), true);
+
+    const cancelled = await runtimeMessage({ type: "cancel-download-job", jobId }, { id: runtimeId });
+    assert.equal(cancelled.response.ok, true);
+    assert.equal(nativeMessages.some((message) => message.type === "cancel-job" && message.jobId === jobId), true);
+    assert.equal((sessionStorage.get("downloadJobs") || []).find((job) => job.id === jobId)?.status, "cancelled");
+  } finally {
+    nativeConnectHandler = null;
+    port.disconnect();
+  }
+});
+
+test("a configured Companion subtitle failure never falls back to the extension worker", async () => {
+  localStorage.delete("auraLicense");
+  runtimeMessages.length = 0;
+  fetchCalls.length = 0;
+  fetchHandler = (call) => { throw new Error(`unexpected fetch: ${call.url}`); };
+  const nativeMessages = [];
+  const port = nativeCompanionPort((message) => {
+    nativeMessages.push(message);
+    if (message.type === "hello") return { ok: true, protocol: 2 };
+    if (message.type === "status") {
+      return { ok: true, protocol: 2, entitlementOwner: "companion", licenseConfigured: true };
+    }
+    if (message.type === "subtitle.create") {
+      return { ok: false, errorCode: "subtitle-job-start-failed", error: "Companion start failed." };
+    }
+    throw new Error(`unexpected native message: ${message.type}`);
+  });
+  nativeConnectHandler = () => port;
+
+  try {
+    const result = await runtimeMessage({
+      type: "start-subtitle-generation",
+      input: {
+        mediaUrl: "https://media.example/video.mp4",
+        sourceUrl: "https://page.example/watch/2",
+        title: "Companion failure test",
+        sourceLanguage: "en",
+        mediaType: "PROGRESSIVE",
+      },
+    }, {
+      id: runtimeId,
+      tab: { id: 72 },
+      url: `chrome-extension://${runtimeId}/player.html?session=subtitle-failure-test`,
+    });
+    assert.equal(result.response.ok, false);
+    assert.equal(result.response.error, "Companion start failed.");
+    assert.equal(nativeMessages.some((message) => message.type === "subtitle.create"), true);
+    assert.equal(runtimeMessages.some((message) => message.type === "run-subtitle-job"), false);
+    assert.equal(fetchCalls.length, 0);
+  } finally {
+    nativeConnectHandler = null;
+    port.disconnect();
+  }
+});
+
+test("an unconfigured Companion keeps the licensed extension subtitle migration fallback", async () => {
+  const licenseKey = "AM-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  localStorage.set("auraLicense", { key: licenseKey, edition: "pro", status: "approved" });
+  runtimeMessages.length = 0;
+  fetchCalls.length = 0;
+  fetchHandler = (call) => {
+    assert.match(call.url, /^https:\/\/aura\.mdownloader\.workers\.dev\/api\/license\?/);
+    return new Response(JSON.stringify({ ok: true, edition: "pro", status: "approved" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const nativeMessages = [];
+  const port = nativeCompanionPort((message) => {
+    nativeMessages.push(message);
+    if (message.type === "hello") return { ok: true, protocol: 2 };
+    if (message.type === "status") {
+      return { ok: true, protocol: 2, entitlementOwner: "companion", licenseConfigured: false };
+    }
+    throw new Error(`unexpected native message: ${message.type}`);
+  });
+  nativeConnectHandler = () => port;
+
+  try {
+    const result = await runtimeMessage({
+      type: "start-subtitle-generation",
+      input: {
+        mediaUrl: "https://media.example/video.mp4",
+        sourceUrl: "https://page.example/watch/3",
+        title: "Extension fallback test",
+        sourceLanguage: "ja",
+        mediaType: "PROGRESSIVE",
+      },
+    }, {
+      id: runtimeId,
+      tab: { id: 73 },
+      url: `chrome-extension://${runtimeId}/player.html?session=subtitle-fallback-test`,
+    });
+    assert.equal(result.response.ok, true);
+    assert.equal(typeof result.response.jobId, "string");
+    assert.equal(result.response.mode, undefined);
+    assert.equal(nativeMessages.some((message) => message.type === "subtitle.create"), false);
+    const legacyCommand = runtimeMessages.find((message) => message.type === "run-subtitle-job");
+    assert.equal(legacyCommand?.licenseKey, licenseKey);
+
+    const cancelled = await runtimeMessage({
+      type: "cancel-download-job",
+      jobId: result.response.jobId,
+    }, { id: runtimeId });
+    assert.equal(cancelled.response.ok, true);
+  } finally {
+    nativeConnectHandler = null;
+    port.disconnect();
+  }
 });

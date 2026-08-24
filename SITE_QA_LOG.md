@@ -504,3 +504,86 @@ The av19 result is a confirmed current live detection regression and remains the
 - Reproduction: overlay state was local to each tab; closing one tab's panel did not suppress panels in other tabs
 - Code action: background owns a session-persisted job ID list, sends it on every tab activation/navigation, and broadcasts global hide on close; terminal records remain until that global close
 - Live result after fix: `LIVE-UNVERIFIED`; detect/playback/progressive-probe/extension-download/subtitle are not changed by this overlay-only fix
+
+### 2026-08-23 — PlayMogo Dood user Chrome confirmation (0.3.88)
+
+- Browser/channel: user's headed Chrome session; site `https://playmogo.com/d/37fhiw3581dr` (DoodStream title)
+- Extension version: `0.3.88` (staging-pro)
+- Site ID: `playmogo` / `doodstream-authenticated-frame`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Detect: `PASS` — 8 candidates; primary tokenized `DIRECT_PROGRESSIVE` cloudatacdn candidates plus Dood `AUTHENTICATED_SOURCE_FRAME`
+- native-page playback: `PASS` (user-confirmed; Aura Media Player session tab open)
+- extension-download: `PASS` (user-confirmed on `0.3.88`)
+- progressive-probe/subtitle/overlay: `NOT_RUN` downstream surfaces not remeasured
+- Evidence: `C:\Users\coseung2\AppData\Local\Temp\aura-mdownloader-dood\playmogo-claimed.json` (token-redacted candidate + request trace) and direct user confirmation
+- Note: no code change was made in this turn; this closes INC-2026-08-17-008 for Chrome, Whale remains unverified
+
+### 2026-08-23 — PlayMogo Pro focus-loss pause reproduction (0.3.88)
+
+- Browser/channel: user's headed Chrome session (explicitly not Whale)
+- Extension version: `0.3.88` Pro
+- Site URL / ID: `https://playmogo.com/d/0p6sbp4xtvw1` / `playmogo`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Extension-download: `FAIL` for background-continuation behavior — losing Chrome window focus displayed `일시정지 — 원래 페이지로 돌아가주세요.` despite Pro
+- Detect/playback/progressive-probe/subtitle/overlay: `NOT_RUN` on this exact URL in this check
+- Confirmed cause: the `WINDOW_ID_NONE` handler bypassed the product plan and directly paused every job
+- Fix candidate: `0.3.91`; deterministic regression added, live Chrome retest `NOT_RUN`
+
+### 2026-08-23 — PlayMogo Dood frame churn diagnosis (0.3.88)
+
+- Browser/channel: user's headed Chrome session, explicitly selected by extension instance ID; Whale was not used
+- Extension version: `0.3.88` Pro
+- Site URL / ID: `https://playmogo.com/d/0p6sbp4xtvw1` / `playmogo`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Browser playback: `PASS` by direct user report
+- Extension-download: `FAIL/INTERMITTENT` by direct user report; exact failed request could not be captured
+- Live diagnostic: the exact PlayMogo tab was listed, but the controllable tab changed to a `ty.tyrotation.com` advertising redirect while it was claimed and the original tab ID became unavailable. This is evidence of active tab/frame churn, not a successful download test.
+- Code defect found: Dood fallback cache was tab-wide for ten minutes and refreshed frame IDs were not propagated to the source-frame click
+- Fix candidate: `0.3.91`; exact-frame cache, 60-second freshness, playing-frame rediscovery, and downstream frame rebinding added
+- Detect/progressive-probe/subtitle/overlay: `NOT_RUN`; post-fix extension-download remains `NOT_RUN`
+- Evidence: `C:\Users\coseung2\AppData\Local\Temp\aura-mdownloader-dood-unstable\live-report.json`, `post-claim-tabs.json`, and `reclaim-report.json`
+
+### 2026-08-24 — PlayMogo resume/frame and Dood refresh diagnosis (0.3.92)
+
+- Browser/channel: user's headed Chrome 151 session, selected by extension instance ID; Whale was not used
+- Extension version: `0.3.92`, unpacked from `artifacts/chrome-web-store/staging-pro`
+- Site URL / ID: `https://playmogo.com/d/0p6sbp4xtvw1` / `playmogo`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Native-page playback: `PARTIAL` — user reported that the target video was playing after the resume prompt; during the later read-only inspection the `/e/` frame had already changed to a Google connection-refused document with zero video elements
+- Detect: `PASS` for background candidate collection — 14 Dood progressive candidates were present and a tokenized `cloudatacdn` `video.js` candidate was primary; current-playing correlation was stale after frame replacement
+- Extension-download: `FAIL` — four recorded jobs ended with the video-preparation-no-response status; target `cloudatacdn` media later produced `net::ERR_FAILED`
+- Progressive-probe/subtitle: `NOT_RUN`
+- Overlay: `FAIL` — `refreshDownloadOverlay()` repeatedly threw while assigning `dataset` on a returned `ShadowRoot`, interrupting page overlay rendering
+- Confirmed failure reason: forced Dood refresh scans the whole `documentElement.outerHTML`; Aura's own candidate diagnostics serialize a previous `/pass_md5/` URL into a root data attribute, allowing the resolver to re-extract an HTML-escaped, malformed path. Those malformed refreshes were followed by failed preparation. The HTTP 200 `text/html` MIME is not independently a failure because the prior successful Dood baseline used the same MIME with an exact URL body.
+- Evidence: `C:\Users\coseung2\AppData\Local\Temp\aura-playmogo-diagnosis\aura-qa-summary.json`, `player-frame-state.json`, `live-state.json`, and `extension-version.json`
+- Code/version action: `NOT_RUN`; diagnosis only, no source change and no manifest increment
+
+### 2026-08-24 — Shackledshow MxDrop Companion 1% stall diagnosis (0.3.94)
+
+- Browser/channel: user's headed Chrome 151 profile `사용자 이름 1`, selected by extension instance ID; Whale was not used
+- Extension version: staging `0.3.94`; the exact unpacked extension ID was confirmed, while direct inspection of extension-scheme pages is browser-policy blocked
+- Site URL / ID: `https://shackledshow.cc/videos/1692b65a-48d5-4a6e-a477-9ed151f65568` / `generic` during reproduction, registered as `shackledshow` in fix candidate `0.3.95`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Detect: `PASS` for the recorded failing job — tokenized `mxcontent.net` `DIRECT_PROGRESSIVE` media from the `miixdrop.top` `video.js` iframe was present; a fresh diagnostic tab did not start playback and therefore did not create a fresh candidate
+- Native-page playback: `PASS` by direct user report
+- Progressive-probe: `NOT_RUN` independently; the recorded percentage establishes a known total but does not preserve the exact probe response
+- Extension-download: `FAIL` by direct user report — Companion repeatedly remained at 1%; the recorded job was later cancelled
+- Subtitle/overlay: `NOT_RUN`
+- Separate context-menu retry: `FAIL` with HTTP 403 after losing iframe context; kept separate from the original frame-bound 1% job
+- Confirmed code failure: the Companion progressive writer bypassed bounded Range reception and used one unbounded stream even when preparation had established Range support; the folder writer used the resilient six-way Range path
+- Evidence: `C:\Users\coseung2\AppData\Local\Temp\aura-shackledshow-1692\page-state.json`, `after-play.json`, `after-second-play.json`, `after-third-play.json`, and user report
+- Code/version action: fix candidate `0.3.95`; deterministic native Range and Shackledshow fixture tests pass, post-reload extension-download remains `NOT_RUN`
+
+### 2026-08-24 — Generated subtitle browser-folder save failure with Companion installed
+
+- Browser/channel: user's headed Chrome 151 profile `사용자 이름 1`, selected by extension instance ID; Whale was not used
+- Extension version: exact loaded version `NOT_VERIFIED` because extension-scheme inspection is blocked; source/development staging before the fix was `0.3.95`
+- Site URL / ID: exact subtitle source not established; current source tabs were AVsee and MissAV with one Aura Player tab
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Subtitle generation: `PASS` by direct user report
+- Subtitle output save: `FAIL` by direct user report — generated result reached the SRT save step but browser subtitle-folder permission was unavailable
+- Detect/native-page playback/progressive-probe/extension-download/overlay: `NOT_RUN` for this subtitle incident
+- Live diagnostic: current source-page `data-aura-*` diagnostics no longer contained the subtitle job record, so no terminal job payload is inferred beyond the user report
+- Confirmed code failure: completed subtitle output attempted only the File System Access subtitle folder and never used the installed Companion native writer
+- Evidence: `C:\Users\coseung2\AppData\Local\Temp\aura-subtitle-companion\tabs.json`, `page-diagnostics.json`, user report, and the verified `download-worker.js` save path
+- Code/version action: fix candidate `0.3.96` makes Companion the first SRT/media destination and reuses the generated subtitle cache; post-reload subtitle save remains `NOT_RUN`

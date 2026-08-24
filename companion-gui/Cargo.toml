@@ -1,0 +1,25 @@
+[package]
+name = "aura-media-manager"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+
+# Native manager window for Aura Media Companion.
+#
+# Separate crate from `native-host` on purpose: the native host is a small
+# stdio process that Chrome spawns, and it must stay free of GUI dependencies.
+# This binary is launched by `--manager` and owns the window.
+
+[dependencies]
+eframe = { version = "=0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+rfd = { version = "=0.17.2", default-features = false, features = ["common-controls-v6"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# Keeps the manager binary out of the extension's dev-staging allowlist checks
+# and the native host's dependency graph.
+[workspace]

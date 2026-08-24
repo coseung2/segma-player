@@ -1,5 +1,10 @@
 # Media module refactor plan
 
+> [!NOTE]
+> Historical plan completed in 0.3.89. The resulting browser-side module
+> boundary remains documented in `SITE_DOWNLOAD_MODES.md`; this file is not the
+> current product roadmap.
+
 ## Goal
 
 Make a site-local regression repairable without first editing the common media

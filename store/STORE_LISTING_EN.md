@@ -1,5 +1,10 @@
 # Chrome Web Store listing — English
 
+> [!WARNING]
+> Legacy extension-primary listing copy. Do not publish this as the next
+> Companion-first browser-connector listing without a full rewrite and runtime
+> verification.
+
 ## Name
 
 Aura Media Downloader
@@ -20,7 +25,7 @@ Features:
 - Keeps queued, running, completed, and failed downloads visible in the extension popup.
 - Saves downloads locally; the extension does not upload media to an Aura server.
 
-The free edition includes one concurrent media job and a 1 GiB limit per download. Pro adds three concurrent media jobs, no artificial byte cap, and the highest available quality for supported media.
+The free edition includes one concurrent media job and a 1 GiB limit per download. Pro has no concurrent-job limit, no artificial byte cap, and provides the highest available quality for supported media.
 
 Use this extension only for media that you own or are authorized to download. It does not bypass DRM, login restrictions, paywalls, private-video controls, or access controls. Compatibility depends on the page, media format, and browser; no universal compatibility is promised.
 

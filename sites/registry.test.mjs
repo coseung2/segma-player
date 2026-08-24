@@ -29,6 +29,16 @@ test("top-level site identity survives an external player frame and CDN URL", ()
   assert.equal(candidate.providerId, "hlsjs");
 });
 
+test("Shackledshow keeps MxDrop iframe media on the progressive downloader", () => {
+  const profile = siteProfileForUrls(
+    "https://shackledshow.cc/videos/1692b65a-48d5-4a6e-a477-9ed151f65568",
+    "https://miixdrop.top/e/q1dz00v7aemvpl",
+  );
+  assert.equal(profile.id, "shackledshow");
+  assert.equal(profile.modules.primaryDownloader, "progressive");
+  assert.deepEqual(profile.modules.fallbackDownloaders, ["hls"]);
+});
+
 test("site registry ids and host ownership are unique", () => {
   const ids = SITE_PROFILES.map((profile) => profile.id);
   const hosts = SITE_PROFILES.flatMap((profile) => profile.hosts);

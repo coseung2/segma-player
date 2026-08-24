@@ -256,6 +256,42 @@ test("popup and settings render every visible string through the locale table", 
   assert.match(optionsScript, /changes\[LOCALE_STORAGE_KEY\]/);
 });
 
+test("Companion install guidance appears only for a configured missing host", async () => {
+  const [popupHtml, playHtml, popupScript, popupCss] = await Promise.all([
+    readFile(new URL("./popup.html", import.meta.url), "utf8"),
+    readFile(new URL("./popup-play.html", import.meta.url), "utf8"),
+    readFile(new URL("./popup.js", import.meta.url), "utf8"),
+    readFile(new URL("./popup.css", import.meta.url), "utf8"),
+  ]);
+  for (const html of [popupHtml, playHtml]) {
+    assert.match(html, /id="companion-help"[^>]*data-i18n="companion\.install"[^>]*hidden/);
+  }
+  assert.match(popupScript, /COMPANION_INSTALL_URL/);
+  assert.match(popupScript, /if \(status\?\.ok\) return/);
+  assert.match(popupScript, /if \(!\/\^https:/);
+  assert.match(popupCss, /\.companion-help\s*\{[^}]*min-height:\s*44px/);
+});
+
+test("Companion is re-detected and preferred automatically after installation", async () => {
+  const popupScript = await readFile(new URL("./popup.js", import.meta.url), "utf8");
+  const destination = popupScript.match(/async function ensureDownloadDestination\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+  assert.match(destination, /const companion = await companionStatus\(\)/);
+  assert.match(destination, /if \(companion\.ok\) return \{ kind: "companion" \}/);
+  assert.ok(destination.indexOf("companionStatus()") < destination.indexOf("ensureSaveFolder()"));
+  assert.match(popupScript, /window\.addEventListener\("focus", refreshCompanionAvailability\)/);
+  assert.match(popupScript, /document\.addEventListener\("visibilitychange",[\s\S]*refreshCompanionAvailability/);
+  const saveStatus = popupScript.match(/async function refreshSaveStatus\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+  assert.ok(saveStatus.indexOf("companionStatus()") < saveStatus.indexOf("getStoredSaveDirectory()"));
+  assert.match(saveStatus, /t\("save\.companion"\)/);
+});
+
+test("window focus loss keeps Pro downloads on the plan-aware pause path", async () => {
+  const background = await readFile(new URL("./background.js", import.meta.url), "utf8");
+  const focusHandler = background.match(/chrome\.windows\.onFocusChanged\.addListener\([\s\S]*?\n\}\);/)?.[0] || "";
+  assert.match(focusHandler, /applyTabPauseState\(null\)/);
+  assert.doesNotMatch(focusHandler, /sendPauseState\([^\n]*true/);
+});
+
 test("language lives in a header globe menu, not inside settings", async () => {
   const [popupHtml, popupScript, popupCss, optionsHtml] = await Promise.all([
     readFile(new URL("./popup.html", import.meta.url), "utf8"),

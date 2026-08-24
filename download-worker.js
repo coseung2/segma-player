@@ -18,9 +18,8 @@ import {
   setDownloadCheckpoint,
 } from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
-import { cuesToSrt, mediaIdentifier, parseSubtitle } from "./player-subtitle.js";
-import { getStoredSubtitleDirectory } from "./subtitle-folder.js";
-import { requestGeneratedSubtitle, storeGeneratedSubtitle } from "./subtitle-generation.js";
+import { loadGeneratedSubtitle, requestGeneratedSubtitle, storeGeneratedSubtitle } from "./subtitle-generation.js";
+import { saveGeneratedSubtitleSrt } from "./subtitle-save.js";
 import {
   MIN_HEARTBEAT_CADENCE_MS,
   heartbeatPortName,
@@ -92,33 +91,6 @@ async function report(jobId, patch) {
   await chrome.runtime.sendMessage({ type: "download-job-update", jobId, patch }).catch(() => {});
 }
 
-function subtitleFilename(title, mediaUrl) {
-  const safeTitle = String(title || "")
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
-    .trim()
-    .slice(0, 120);
-  return `${safeTitle || mediaIdentifier(mediaUrl) || "aura-subtitle"}.srt`;
-}
-
-async function saveGeneratedSubtitleSrt(input, vtt) {
-  const directory = await getStoredSubtitleDirectory();
-  if (!directory || !await hasReadWritePermission(directory)) {
-    const error = new Error("subtitle-save-permission-required");
-    error.code = "subtitle-save-permission-required";
-    throw error;
-  }
-  const srt = cuesToSrt(parseSubtitle(vtt));
-  if (!srt) throw new Error("empty-srt");
-  const { fileHandle, filename } = await createUniqueFile(directory, subtitleFilename(input.title, input.mediaUrl));
-  const writable = await fileHandle.createWritable();
-  try {
-    await writable.write(srt);
-  } finally {
-    await writable.close();
-  }
-  return { filename, folderName: directory.name || "자막 폴더" };
-}
-
 function subtitleStatus(progress = {}) {
   const phase = progress.phase || "queued";
   const percent = Math.max(0, Math.min(99, Number(progress.progress) || 0));
@@ -137,37 +109,45 @@ async function runSubtitleJob(jobId, input, licenseKey = "") {
   const controller = new AbortController();
   runningJobs.set(jobId, { paused: false, sourceClosed: false, cancelled: false, lease: null, controller });
   syncWorkerHeartbeat();
-  await report(jobId, { status: "running", statusText: "자막 생성 대기 중…", folderName: "자막 폴더" });
+  await report(jobId, { status: "running", statusText: "자막 생성 대기 중…", folderName: "Downloads\\Aura Media" });
   try {
-    let audioUpload = null;
-    try {
-      audioUpload = await prepareSubtitleAudioUpload(input, {
-        signal: controller.signal,
-        onStatus: (statusText) => void report(jobId, { status: "running", statusText }),
-      });
-      if (audioUpload) {
-        await report(jobId, {
-          status: "running",
-          statusText: `오디오 전송 준비 완료 · ${Math.round(audioUpload.bytes / 1048576)} MB`,
-        });
-      }
-    } catch (error) {
-      if (controller.signal.aborted || error?.code === "subtitle-audio-too-large") throw error;
-      audioUpload = null;
+    let generated = await loadGeneratedSubtitle(input);
+    if (generated?.vtt) {
       await report(jobId, {
         status: "running",
-        statusText: "오디오 전용 경로를 사용할 수 없어 서버 준비 경로로 전환합니다.",
+        statusText: "이미 생성된 자막을 불러왔습니다. 저장 중…",
       });
+    } else {
+      let audioUpload = null;
+      try {
+        audioUpload = await prepareSubtitleAudioUpload(input, {
+          signal: controller.signal,
+          onStatus: (statusText) => void report(jobId, { status: "running", statusText }),
+        });
+        if (audioUpload) {
+          await report(jobId, {
+            status: "running",
+            statusText: `오디오 전송 준비 완료 · ${Math.round(audioUpload.bytes / 1048576)} MB`,
+          });
+        }
+      } catch (error) {
+        if (controller.signal.aborted || error?.code === "subtitle-audio-too-large") throw error;
+        audioUpload = null;
+        await report(jobId, {
+          status: "running",
+          statusText: "오디오 전용 경로를 사용할 수 없어 서버 준비 경로로 전환합니다.",
+        });
+      }
+      generated = await requestGeneratedSubtitle({
+        ...input,
+        licenseKey,
+        audioUpload,
+        signal: controller.signal,
+        onProgress: (progress) => void report(jobId, { status: "running", statusText: subtitleStatus(progress) }),
+      });
+      await storeGeneratedSubtitle(input, generated);
     }
-    const generated = await requestGeneratedSubtitle({
-      ...input,
-      licenseKey,
-      audioUpload,
-      signal: controller.signal,
-      onProgress: (progress) => void report(jobId, { status: "running", statusText: subtitleStatus(progress) }),
-    });
     if (controller.signal.aborted) throw cancellationError();
-    await storeGeneratedSubtitle(input, generated);
     const saved = await saveGeneratedSubtitleSrt(input, generated.vtt);
     await report(jobId, {
       status: "completed",
@@ -176,11 +156,9 @@ async function runSubtitleJob(jobId, input, licenseKey = "") {
     });
   } catch (error) {
     const cancelled = controller.signal.aborted || error?.code === "download-cancelled";
-    const permissionExpired = error?.name === "NotAllowedError"
-      || error?.code === "save-permission-required";
     const detail = cancelled ? "사용자가 자막 생성을 취소했습니다."
       : (error?.code === "subtitle-save-permission-required"
-        ? "자막은 생성됐지만 폴더 쓰기 권한이 없습니다. 자막 폴더를 다시 선택해 주세요."
+        ? "자막은 생성됐지만 Aura Companion과 자막 폴더를 모두 사용할 수 없습니다. Companion 연결 또는 자막 폴더 권한을 확인해 주세요."
         : (error?.code === "media-source-access-denied"
           ? "영상 서버가 자막 서버의 접근을 차단했습니다. 이 사이트는 서버에서 직접 음성을 읽을 수 없습니다."
           : (error?.code === "media-source-unavailable"

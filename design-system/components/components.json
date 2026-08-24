@@ -1,0 +1,207 @@
+{
+  "$meta": {
+    "source": "https://www.figma.com/design/hHbERxUjJeaWJ3eYFM1UlA",
+    "page": "Components",
+    "board": "Component board",
+    "count": 22
+  },
+  "components": [
+    {
+      "name": "Button / Primary",
+      "nodeId": "7:70",
+      "size": [86, 32],
+      "fill": "color/bg/inverse",
+      "text": "color/text/inverse",
+      "radius": "radius/md",
+      "padding": [8, 14],
+      "typography": "label/md",
+      "usage": "One dominant action per region: Add link, Generate, Download."
+    },
+    {
+      "name": "Button / Secondary",
+      "nodeId": "7:72",
+      "size": [96, 32],
+      "fill": "color/bg/surface",
+      "text": "color/text/primary",
+      "border": "color/border/default",
+      "radius": "radius/md",
+      "padding": [8, 14],
+      "typography": "label/md",
+      "usage": "Paired secondary action: Pause all, Open folder, Change, Import file."
+    },
+    {
+      "name": "Button / Quiet",
+      "nodeId": "7:74",
+      "size": [68, 32],
+      "fill": "color/bg/surface",
+      "text": "color/text/secondary",
+      "radius": "radius/md",
+      "padding": [8, 14],
+      "typography": "label/md",
+      "usage": "Row-level action inside a card: Cancel, Retry, Open."
+    },
+    {
+      "name": "Status / Downloading",
+      "nodeId": "7:76",
+      "size": [88, 20],
+      "fill": "color/bg/subtle",
+      "text": "color/text/secondary",
+      "radius": "radius/full",
+      "typography": "label/sm",
+      "usage": "Job in progress. Relabel to Generating on the Subtitles screen."
+    },
+    {
+      "name": "Status / Complete",
+      "nodeId": "7:78",
+      "size": [70, 20],
+      "fill": "color/bg/success",
+      "text": "color/text/success",
+      "radius": "radius/full",
+      "typography": "label/sm",
+      "usage": "Finished job, ready subtitle track, healthy companion link."
+    },
+    {
+      "name": "Status / Paused",
+      "nodeId": "7:80",
+      "size": [57, 20],
+      "fill": "color/bg/warning",
+      "text": "color/text/warning",
+      "radius": "radius/full",
+      "typography": "label/sm",
+      "usage": "User-paused or waiting job."
+    },
+    {
+      "name": "Status / Failed",
+      "nodeId": "7:82",
+      "size": [49, 20],
+      "fill": "color/bg/danger",
+      "text": "color/text/danger",
+      "radius": "radius/full",
+      "typography": "label/sm",
+      "usage": "Failed job. Pair with a concrete reason line and a Retry action."
+    },
+    {
+      "name": "Type / HLS",
+      "nodeId": "7:84",
+      "size": [39, 22],
+      "fill": "color/bg/subtle",
+      "text": "color/text/secondary",
+      "radius": "radius/full",
+      "typography": "mono/sm",
+      "usage": "Transport or container marker beside a media title."
+    },
+    { "name": "Type / DASH", "nodeId": "7:86", "size": [48, 22], "typography": "mono/sm" },
+    { "name": "Type / MP4", "nodeId": "7:88", "size": [41, 22], "typography": "mono/sm" },
+    { "name": "Type / SRT", "nodeId": "7:90", "size": [38, 22], "typography": "mono/sm" },
+    {
+      "name": "NavItem / Selected",
+      "nodeId": "8:2",
+      "size": [200, 38],
+      "fill": "color/bg/selected",
+      "text": "color/text/primary",
+      "dot": "color/text/primary",
+      "radius": "radius/md",
+      "typography": "body/strong",
+      "usage": "Current destination in the left rail. Only one per screen."
+    },
+    {
+      "name": "NavItem / Default",
+      "nodeId": "8:5",
+      "size": [200, 38],
+      "fill": "transparent",
+      "text": "color/text/secondary",
+      "dot": "color/text/muted",
+      "radius": "radius/md",
+      "typography": "body/md"
+    },
+    {
+      "name": "SegmentTab / Selected",
+      "nodeId": "8:16",
+      "size": [39, 30],
+      "fill": "color/bg/surface",
+      "text": "color/text/primary",
+      "elevation": "Elevation/card",
+      "radius": "radius/md",
+      "typography": "label/md",
+      "usage": "Local filter inside a screen. Sits in a subtle track, not global nav."
+    },
+    {
+      "name": "SegmentTab / Default",
+      "nodeId": "8:18",
+      "size": [61, 30],
+      "fill": "transparent",
+      "text": "color/text/secondary",
+      "radius": "radius/md",
+      "typography": "label/md"
+    },
+    {
+      "name": "TextField",
+      "nodeId": "8:8",
+      "size": [300, 38],
+      "fill": "color/bg/surface",
+      "border": "color/border/default",
+      "placeholder": "color/text/muted",
+      "radius": "radius/md",
+      "typography": "body/md",
+      "usage": "Search and single-line input. Width is set by the layout, height stays 38."
+    },
+    {
+      "name": "ProgressBar",
+      "nodeId": "8:10",
+      "size": [300, 6],
+      "track": "color/bg/track",
+      "fill": "color/bg/inverse",
+      "radius": "radius/full",
+      "usage": "Determinate progress. Resize the inner Fill child, never the track."
+    },
+    {
+      "name": "Toggle / On",
+      "nodeId": "8:12",
+      "size": [38, 22],
+      "fill": "color/bg/inverse",
+      "knob": "color/bg/surface",
+      "radius": "radius/full"
+    },
+    {
+      "name": "Toggle / Off",
+      "nodeId": "8:14",
+      "size": [38, 22],
+      "fill": "color/bg/track",
+      "knob": "color/bg/surface",
+      "radius": "radius/full"
+    },
+    {
+      "name": "JobCard",
+      "nodeId": "9:2",
+      "size": [712, 136],
+      "fill": "color/bg/surface",
+      "border": "color/border/subtle",
+      "radius": "radius/lg",
+      "padding": [14, 16],
+      "gap": 10,
+      "slots": ["title + Type chip", "Status chip", "source meta", "ProgressBar", "bytes + row action"],
+      "usage": "Queue row. Fills the content width; the card owns its own progress state."
+    },
+    {
+      "name": "MediaTile",
+      "nodeId": "9:18",
+      "size": [320, 231],
+      "fill": "transparent",
+      "thumbnail": { "ratio": "16:9", "fill": "color/bg/subtle", "radius": "radius/lg" },
+      "gap": 10,
+      "slots": ["full-bleed thumbnail", "title", "date + size"],
+      "usage": "Full-bleed media item. No card background or border: the thumbnail is the object and metadata sits below it on the canvas. Used by the Library grid and the Player up-next row."
+    },
+    {
+      "name": "SettingRow",
+      "nodeId": "9:23",
+      "size": [712, 66],
+      "fill": "color/bg/surface",
+      "border": "color/border/subtle",
+      "radius": "radius/lg",
+      "padding": [14, 16],
+      "slots": ["title", "value or path", "control (Toggle / Button / Status)"],
+      "usage": "Settings line item. Grouped rows share one card with 1px dividers and a subtle caption header."
+    }
+  ]
+}

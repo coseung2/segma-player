@@ -5,6 +5,7 @@ import { doodSite } from "./dood/profile.js";
 import { missavSite } from "./missav/profile.js";
 import { onlyjerkSite } from "./onlyjerk/profile.js";
 import { playmogoSite } from "./playmogo/profile.js";
+import { shackledshowSite } from "./shackledshow/profile.js";
 import { youtubeSite } from "./youtube/profile.js";
 
 export const SITE_PROFILES = Object.freeze([
@@ -15,6 +16,7 @@ export const SITE_PROFILES = Object.freeze([
   beegSite,
   doodSite,
   playmogoSite,
+  shackledshowSite,
   youtubeSite,
 ]);
 

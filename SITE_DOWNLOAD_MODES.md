@@ -1,7 +1,8 @@
 # Site, provider, and downloader modules
 
-Aura separates three kinds of change so a failure on one site does not
-immediately modify a shared media pipeline.
+The Aura browser connector separates three kinds of change so a failure on one
+site does not immediately modify a shared media pipeline. Companion ownership
+and migration direction are defined separately in `PRODUCT_DIRECTION.md`.
 
 ## Runtime layers
 

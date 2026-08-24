@@ -1,5 +1,10 @@
 # Chrome Web Store graphics
 
+> [!WARNING]
+> Legacy extension-primary artwork. Keep for release history and comparison;
+> do not use it as the next Companion-first connector listing without visual
+> review and replacement.
+
 | Upload field | Final asset | Size |
 | --- | --- | --- |
 | Store icon | `../../icons/icon128.png` | 128×128; mark occupies 96×96 with transparent padding |

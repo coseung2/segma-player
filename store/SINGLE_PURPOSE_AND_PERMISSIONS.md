@@ -1,5 +1,9 @@
 # Single-purpose and permission justifications
 
+> [!WARNING]
+> Migration hold: these justifications describe the current extension-primary
+> package. The connector-only package requires a fresh least-privilege review.
+
 ## Single purpose
 
 The extension has one user-facing purpose: detect compatible media resources in the current browsing context and save media the user is authorized to download. The popup, content detector, background worker, and download queue are all limited to that purpose. The extension does not provide advertising, unrelated site modifications, account management, social features, or general-purpose browsing controls.

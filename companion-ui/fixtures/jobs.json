@@ -1,0 +1,103 @@
+{
+  "status": {
+    "ok": true,
+    "protocol": 2,
+    "version": "0.3.0",
+    "toolsReady": true,
+    "downloadsFolder": "C:\\Users\\example\\Downloads\\Aura Media",
+    "entitlementOwner": "companion",
+    "licenseConfigured": false
+  },
+  "youtubeInfo": {
+    "title": "Sample video",
+    "qualities": [{ "height": 1080 }, { "height": 720 }, { "height": 480 }]
+  },
+  "jobs": [
+    {
+      "jobId": "job-running",
+      "status": "running",
+      "statusText": "Downloading with yt-dlp.",
+      "title": "firekatie — ticket show",
+      "inputKind": "mp4",
+      "progress": 38,
+      "completed": 38100000,
+      "total": 100400000,
+      "createdAt": 1756000000000,
+      "updatedAt": 1756000600000
+    },
+    {
+      "jobId": "job-queued",
+      "status": "queued",
+      "statusText": "Waiting for the companion.",
+      "title": "night set — full replay",
+      "inputKind": "mp4",
+      "createdAt": 1756000100000,
+      "updatedAt": 1756000500000
+    },
+    {
+      "jobId": "job-done",
+      "status": "completed",
+      "statusText": "Saved to the Aura Media folder.",
+      "title": "cam session 12-19",
+      "inputKind": "mp4",
+      "fileName": "cam-session-12-19.mp4",
+      "progress": 100,
+      "completed": 320000000,
+      "total": 320000000,
+      "createdAt": 1755900000000,
+      "updatedAt": 1756000400000
+    },
+    {
+      "jobId": "job-failed",
+      "status": "failed",
+      "statusText": "Download stopped.",
+      "error": "The media server closed the connection at 1%.",
+      "title": "late stream",
+      "inputKind": "hls",
+      "progress": 1,
+      "createdAt": 1755800000000,
+      "updatedAt": 1756000300000
+    },
+    {
+      "jobId": "job-subtitle-running",
+      "jobType": "subtitle",
+      "status": "running",
+      "statusText": "Subtitle processing: transcribe",
+      "phase": "transcribe",
+      "title": "night set — full replay",
+      "sourceLanguage": "en",
+      "targetLanguage": "ko",
+      "outputFormat": "vtt",
+      "progress": 62,
+      "createdAt": 1755990000000,
+      "updatedAt": 1756000200000
+    },
+    {
+      "jobId": "job-subtitle-done",
+      "jobType": "subtitle",
+      "status": "completed",
+      "statusText": "Subtitle saved.",
+      "title": "firekatie — ticket show",
+      "sourceLanguage": "ko",
+      "targetLanguage": "ko",
+      "outputFormat": "vtt",
+      "fileName": "ticket-show.ko.vtt",
+      "model": "whisper-large-v3",
+      "createdAt": 1755980000000,
+      "updatedAt": 1756000100000
+    },
+    {
+      "jobId": "job-subtitle-failed",
+      "jobType": "subtitle",
+      "status": "failed",
+      "statusText": "Subtitle job failed.",
+      "error": "The subtitle folder is not writable.",
+      "title": "cam session 12-19",
+      "sourceLanguage": "ja",
+      "targetLanguage": "ko",
+      "outputFormat": "vtt",
+      "createdAt": 1755970000000,
+      "updatedAt": 1756000000000
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import { beegRegressions } from "./beeg/regressions.js";
 import { missavRegressions } from "./missav/regressions.js";
 import { onlyjerkRegressions } from "./onlyjerk/regressions.js";
 import { playmogoRegressions } from "./playmogo/regressions.js";
+import { shackledshowRegressions } from "./shackledshow/regressions.js";
 
 export const SITE_REGRESSION_FIXTURES = Object.freeze([
   ...missavRegressions,
@@ -11,5 +12,6 @@ export const SITE_REGRESSION_FIXTURES = Object.freeze([
   ...asianpornRegressions,
   ...onlyjerkRegressions,
   ...playmogoRegressions,
+  ...shackledshowRegressions,
   ...beegRegressions,
 ]);

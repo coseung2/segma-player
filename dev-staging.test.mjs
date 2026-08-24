@@ -43,6 +43,7 @@ test("cross-platform development staging builds an exact Pro directory without a
     outputDirectory: stageDirectory,
     edition: "pro",
     version: "9.8.7",
+    companionInstallUrl: "https://aura.example/companion",
   });
 
   assert.equal(result.stageDirectory, stageDirectory);
@@ -61,6 +62,7 @@ test("cross-platform development staging builds an exact Pro directory without a
 
   const edition = await readFile(path.join(stageDirectory, "edition.js"), "utf8");
   assert.match(edition, /PRODUCT_EDITION = "pro"/);
+  assert.match(edition, /COMPANION_INSTALL_URL = "https:\/\/aura\.example\/companion"/);
   assert.match(await readFile(path.join(stageDirectory, "background.js"), "utf8"), /media-request-context\.js/);
   assert.match(await readFile(path.join(stageDirectory, "player.js"), "utf8"), /hls-playback-recovery\.js/);
 });

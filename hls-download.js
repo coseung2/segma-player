@@ -1096,6 +1096,7 @@ function progressiveSession(url, pageUrl, videoTabId, signal = null, videoFrameI
           mode: "fetch",
           url: message.url,
           referrer: message.referrer,
+          videoFrameId: Number.isInteger(message.videoFrameId) ? message.videoFrameId : videoFrameId,
           authenticatedProbeRequired: message.authenticatedProbeRequired === true,
         }, null);
       } else if (message.type === "stream-error") {
@@ -1282,6 +1283,80 @@ async function streamFetchToWritable(url, referrer, writable, onProgress, contex
   return totalBytes;
 }
 
+async function parallelFetchToWritable(
+  url,
+  filename,
+  referrer,
+  writable,
+  context = defaultDownloadContext,
+  startOffset = 0,
+) {
+  const fetchImpl = (targetUrl, { headers, signal }) => {
+    const all = new Headers(extraHeadersFor(targetUrl, context));
+    for (const [name, value] of Object.entries(headers || {})) all.set(name, value);
+    return fetch(targetUrl, {
+      credentials: "include",
+      referrer,
+      referrerPolicy: "unsafe-url",
+      headers: all,
+      cache: "no-store",
+      signal,
+    });
+  };
+  return withParallelMediaFetchLease(url, referrer, context, () => parallelDownload({
+    url,
+    filename,
+    createSink: async () => writable,
+    fetchImpl,
+    signal: context.signal,
+    startOffset,
+    totalBytes: context.totalBytes,
+    onProgress: (written, total) => setStatus(saveProgressText(written, total), false, context),
+  }));
+}
+
+async function saveProgressiveWithCompanion(session, filename, pageUrl, context, checkpointKey = null) {
+  const referrer = referrerFor(session.url, session.referrer || pageUrl, context);
+  let writer = null;
+  if (context.rangeSupported) {
+    try {
+      writer = await createNativeFileWriter(filename);
+      const result = await parallelFetchToWritable(
+        session.url,
+        filename,
+        referrer,
+        writer,
+        context,
+        0,
+      );
+      if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
+      return { bytes: result.bytes, native: true };
+    } catch (error) {
+      const opened = Boolean(writer);
+      try { await writer?.abort(); } catch { /* best effort */ }
+      writer = null;
+      if (!opened || context.signal?.aborted) throw error;
+    }
+  }
+  try {
+    writer = await createNativeFileWriter(filename);
+    const bytes = await streamFetchToWritable(
+      session.url,
+      referrer,
+      writer,
+      (value) => setStatus(saveProgressText(value, context.totalBytes), false, context),
+      context,
+      0,
+    );
+    await writer.close();
+    if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
+    return { bytes, native: true };
+  } catch (error) {
+    try { await writer?.abort(); } catch { /* best effort */ }
+    throw error;
+  }
+}
+
 async function saveProgressive(
   url,
   filename,
@@ -1297,9 +1372,28 @@ async function saveProgressive(
       await progressiveSession(url, pageUrl, videoTabId, context.signal, context.frameId),
       context,
     );
+  if (session.sourceFrameFallbackPreferred) {
+    const fallback = await requestSourceFrameDownload(
+      session.url,
+      filename,
+      videoTabId,
+      Number.isInteger(session.videoFrameId) ? session.videoFrameId : context.frameId,
+      context.signal,
+      context.candidate,
+    );
+    if (fallback) return fallback;
+  }
+
+  let companionError = null;
+  try {
+    return await saveProgressiveWithCompanion(session, filename, pageUrl, context, checkpointKey);
+  } catch (error) {
+    if (context.signal?.aborted) throw error;
+    companionError = error;
+  }
+
   let saveHandle = dirHandle || await getStoredSaveDirectory();
   if (saveHandle && !(await hasReadWritePermission(saveHandle))) saveHandle = null;
-
   let fileHandle = null;
   let allocatedFilename = "";
   let committedBytes = 0;
@@ -1337,20 +1431,8 @@ async function saveProgressive(
     });
   };
 
-  if (session.sourceFrameFallbackPreferred) {
-    const fallback = await requestSourceFrameDownload(
-      session.url,
-      filename,
-      videoTabId,
-      context.frameId,
-      context.signal,
-      context.candidate,
-    );
-    if (fallback) return fallback;
-  }
-
   let sink = null;
-  let sinkError = null;
+  let sinkError = companionError;
   if (saveHandle) {
     try {
       const output = await allocatedFile();
@@ -1361,27 +1443,6 @@ async function saveProgressive(
       });
     } catch (error) {
       sink = null;
-      sinkError = error;
-    }
-  }
-  if (!sink && !saveHandle) {
-    let nativeWriter = null;
-    try {
-      nativeWriter = await createNativeFileWriter(filename);
-      const referrer = referrerFor(session.url, session.referrer || pageUrl, context);
-      const bytes = await streamFetchToWritable(
-        session.url,
-        referrer,
-        nativeWriter,
-        (value) => setStatus(saveProgressText(value, context.totalBytes), false, context),
-        context,
-        0,
-      );
-      await nativeWriter.close();
-      if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
-      return { bytes, native: true };
-    } catch (error) {
-      try { await nativeWriter?.abort(); } catch { /* best effort */ }
       sinkError = error;
     }
   }
@@ -1407,28 +1468,15 @@ async function saveProgressive(
   try {
     let result = null;
     if (context.rangeSupported) {
-      const fetchImpl = (targetUrl, { headers, signal }) => {
-        const all = new Headers(extraHeadersFor(targetUrl, context));
-        for (const [name, value] of Object.entries(headers || {})) all.set(name, value);
-        return fetch(targetUrl, {
-          credentials: "include",
-          referrer,
-          referrerPolicy: "unsafe-url",
-          headers: all,
-          cache: "no-store",
-          signal,
-        });
-      };
       try {
-        result = await withParallelMediaFetchLease(session.url, referrer, context, () => parallelDownload({
-          url: session.url,
-          filename: allocatedFilename,
-          createSink: async () => sink,
-          fetchImpl,
-          signal: context.signal,
-          startOffset: committedBytes,
-          onProgress: (written, total) => setStatus(saveProgressText(written, total), false, context),
-        }));
+        result = await parallelFetchToWritable(
+          session.url,
+          allocatedFilename,
+          referrer,
+          sink,
+          context,
+          committedBytes,
+        );
       } catch (error) {
         if (context.signal?.aborted) throw error;
         result = null;
@@ -1507,10 +1555,15 @@ async function saveHlsToNative(
   checkpointKey = null,
   scope = "main",
 ) {
-  const saveHandle = dirHandle || await getStoredSaveDirectory();
-  if (!saveHandle) {
-    return saveHlsWithCompanion(media, filename, referrer, videoTabId, context);
+  let companionError = null;
+  try {
+    return await saveHlsWithCompanion(media, filename, referrer, videoTabId, context);
+  } catch (error) {
+    if (context.signal?.aborted) throw error;
+    companionError = error;
   }
+  const saveHandle = dirHandle || await getStoredSaveDirectory();
+  if (!saveHandle) throw companionError;
   if (!(await hasReadWritePermission(saveHandle))) {
     const error = new Error("저장 폴더 권한이 만료되었습니다. 다운로드 버튼을 다시 눌러 권한을 확인해 주세요.");
     error.code = "save-permission-required";
@@ -1624,6 +1677,7 @@ export {
   progressiveSession,
   requestSourceFrameDownload,
   requestPageDecodedKey,
+  saveProgressive,
   streamFetchToWritable,
   toBytes,
   withMediaFetchLease,

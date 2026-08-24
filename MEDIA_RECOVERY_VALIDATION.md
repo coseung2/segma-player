@@ -1,5 +1,11 @@
 # Media recovery and subtitle ingest validation
 
+> [!NOTE]
+> Historical snapshot for version 0.3.76. Preserve this as implementation and
+> verification evidence; use `PRODUCT_DIRECTION.md`, `README.md`,
+> `SITE_DOWNLOAD_MODES.md`, `INCIDENTS.md`, and `SITE_QA_LOG.md` for current
+> direction and runtime status.
+
 ## Scope
 
 This document records the implementation and evidence for the 0.3.76 media-recovery work. The starting user reproduction was:

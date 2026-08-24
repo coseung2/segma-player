@@ -304,6 +304,32 @@ export async function cancelCompanionJob(jobId) {
   return companionRequest("cancel-job", { jobId }, { timeoutMs: 5_000 });
 }
 
+// Pause stops the transfer but keeps yt-dlp's partial file, so resume continues
+// from the same byte. Resume and retry both replay the persisted request, so
+// neither needs the URL or quality supplied again.
+export async function pauseCompanionJob(jobId) {
+  return companionRequest("pause-job", { jobId }, { timeoutMs: 5_000 });
+}
+
+export async function resumeCompanionJob(jobId) {
+  return companionRequest("resume-job", { jobId }, { timeoutMs: 10_000 });
+}
+
+export async function retryCompanionJob(jobId) {
+  return companionRequest("retry-job", { jobId }, { timeoutMs: 10_000 });
+}
+
+// The companion owns the media folder. Both entry points read and write this
+// one value, so the extension and the manager window can never point at
+// different destinations.
+export async function setCompanionDownloadFolder(folder) {
+  return companionRequest("set-download-folder", { folder }, { timeoutMs: 10_000 });
+}
+
+export async function playCompanionFile(filename) {
+  return companionRequest("play-file", { filename }, { timeoutMs: 10_000 });
+}
+
 export async function listCompanionJobs() {
   return companionRequest("list-jobs", {}, { timeoutMs: 5_000 });
 }

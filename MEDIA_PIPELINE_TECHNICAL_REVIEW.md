@@ -1,5 +1,11 @@
 # Aura Media Downloader 미디어 파이프라인 기술 리뷰
 
+> [!NOTE]
+> 특정 브랜치와 재현 URL을 기준으로 작성된 확장 중심의 역사 자료입니다.
+> 현재 제품 방향은 `PRODUCT_DIRECTION.md`, 현재 런타임 계약은 `README.md`와
+> `SITE_DOWNLOAD_MODES.md`, 실제 상태는 `INCIDENTS.md`와 `SITE_QA_LOG.md`를
+> 기준으로 합니다.
+
 - 검토 기준 브랜치: `main`
 - 검토 범위: MV3 서비스 워커, MAIN/isolated world 브리지, HLS/DASH/직접 미디어 감지, iframe 처리, 요청 헤더와 DNR, 토큰 갱신, 브라우저 재생, 테스트, 패키징 및 Chrome Web Store 위험
 - 재현 기준 사례:

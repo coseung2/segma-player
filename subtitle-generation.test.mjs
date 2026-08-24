@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import { requestGeneratedSubtitle } from "./subtitle-generation.js";
+
+test("a failed subtitle save retries from the generated subtitle cache", async () => {
+  const worker = await readFile(new URL("./download-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /loadGeneratedSubtitle/);
+  const job = worker.match(/async function runSubtitleJob\([\s\S]*?\n\}/)?.[0] || "";
+  assert.ok(job.indexOf("loadGeneratedSubtitle(input)") < job.indexOf("requestGeneratedSubtitle"));
+});
 
 test("subtitle generation uploads browser-prepared audio instead of a remote media request", async () => {
   const calls = [];
@@ -22,6 +30,7 @@ test("subtitle generation uploads browser-prepared audio instead of a remote med
         headers: { "content-type": "application/json" },
       });
     }
+    assert.equal(options.headers.authorization, "Bearer AM-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     return new Response(JSON.stringify({
       ok: true,
       status: "completed",
@@ -49,6 +58,7 @@ test("subtitle generation uploads browser-prepared audio instead of a remote med
     assert.equal(result.model, "test-model");
     assert.match(result.vtt, /WEBVTT/);
     assert.equal(calls.length, 2);
+    assert.match(calls[1].url, /\?id=job-audio-1$/);
     assert.equal(progress[0].phase, "uploading-audio");
   } finally {
     delete globalThis.fetch;

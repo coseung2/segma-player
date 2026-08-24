@@ -32,5 +32,5 @@ npm run deploy
 - Chrome 웹 스토어 항목 공개 상태
 - 공식 지원 이메일 또는 문의 폼
 - 정식 게시자명 및 사업자 표시 정보
-- Aura Media Companion 공식 설치 URL
+- Aura Media Companion 공식 설치 URL: `https://aura.mdownloader.workers.dev/download`
 - 개인정보처리방침과 이용약관 시행일

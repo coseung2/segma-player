@@ -17,8 +17,93 @@ const {
   progressiveSession,
   requestPageDecodedKey,
   requestSourceFrameDownload,
+  saveProgressive,
   tryBrowserDownloadFallback,
 } = await import("./hls-download.js");
+
+test("Companion progressive saves use bounded Range requests when the server supports them", async () => {
+  globalThis.btoa ||= (value) => Buffer.from(value, "binary").toString("base64");
+  const nativeMessages = [];
+  const ranges = [];
+  let nativeMessageListener = null;
+  const nativePort = {
+    onMessage: { addListener(listener) { nativeMessageListener = listener; } },
+    onDisconnect: { addListener() {} },
+    postMessage(message) {
+      nativeMessages.push(message.type);
+      queueMicrotask(() => nativeMessageListener?.({
+        jobId: message.jobId,
+        status: "ok",
+        fileName: "video.mp4",
+      }));
+    },
+    disconnect() {},
+  };
+  globalThis.chrome = {
+    runtime: {
+      connect: ({ name }) => {
+        assert.equal(name, "native-file-writer");
+        return nativePort;
+      },
+      sendMessage: async (message) => {
+        if (message.type === "ensure-media-routes") return { ok: true };
+        if (message.type === "prepare-media-fetch") return { ok: true, leaseId: "lease-native-range" };
+        if (message.type === "touch-media-fetch" || message.type === "release-media-fetch") return { ok: true };
+        throw new Error(`unexpected runtime message: ${message.type}`);
+      },
+    },
+  };
+  const totalBytes = 1024 * 1024;
+  globalThis.fetch = async (_url, options = {}) => {
+    const headers = options.headers || {};
+    const range = typeof headers.get === "function" ? headers.get("range") : headers.Range;
+    ranges.push(range || "");
+    assert.equal(range, `bytes=0-${totalBytes - 1}`);
+    return new Response(new Uint8Array(totalBytes), {
+      status: 206,
+      headers: { "content-range": `bytes 0-${totalBytes - 1}/${totalBytes}`, "content-type": "video/mp4" },
+    });
+  };
+  const context = createDownloadContext({
+    totalBytes,
+    tabId: 17,
+    frameId: 4,
+    candidate: { mediaType: "PROGRESSIVE", downloadMode: "DIRECT_PROGRESSIVE" },
+  });
+  context.rangeSupported = true;
+  let selectedFolderQueries = 0;
+  const selectedFolder = {
+    async queryPermission() {
+      selectedFolderQueries += 1;
+      return "granted";
+    },
+    async getFileHandle() {
+      throw new Error("the selected folder must remain a fallback while Companion is available");
+    },
+  };
+  const result = await saveProgressive(
+    "https://a-delivery31.mxcontent.net/v2/video.mp4?token=redacted",
+    "video.mp4",
+    "https://shackledshow.cc/videos/example",
+    17,
+    context,
+    {
+      url: "https://a-delivery31.mxcontent.net/v2/video.mp4?token=redacted",
+      referrer: "https://miixdrop.top/e/example",
+      authenticatedProbeRequired: false,
+      videoFrameId: 4,
+    },
+    selectedFolder,
+  );
+  assert.deepEqual(result, { bytes: totalBytes, native: true });
+  assert.deepEqual(ranges, [`bytes=0-${totalBytes - 1}`]);
+  assert.equal(nativeMessages[0], "media-open");
+  assert.equal(nativeMessages.at(-1), "media-close");
+  assert.ok(nativeMessages.includes("media-chunk"));
+  assert.equal(selectedFolderQueries, 0);
+  delete globalThis.fetch;
+  delete globalThis.chrome;
+});
 
 test("Pro raises HLS segment parallelism without removing the regular edition cap", () => {
   assert.equal(hlsDownloadConcurrencyForPlan({ id: "free" }), 6);
@@ -108,6 +193,7 @@ test("progressive preparation carries the exact source frame to Dood refresh", a
             type: "fetch-required",
             url: message.url,
             referrer: message.pageUrl,
+            videoFrameId: 11,
             authenticatedProbeRequired: false,
           }));
         },
@@ -124,6 +210,7 @@ test("progressive preparation carries the exact source frame to Dood refresh", a
   assert.equal(session.url, "https://cloudatacdn.example/video.mp4");
   assert.equal(posted.videoTabId, 21);
   assert.equal(posted.videoFrameId, 7);
+  assert.equal(session.videoFrameId, 11, "the refreshed playing frame must replace the stale candidate frame");
   delete globalThis.chrome;
 });
 

@@ -9,12 +9,14 @@ export const PARALLEL_CONCURRENCY = 6;
 export const PARALLEL_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_RETRIES = 3;
 
-async function probeTotal(url, signal) {
-  const response = await fetch(url, {
-    headers: { Range: "bytes=0-0" },
-    cache: "no-store",
-    signal,
-  });
+async function probeTotal(url, signal, fetchImpl = null, extra = {}) {
+  const response = fetchImpl
+    ? await fetchImpl(url, { headers: { Range: "bytes=0-0" }, signal, ...extra })
+    : await fetch(url, {
+      headers: { Range: "bytes=0-0" },
+      cache: "no-store",
+      signal,
+    });
   if (!response.ok && response.status !== 206) throw new Error(`영상 요청 실패 (${response.status})`);
   const contentRange = response.headers.get("content-range") || "";
   const match = /bytes\s+\d+-\d+\/(\d+)/.exec(contentRange);
@@ -57,8 +59,10 @@ export async function parallelDownload({
   fetchImpl = null,
   extra = {},
   startOffset = 0,
+  totalBytes = null,
 }) {
-  const total = await probeTotal(url, signal);
+  const preparedTotal = Number.isFinite(totalBytes) && totalBytes > 0 ? Math.floor(totalBytes) : null;
+  const total = preparedTotal || await probeTotal(url, signal, fetchImpl, extra);
   const offset = Number.isFinite(startOffset) && startOffset > 0 ? Math.floor(startOffset) : 0;
   const sink = await createSink(filename, offset);
   const ranges = [];

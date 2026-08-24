@@ -1,5 +1,10 @@
 # Aura Media Downloader Privacy Policy
 
+> [!WARNING]
+> Migration draft: this policy describes the extension-primary data flow and
+> optional Companion. Re-audit actual Companion storage, updates, diagnostics,
+> licensing, browser handoff, and deletion behavior before the next publication.
+
 **Effective date:** `[OWNER INPUT: EFFECTIVE_DATE]`  
 **Publisher:** `[OWNER INPUT: LEGAL_PUBLISHER_NAME]`  
 **Contact:** `[OWNER INPUT: SUPPORT_EMAIL]`  

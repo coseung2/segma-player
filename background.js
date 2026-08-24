@@ -106,7 +106,8 @@ const progressiveRedirectTargets = new Map();
 const mainFramesByTab = new Map();
 const frameLayoutsByTab = new Map();
 const frameStatesByTab = new Map();
-const doodDirectByTab = new Map();
+const doodDirectByFrame = new Map();
+const DOOD_DIRECT_CACHE_TTL_MS = 60_000;
 const nonPersistentCandidates = new WeakSet();
 const SESSION_CANDIDATES_KEY = "candidates";
 const tabTitleCache = new Map();
@@ -1238,13 +1239,20 @@ async function applyTabPauseState(activeTabId) {
 chrome.tabs.onActivated.addListener(({ tabId }) => void applyTabPauseState(tabId));
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
-    for (const jobId of jobSourceTabs.keys()) sendPauseState(jobId, true);
+    void applyTabPauseState(null);
     return;
   }
   void chrome.tabs.query({ active: true, windowId })
     .then((tabs) => applyTabPauseState(tabs[0]?.id))
     .catch(() => {});
 });
+function clearDoodDirectForTab(tabId) {
+  const prefix = `${tabId}:`;
+  for (const key of doodDirectByFrame.keys()) {
+    if (key.startsWith(prefix)) doodDirectByFrame.delete(key);
+  }
+}
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   void mobileUaRulesReady.then(async () => {
     const ruleId = mobileUaRulesByTab.get(tabId);
@@ -1884,7 +1892,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   frameLayoutsByTab.delete(tabId);
   frameStatesByTab.delete(tabId);
   tabTitleCache.delete(tabId);
-  doodDirectByTab.delete(tabId);
+  clearDoodDirectForTab(tabId);
   void releaseMediaFetchLeasesForTab(tabId);
 });
 
@@ -1898,7 +1906,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   frameLayoutsByTab.delete(tabId);
   frameStatesByTab.delete(tabId);
   tabTitleCache.delete(tabId);
-  doodDirectByTab.delete(tabId);
+  clearDoodDirectForTab(tabId);
   void releaseMediaFetchLeasesForTab(tabId);
   for (const [key, item] of candidates) {
     if (item.tabId === tabId) candidates.delete(key);
@@ -2596,9 +2604,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const directUrl = canonicalHttpUrl(message.url)?.href;
     const frameUrl = typeof message.frameUrl === "string" ? canonicalHttpUrl(message.frameUrl)?.href : "";
     if (!directUrl) return false;
-    doodDirectByTab.set(sender.tab.id, {
+    const frameId = Number.isInteger(sender.frameId) && sender.frameId >= 0 ? sender.frameId : 0;
+    doodDirectByFrame.set(`${sender.tab.id}:${frameId}`, {
       url: directUrl,
       frameUrl: frameUrl || "",
+      frameId,
       at: Date.now(),
     });
     return false;
@@ -2700,37 +2710,60 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   if (port.name === "media-stream" && validMediaRouteSender(port.sender)) {
+    async function freshDoodDirect(tabId, preferredFrameId) {
+      const states = frameStatesByTab.get(tabId) || new Map();
+      const rankedFrameIds = [...states.entries()]
+        .filter(([frameId]) => Number.isInteger(frameId) && frameId >= 0)
+        .sort((left, right) => {
+          const leftState = left[1] || {};
+          const rightState = right[1] || {};
+          if (Boolean(leftState.playing) !== Boolean(rightState.playing)) return rightState.playing ? 1 : -1;
+          return Number(rightState.visibleArea || 0) - Number(leftState.visibleArea || 0);
+        })
+        .map(([frameId]) => frameId);
+      const frameIds = [...new Set([
+        ...(Number.isInteger(preferredFrameId) && preferredFrameId >= 0 ? [preferredFrameId] : []),
+        ...rankedFrameIds,
+      ])];
+      if (!frameIds.length) frameIds.push(null);
+      for (const frameId of frameIds) {
+        const response = await sendTabMessageWithTimeout(
+          tabId,
+          { type: "get-dood-direct" },
+          3_000,
+          frameId == null ? null : { frameId },
+        );
+        const url = response?.ok && typeof response.url === "string" ? canonicalHttpUrl(response.url)?.href : null;
+        const frameUrl = typeof response?.frameUrl === "string" ? canonicalHttpUrl(response.frameUrl)?.href : null;
+        if (url) return { url, frameUrl, frameId };
+      }
+      const cacheFrameIds = Number.isInteger(preferredFrameId) && preferredFrameId >= 0
+        ? [preferredFrameId]
+        : rankedFrameIds;
+      for (const frameId of cacheFrameIds) {
+        const cached = doodDirectByFrame.get(`${tabId}:${frameId}`);
+        if (cached && Date.now() - cached.at < DOOD_DIRECT_CACHE_TTL_MS) return cached;
+      }
+      return null;
+    }
+
     async function resolveFreshUrl(message, signal) {
       let url = message.url;
       let referrer = typeof message.pageUrl === "string" ? message.pageUrl : "";
+      let videoFrameId = Number.isInteger(message.videoFrameId) && message.videoFrameId >= 0
+        ? message.videoFrameId : null;
       await ensureDirectMediaAccess([url, referrer, message.pageUrl].filter(Boolean));
       let resolvedForTransfer = false;
       if (Number.isInteger(message.videoTabId) && message.videoTabId > 0) {
         // The player iframe's content script re-resolves /pass_md5 in its own
         // context, giving a fresh token URL and the exact Referer the CDN
         // expects (the /e/ player frame, not the outer page).
-        const frameOptions = Number.isInteger(message.videoFrameId) && message.videoFrameId >= 0
-          ? { frameId: message.videoFrameId }
-          : null;
-        const fresh = await sendTabMessageWithTimeout(
-          message.videoTabId,
-          { type: "get-dood-direct" },
-          8_000,
-          frameOptions,
-        );
-        const freshUrl = fresh?.ok && typeof fresh.url === "string" ? canonicalHttpUrl(fresh.url)?.href : null;
-        const freshFrameUrl = typeof fresh?.frameUrl === "string" ? canonicalHttpUrl(fresh.frameUrl)?.href : null;
-        if (freshUrl) {
-          url = freshUrl;
-          if (freshFrameUrl) referrer = freshFrameUrl;
+        const fresh = await freshDoodDirect(message.videoTabId, videoFrameId);
+        if (fresh?.url) {
+          url = fresh.url;
+          if (fresh.frameUrl) referrer = fresh.frameUrl;
+          if (Number.isInteger(fresh.frameId)) videoFrameId = fresh.frameId;
           resolvedForTransfer = true;
-        } else {
-          const cached = doodDirectByTab.get(message.videoTabId);
-          if (cached && Date.now() - cached.at < 10 * 60 * 1000) {
-            url = cached.url;
-            if (cached.frameUrl) referrer = cached.frameUrl;
-            resolvedForTransfer = true;
-          }
         }
       }
       if (!resolvedForTransfer && typeof message.pageUrl === "string" && looksLikePlayerPage(message.pageUrl)) {
@@ -2742,10 +2775,10 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       try {
         const prepared = await progressiveRedirectResolver.resolve({ url, referrer });
-        return { url: prepared.url, referrer: prepared.referrer };
+        return { url: prepared.url, referrer: prepared.referrer, videoFrameId };
       } catch (error) {
         const recovery = authenticatedRecoveryForProgressiveError(error, { url, referrer });
-        if (recovery) return recovery;
+        if (recovery) return { ...recovery, videoFrameId };
         throw error;
       }
     }
@@ -2763,12 +2796,13 @@ chrome.runtime.onConnect.addListener((port) => {
       activeController = controller;
       const signal = controller.signal;
       try {
-        const { url, referrer, authenticatedProbeRequired } = await resolveFreshUrl(message, signal);
+        const { url, referrer, authenticatedProbeRequired, videoFrameId } = await resolveFreshUrl(message, signal);
         if (signal.aborted || disconnected) return;
         port.postMessage({
           type: "fetch-required",
           url,
           referrer,
+          ...(Number.isInteger(videoFrameId) ? { videoFrameId } : {}),
           ...(authenticatedProbeRequired ? { authenticatedProbeRequired: true } : {}),
         });
       } catch (error) {

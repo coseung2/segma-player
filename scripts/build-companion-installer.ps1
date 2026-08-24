@@ -8,6 +8,10 @@ param(
   [ValidatePattern('^[a-p]{32}$')]
   [string]$EdgeExtensionId = '',
 
+  [Parameter(Mandatory = $false)]
+  [ValidatePattern('^[a-p]{32}$')]
+  [string[]]$AdditionalExtensionId = @(),
+
   [Parameter(Mandatory = $true)]
   [string]$ToolsDirectory,
 
@@ -19,9 +23,31 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $ToolsDirectory = [System.IO.Path]::GetFullPath($ToolsDirectory)
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
+$originConfigPath = Join-Path $ProjectRoot 'installer\companion-extension-origins.json'
+$originConfig = Get-Content -LiteralPath $originConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([string]::IsNullOrWhiteSpace($ChromeExtensionId)) {
+  $ChromeExtensionId = [string]$originConfig.chromeStoreExtensionId
+}
+$allowedExtensionIds = @(
+  $ChromeExtensionId
+  $EdgeExtensionId
+  @($originConfig.developmentExtensionIds)
+  @($AdditionalExtensionId)
+) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+foreach ($extensionId in $allowedExtensionIds) {
+  if ($extensionId -notmatch '^[a-p]{32}$') {
+    throw "Invalid Companion extension ID in $originConfigPath`: $extensionId"
+  }
+}
+$AllowedExtensionIds = $allowedExtensionIds -join '|'
+$manifest = Get-Content -LiteralPath (Join-Path $ProjectRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$AppVersion = [string]$manifest.version
+if ($AppVersion -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?$') {
+  throw "Invalid companion installer version: $AppVersion"
+}
 
-if ([string]::IsNullOrWhiteSpace($ChromeExtensionId) -and [string]::IsNullOrWhiteSpace($EdgeExtensionId)) {
-  throw 'At least one ChromeExtensionId or EdgeExtensionId must be supplied.'
+if ([string]::IsNullOrWhiteSpace($AllowedExtensionIds)) {
+  throw 'At least one Companion extension ID must be configured.'
 }
 
 $required = @(
@@ -39,32 +65,48 @@ foreach ($path in $required) {
 & cargo build --release --manifest-path (Join-Path $ProjectRoot 'native-host\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'Native companion release build failed.' }
 
-$compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-if ($null -eq $compiler) {
-  $defaultCompiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
-  if (Test-Path -LiteralPath $defaultCompiler -PathType Leaf) {
-    $compiler = Get-Item -LiteralPath $defaultCompiler
-  } else {
-    throw 'Inno Setup 6 was not found. Install it and retry.'
+# The manager window is a separate crate so the native messaging host stays a
+# small stdio process with no GUI dependencies. The installer ships both.
+& cargo build --release --manifest-path (Join-Path $ProjectRoot 'companion-gui\Cargo.toml')
+if ($LASTEXITCODE -ne 0) { throw 'Companion manager release build failed.' }
+
+$managerBinary = Join-Path $ProjectRoot 'companion-gui\target\release\aura-media-manager.exe'
+if (-not (Test-Path -LiteralPath $managerBinary -PathType Leaf)) {
+  throw "Companion manager binary is missing: $managerBinary"
+}
+
+$compilerCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+$compilerPath = if ($null -ne $compilerCommand) { $compilerCommand.Source } else { '' }
+if ([string]::IsNullOrWhiteSpace($compilerPath)) {
+  $compilerCandidates = @(
+    (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 7\ISCC.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 7\ISCC.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe')
+  )
+  foreach ($candidate in $compilerCandidates) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      $compilerPath = $candidate
+      break
+    }
   }
+}
+if ([string]::IsNullOrWhiteSpace($compilerPath)) {
+  throw 'Inno Setup 6 or 7 was not found. Install it and retry.'
 }
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $arguments = @(
   "/DToolsDirectory=$ToolsDirectory",
-  "/DOutputDirectory=$OutputDirectory"
+  "/DOutputDirectory=$OutputDirectory",
+  "/DAppVersion=$AppVersion",
+  "/DAllowedExtensionIds=$AllowedExtensionIds"
 )
-if (-not [string]::IsNullOrWhiteSpace($ChromeExtensionId)) {
-  $arguments += "/DChromeExtensionId=$ChromeExtensionId"
-}
-if (-not [string]::IsNullOrWhiteSpace($EdgeExtensionId)) {
-  $arguments += "/DEdgeExtensionId=$EdgeExtensionId"
-}
 if (-not [string]::IsNullOrWhiteSpace($SignToolName)) {
   $arguments += "/DSignToolName=$SignToolName"
 }
 $arguments += (Join-Path $ProjectRoot 'installer\AuraMediaCompanion.iss')
 
-& $compiler.Source @arguments
+& $compilerPath @arguments
 if ($LASTEXITCODE -ne 0) { throw 'Companion installer compilation failed.' }
 Write-Output "Companion installer created in $OutputDirectory"

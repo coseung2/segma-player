@@ -1,5 +1,9 @@
 # Chrome Web Store privacy disclosure worksheet
 
+> [!WARNING]
+> Migration hold: this worksheet reflects the extension-primary runtime. Re-audit
+> every answer after the extension becomes a Companion connector.
+
 Use this worksheet when completing the Chrome Web Store privacy fields. Replace every owner placeholder before submission.
 
 ## Single purpose

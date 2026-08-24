@@ -20,8 +20,8 @@ const expectedFiles = [
   "aes-cbc.js",
   "background.js",
   "browser-download-monitor.js",
-  "candidate.js",
   "companion-client.js",
+  "candidate.js",
   "candidate-ranking.js",
   "content.js",
   "dash.js",
@@ -62,6 +62,7 @@ const expectedFiles = [
   "parallel-download.js",
   "page-media-observer.js",
   "playback-session.js",
+  "player-subtitle.js",
   "player-page-resolver.js",
   "popup.css",
   "popup.html",
@@ -71,6 +72,9 @@ const expectedFiles = [
   "progressive-redirect.js",
   "request-header-store.js",
   "save-directory.js",
+  "subtitle-folder.js",
+  "subtitle-generation.js",
+  "subtitle-save.js",
   "providers/dood.js",
   "providers/hlsjs.js",
   "providers/ids.js",
@@ -85,6 +89,7 @@ const expectedFiles = [
   "sites/missav/profile.js",
   "sites/onlyjerk/profile.js",
   "sites/playmogo/profile.js",
+  "sites/shackledshow/profile.js",
   "sites/profile.js",
   "sites/registry.js",
   "sites/youtube/profile.js",
@@ -193,6 +198,7 @@ test("store packager builds and audits the exact free-edition ZIP", async (conte
     const plan = await import(`${pathToFileURL(path.join(extracted, "product-plan.js"))}?test=${Date.now()}`);
     assert.equal(edition.PRODUCT_EDITION, "free");
     assert.equal(edition.UPGRADE_URL, "");
+    assert.equal(edition.COMPANION_INSTALL_URL, "https://aura.mdownloader.workers.dev/download");
     assert.deepEqual(plan.productPlan("free"), {
       id: "free",
       label: "일반",
@@ -296,6 +302,7 @@ test("store packager builds and audits the Pro test ZIP", async (context) => {
     const edition = await import(`${pathToFileURL(path.join(extracted, "edition.js"))}?test=${Date.now()}`);
     assert.equal(edition.PRODUCT_EDITION, "pro");
     assert.equal(edition.UPGRADE_URL, "");
+    assert.equal(edition.COMPANION_INSTALL_URL, "https://aura.mdownloader.workers.dev/download");
 
     const manifest = JSON.parse(await readFile(path.join(extracted, "manifest.json"), "utf8"));
     assert.equal(manifest.manifest_version, 3);

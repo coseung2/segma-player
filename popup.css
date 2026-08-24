@@ -118,7 +118,9 @@ option:disabled { color: #68768a; }
 @keyframes job-progress-slide { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
 @media (prefers-reduced-motion: reduce) { .job-progress.indeterminate .job-progress-fill { width: 45%; animation: none; opacity: .75; } }
 .quality-row { margin: 0; }
-.companion-help { display: inline-block; margin-top: 10px; color: #80b1f5; font-size: 10px; }
+.companion-help { display: flex; min-height: 44px; align-items: center; justify-content: center; margin-top: 8px; border: 1px solid #334864; border-radius: 8px; color: #9bc2fa; font-size: 11px; font-weight: 750; text-decoration: none; }
+.companion-help:hover { background: rgba(128, 177, 245, .08); color: #d8e9ff; }
+.companion-help:focus-visible { outline: 2px solid #73a5ff; outline-offset: 2px; }
 .companion-help[hidden] { display: none; }
 .settings-overlay { width: 100%; min-width: 0; background: #10141c; }
 .settings-overlay[hidden] { display: none; }

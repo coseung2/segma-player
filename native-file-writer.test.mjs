@@ -14,14 +14,17 @@ test("native file chunks stay below Chrome native-message limits and round-trip"
 });
 
 test("the extension restores the reviewed native companion writer as a fallback", async () => {
-  const [writer, background, companion] = await Promise.all([
+  const [writer, background, companion, downloader] = await Promise.all([
     readFile(new URL("./native-file-writer.js", import.meta.url), "utf8"),
     readFile(new URL("./background.js", import.meta.url), "utf8"),
     readFile(new URL("./companion-client.js", import.meta.url), "utf8"),
+    readFile(new URL("./hls-download.js", import.meta.url), "utf8"),
   ]);
   assert.match(writer, /native-file-writer/);
   assert.match(background, /connectNative/);
   assert.match(background, /native-file-writer/);
   assert.match(companion, /com\.aura\.media_companion/);
   assert.match(background, /getStoredSaveDirectory/);
+  const hlsSave = downloader.match(/async function saveHlsToNative\([\s\S]*?\n\}/)?.[0] || "";
+  assert.ok(hlsSave.indexOf("saveHlsWithCompanion") < hlsSave.indexOf("getStoredSaveDirectory"));
 });

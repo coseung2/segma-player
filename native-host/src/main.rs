@@ -59,6 +59,9 @@ struct Request {
     url: String,
     #[serde(default)]
     filename: String,
+    /// Absolute folder for `set-download-folder`.
+    #[serde(default)]
+    folder: String,
     #[serde(default)]
     data: String,
     #[serde(default = "default_quality")]
@@ -133,6 +136,14 @@ struct SubtitleRequestEnvelope {
 struct CompanionSettings {
     #[serde(rename = "licenseKey", default)]
     license_key: Option<String>,
+    /// Absolute folder the companion saves media into.
+    ///
+    /// `None` means the default `%USERPROFILE%\Downloads\Aura Media`. This is
+    /// the single source of truth for both entry points: the manager window
+    /// writes it, and the extension reads it back through `status`. Neither
+    /// side keeps its own copy.
+    #[serde(rename = "downloadFolder", default)]
+    download_folder: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1615,9 +1626,60 @@ fn downloads_dir() -> io::Result<PathBuf> {
 }
 
 fn aura_downloads_dir() -> io::Result<PathBuf> {
-    let path = downloads_dir()?.join("Aura Media");
+    let path = configured_download_dir()?;
     fs::create_dir_all(&path)?;
     Ok(path)
+}
+
+fn default_download_dir() -> io::Result<PathBuf> {
+    Ok(downloads_dir()?.join("Aura Media"))
+}
+
+/// A settings-supplied folder must be absolute and free of traversal segments.
+/// Anything else falls back to the default rather than writing media somewhere
+/// a malformed settings file happens to point at.
+fn valid_download_folder(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 32_767 {
+        return None;
+    }
+    if trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if !path.is_absolute() {
+        return None;
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+fn read_download_folder_setting(root: &Path) -> Option<PathBuf> {
+    let bytes = fs::read(settings_path(root)).ok()?;
+    if bytes.len() > MAX_COMPANION_SETTINGS_BYTES {
+        return None;
+    }
+    let settings: CompanionSettings = serde_json::from_slice(&bytes).ok()?;
+    settings
+        .download_folder
+        .as_deref()
+        .and_then(valid_download_folder)
+}
+
+/// Resolves the media folder every writer must use. Both entry points read this
+/// same value, so the extension and the manager window never diverge.
+fn configured_download_dir() -> io::Result<PathBuf> {
+    if let Ok(root) = companion_root() {
+        if let Some(folder) = read_download_folder_setting(&root) {
+            return Ok(folder);
+        }
+    }
+    default_download_dir()
 }
 
 fn aura_subtitles_dir() -> io::Result<PathBuf> {
@@ -1664,6 +1726,126 @@ fn job_cancel_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
 
 fn job_cancel_path(job_id: &str) -> io::Result<PathBuf> {
     job_cancel_path_in(&jobs_dir()?, job_id)
+}
+
+/// Marker the running job runner polls to stop without discarding progress.
+///
+/// Separate from the cancel marker because the two outcomes differ: cancel is
+/// terminal and drops the partial file's future, pause keeps yt-dlp's `.part`
+/// so a later resume continues from the same byte.
+fn job_pause_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
+    let safe = safe_id(job_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
+    Ok(directory.join(format!("{safe}.pause")))
+}
+
+fn job_pause_path(job_id: &str) -> io::Result<PathBuf> {
+    job_pause_path_in(&jobs_dir()?, job_id)
+}
+
+/// Restarts a stopped job from its persisted request.
+///
+/// Used by both resume and retry: the difference is only which statuses are
+/// allowed in, not the mechanism. The `.request.json` written at submit time is
+/// the record, so no caller has to resupply the URL or quality.
+fn restart_job(job_id: &str) -> io::Result<()> {
+    let request_path = job_request_path(job_id)?;
+    let bytes = fs::read(&request_path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(io::ErrorKind::NotFound, "job-request-missing")
+        } else {
+            error
+        }
+    })?;
+    let request: Request = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+
+    // Clear both markers first. A leftover marker would make the fresh runner
+    // stop again on its first loop iteration.
+    if let Ok(path) = job_pause_path(job_id) {
+        let _ = fs::remove_file(path);
+    }
+    if let Ok(path) = job_cancel_path(job_id) {
+        let _ = fs::remove_file(path);
+    }
+
+    let mut state = read_job_state(&job_state_path(job_id)?).unwrap_or_else(|| {
+        let mut fresh = initial_job_state(&request);
+        fresh.job_id = job_id.to_string();
+        fresh
+    });
+    state.status = "queued".into();
+    state.status_text = "이어받기를 준비하는 중…".into();
+    state.error = None;
+    persist_job_state(&mut state)?;
+
+    let request_path_text = request_path.to_string_lossy().into_owned();
+    spawn_detached(&["--run-job", &request_path_text])
+}
+
+/// Writes the shared download folder into `settings.json`.
+///
+/// Read-modify-write so the license key and any future setting survive. This is
+/// the only writer of the folder value; both entry points read it back through
+/// `configured_download_dir`.
+fn write_download_folder(root: &Path, folder: &str) -> io::Result<PathBuf> {
+    let path = valid_download_folder(folder)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid-download-folder"))?;
+    if !path.is_dir() {
+        fs::create_dir_all(&path)?;
+    }
+
+    let settings_file = settings_path(root);
+    let mut document = match fs::read(&settings_file) {
+        Ok(bytes) if bytes.len() <= MAX_COMPANION_SETTINGS_BYTES => {
+            serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({}))
+        }
+        _ => json!({}),
+    };
+    if !document.is_object() {
+        document = json!({});
+    }
+    document["downloadFolder"] = Value::String(path.to_string_lossy().into_owned());
+
+    fs::create_dir_all(root)?;
+    write_json_atomic(&settings_file, &document)?;
+    Ok(path)
+}
+
+/// Opens a completed file in whatever the user has associated with it.
+///
+/// This is playback stage one. A libmpv surface inside the manager window is the
+/// intended end state, but the engine is not shipped yet, and handing the file
+/// to the system player is honest about what exists today rather than showing a
+/// dead video area.
+#[cfg(target_os = "windows")]
+fn open_media_file(file_name: &str) -> io::Result<PathBuf> {
+    let name = Path::new(file_name)
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid-file-name"))?;
+    let path = aura_downloads_dir()?.join(name);
+    if !path.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "media-file-missing"));
+    }
+    let mut command = Command::new("cmd.exe");
+    command
+        .arg("/c")
+        .arg("start")
+        .arg("")
+        .arg(&path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.spawn()?;
+    Ok(path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_media_file(_file_name: &str) -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "opening media is Windows only",
+    ))
 }
 
 fn replace_file_atomic(temporary: &Path, path: &Path) -> io::Result<()> {
@@ -2148,6 +2330,10 @@ where
         .arg("--newline")
         .arg("--no-playlist")
         .arg("--windows-filenames")
+        // Explicit so a resumed job continues the existing `.part` instead of
+        // starting the transfer over. This is yt-dlp's default, stated here
+        // because pause and resume depend on it.
+        .arg("--continue")
         .arg("--merge-output-format")
         .arg("mp4")
         .arg("--paths")
@@ -2202,12 +2388,21 @@ where
     drop(tx);
 
     let cancel_path = job_cancel_path(&request.job_id).ok();
+    let pause_path = job_pause_path(&request.job_id).ok();
     let mut last_error = String::new();
     let mut cancelled = false;
+    let mut paused = false;
     loop {
         if cancel_path.as_ref().is_some_and(|path| path.exists()) {
             let _ = child.kill();
             cancelled = true;
+            break;
+        }
+        // Pause stops the child but leaves yt-dlp's `.part` file in place, so a
+        // later resume continues from the same byte instead of restarting.
+        if pause_path.as_ref().is_some_and(|path| path.exists()) {
+            let _ = child.kill();
+            paused = true;
             break;
         }
         match rx.recv_timeout(Duration::from_millis(250)) {
@@ -2244,6 +2439,17 @@ where
     if cancelled {
         state.status = "cancelled".into();
         state.status_text = "다운로드를 취소했습니다.".into();
+        state.error = None;
+        update_state(&mut state, &notify);
+        return;
+    }
+
+    // The pause marker is deliberately left on disk: it is what tells the
+    // manager window this job is paused rather than stopped, and `resume`
+    // removes it.
+    if paused {
+        state.status = "paused".into();
+        state.status_text = "일시정지했습니다. 이어받기를 누르면 계속합니다.".into();
         state.error = None;
         update_state(&mut state, &notify);
         return;
@@ -2304,10 +2510,15 @@ fn spawn_job_runner(request: &Request) -> io::Result<()> {
     Ok(())
 }
 
+/// Name of the GUI binary that owns the manager window.
+///
+/// The window lives in a separate crate (`companion-gui`) so the native
+/// messaging host stays a small stdio process with no GUI dependencies.
+#[cfg(target_os = "windows")]
+const MANAGER_EXECUTABLE: &str = "aura-media-manager.exe";
+
 fn spawn_manager() -> io::Result<()> {
-    let executable = env::current_exe()?;
-    let mut command = Command::new(executable);
-    command.arg("--manager");
+    let mut command = Command::new(manager_executable()?);
     #[cfg(target_os = "windows")]
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     command
@@ -2316,6 +2527,33 @@ fn spawn_manager() -> io::Result<()> {
         .stderr(Stdio::null());
     command.spawn()?;
     Ok(())
+}
+
+/// Resolves the manager binary beside this executable, which is how the
+/// installer lays both out. Falls back to an explicit error rather than
+/// silently launching this host again with an argument it no longer handles.
+#[cfg(target_os = "windows")]
+fn manager_executable() -> io::Result<PathBuf> {
+    let directory = env::current_exe()?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no install directory"))?;
+    let path = directory.join(MANAGER_EXECUTABLE);
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "manager-not-installed",
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn manager_executable() -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the manager window is Windows only",
+    ))
 }
 
 fn open_download_folder() -> io::Result<()> {
@@ -2348,7 +2586,7 @@ fn run_native_host() {
                     "ok": true,
                     "protocol": PROTOCOL_VERSION,
                     "version": env!("CARGO_PKG_VERSION"),
-                "capabilities": ["youtube", "youtube-info", "persistent-jobs", "local-writer", "manager-ui", "open-folder", "cancel", "subtitle-url-jobs", "entitlement-status"],
+                "capabilities": ["youtube", "youtube-info", "persistent-jobs", "local-writer", "manager-ui", "open-folder", "cancel", "pause", "resume", "retry", "set-download-folder", "play-file", "subtitle-url-jobs", "entitlement-status"],
                 }),
             ),
             "status" => {
@@ -2414,6 +2652,64 @@ fn run_native_host() {
                 },
                 Err(error) => reply(&request, json!({ "ok": false, "error": error.to_string() })),
             },
+            "pause-job" => match job_pause_path(&request.job_id) {
+                Ok(path) => match fs::write(path, b"pause") {
+                    Ok(()) => reply(&request, json!({ "ok": true, "jobId": request.job_id })),
+                    Err(error) => {
+                        reply(&request, json!({ "ok": false, "error": error.to_string() }))
+                    }
+                },
+                Err(error) => reply(&request, json!({ "ok": false, "error": error.to_string() })),
+            },
+            // Resume and retry share `restart_job`; they differ only in intent,
+            // so the reply echoes which one ran for clearer diagnostics.
+            "resume-job" | "retry-job" => match restart_job(&request.job_id) {
+                Ok(()) => reply(
+                    &request,
+                    json!({ "ok": true, "jobId": request.job_id, "action": request.kind }),
+                ),
+                Err(error) => reply(
+                    &request,
+                    json!({
+                        "ok": false,
+                        "errorCode": "job-restart-failed",
+                        "error": error.to_string()
+                    }),
+                ),
+            },
+            "set-download-folder" => match companion_root()
+                .and_then(|root| write_download_folder(&root, &request.folder))
+            {
+                Ok(path) => reply(
+                    &request,
+                    json!({
+                        "ok": true,
+                        "downloadsFolder": path.to_string_lossy().into_owned()
+                    }),
+                ),
+                Err(error) => reply(
+                    &request,
+                    json!({
+                        "ok": false,
+                        "errorCode": "download-folder-rejected",
+                        "error": error.to_string()
+                    }),
+                ),
+            },
+            "play-file" => match open_media_file(&request.filename) {
+                Ok(path) => reply(
+                    &request,
+                    json!({ "ok": true, "path": path.to_string_lossy().into_owned() }),
+                ),
+                Err(error) => reply(
+                    &request,
+                    json!({
+                        "ok": false,
+                        "errorCode": "play-failed",
+                        "error": error.to_string()
+                    }),
+                ),
+            },
             "show-ui" => match spawn_manager() {
                 Ok(()) => reply(&request, json!({ "ok": true })),
                 Err(error) => reply(&request, json!({ "ok": false, "error": error.to_string() })),
@@ -2437,7 +2733,6 @@ fn run_native_host() {
 
 #[cfg(target_os = "windows")]
 mod windows_ui {
-    use super::{list_job_states, JobState};
     use std::ffi::c_void;
     use std::ptr;
     use std::thread;
@@ -2545,13 +2840,6 @@ mod windows_ui {
     }
 
     impl Window {
-        fn set_title(&self, value: &str) {
-            let text = wide(value);
-            unsafe {
-                SendMessageW(self.title as Hwnd, WM_SETTEXT, 0, text.as_ptr() as Lparam);
-            }
-        }
-
         fn set_status(&self, value: &str) {
             let text = wide(value);
             unsafe {
@@ -2665,21 +2953,6 @@ mod windows_ui {
         }
     }
 
-    fn manager_text(states: &[JobState]) -> String {
-        if states.is_empty() {
-            return "다운로드 작업이 없습니다.".into();
-        }
-        states
-            .iter()
-            .take(8)
-            .map(|state| {
-                let title = state.title.as_deref().unwrap_or("제목 확인 중…");
-                format!("{} · {}\r\n{}", state.status, title, state.status_text)
-            })
-            .collect::<Vec<_>>()
-            .join("\r\n\r\n")
-    }
-
     pub fn run_job_ui(job_id: String) {
         let Some(window) = create_window("Aura Downloads", 460, 180) else {
             return;
@@ -2730,28 +3003,6 @@ mod windows_ui {
                 }
                 thread::sleep(Duration::from_millis(400));
             }
-        });
-        message_loop();
-    }
-
-    pub fn run_manager_ui() {
-        let Some(window) = create_window("Aura Downloads", 560, 420) else {
-            return;
-        };
-        window.set_title("Aura Downloads");
-        let status_handle = window.status;
-        thread::spawn(move || loop {
-            let states = list_job_states().unwrap_or_default();
-            let text = wide(&manager_text(&states));
-            unsafe {
-                SendMessageW(
-                    status_handle as Hwnd,
-                    WM_SETTEXT,
-                    0,
-                    text.as_ptr() as Lparam,
-                );
-            }
-            thread::sleep(Duration::from_secs(1));
         });
         message_loop();
     }
@@ -2834,8 +3085,10 @@ fn main() {
         return;
     }
     if args.get(1).and_then(|value| value.to_str()) == Some("--manager") {
-        #[cfg(target_os = "windows")]
-        windows_ui::run_manager_ui();
+        // The manager window moved to the `companion-gui` crate. Keep this arm
+        // so an old Start Menu shortcut still opens the window instead of
+        // silently starting a stdio host with no browser attached.
+        let _ = spawn_manager();
         return;
     }
     run_native_host();
@@ -3552,5 +3805,187 @@ mod tests {
         assert!(directory.join(first).exists());
         assert!(directory.join(second).exists());
         fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+
+    #[test]
+    fn cancel_marker_uses_the_path_the_download_loop_polls() {
+        let directory = test_directory();
+        fs::create_dir_all(&directory).expect("jobs directory creates");
+        let path = job_cancel_path_in(&directory, "job-abc").expect("cancel path resolves");
+        fs::write(&path, b"cancel").expect("cancel marker writes");
+        assert!(path.exists());
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("job-abc.cancel")
+        );
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn cancel_marker_rejects_an_unsafe_job_id() {
+        let directory = test_directory();
+        assert!(job_cancel_path_in(&directory, "../escape").is_err());
+        assert!(job_cancel_path_in(&directory, "").is_err());
+    }
+
+    #[test]
+    fn pause_and_cancel_use_distinct_markers() {
+        let directory = test_directory();
+        fs::create_dir_all(&directory).expect("jobs directory creates");
+        let pause = job_pause_path_in(&directory, "job-abc").expect("pause path resolves");
+        let cancel = job_cancel_path_in(&directory, "job-abc").expect("cancel path resolves");
+        assert_ne!(pause, cancel);
+        assert_eq!(
+            pause.file_name().and_then(|value| value.to_str()),
+            Some("job-abc.pause")
+        );
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn pause_marker_rejects_an_unsafe_job_id() {
+        let directory = test_directory();
+        for bad in ["../escape", "a/b", "a\\b", ""] {
+            assert!(
+                job_pause_path_in(&directory, bad).is_err(),
+                "job id {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settings_download_folder_must_be_absolute_and_traversal_free() {
+        assert!(valid_download_folder("relative\\path").is_none());
+        assert!(valid_download_folder("").is_none());
+        assert!(valid_download_folder("   ").is_none());
+        assert!(valid_download_folder("C:\\Media\\..\\Windows").is_none());
+        assert!(valid_download_folder("C:\\Media\\Aura\u{0}").is_none());
+
+        let accepted = valid_download_folder("C:\\Media\\Aura").expect("absolute path is accepted");
+        assert_eq!(accepted, PathBuf::from("C:\\Media\\Aura"));
+        assert_eq!(
+            valid_download_folder("  C:\\Media\\Aura  "),
+            Some(PathBuf::from("C:\\Media\\Aura"))
+        );
+    }
+
+    #[test]
+    fn writing_the_download_folder_preserves_other_settings() {
+        let root = test_directory();
+        fs::create_dir_all(&root).expect("root creates");
+        fs::write(
+            settings_path(&root),
+            br#"{"licenseKey":"AM-0123456789ABCDEF0123456789ABCDEF012","other":7}"#,
+        )
+        .expect("existing settings write");
+
+        let target = root.join("media");
+        let written = write_download_folder(&root, &target.to_string_lossy())
+            .expect("download folder writes");
+        assert_eq!(written, target);
+        assert!(target.is_dir(), "the folder is created if missing");
+
+        let document: Value =
+            serde_json::from_slice(&fs::read(settings_path(&root)).expect("settings read"))
+                .expect("settings parse");
+        assert_eq!(
+            document["downloadFolder"].as_str(),
+            Some(target.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            document["licenseKey"].as_str(),
+            Some("AM-0123456789ABCDEF0123456789ABCDEF012"),
+            "the license key must survive a folder change"
+        );
+        assert_eq!(document["other"].as_u64(), Some(7));
+
+        fs::remove_dir_all(root).expect("test directory removes");
+    }
+
+    #[test]
+    fn the_configured_folder_is_read_back_from_settings() {
+        let root = test_directory();
+        fs::create_dir_all(&root).expect("root creates");
+        let target = root.join("chosen");
+        write_download_folder(&root, &target.to_string_lossy()).expect("folder writes");
+
+        assert_eq!(read_download_folder_setting(&root), Some(target));
+
+        // A malformed value falls back rather than writing media to a bad path.
+        fs::write(settings_path(&root), br#"{"downloadFolder":"not-absolute"}"#)
+            .expect("settings write");
+        assert_eq!(read_download_folder_setting(&root), None);
+
+        fs::write(settings_path(&root), b"{ not json").expect("settings write");
+        assert_eq!(read_download_folder_setting(&root), None);
+
+        fs::remove_dir_all(root).expect("test directory removes");
+    }
+
+    #[test]
+    fn writing_the_download_folder_rejects_a_relative_path() {
+        let root = test_directory();
+        fs::create_dir_all(&root).expect("root creates");
+        assert!(write_download_folder(&root, "relative\\media").is_err());
+        assert!(!settings_path(&root).exists(), "nothing is written on refusal");
+        fs::remove_dir_all(root).expect("test directory removes");
+    }
+
+    #[test]
+    fn restarting_a_job_without_a_persisted_request_reports_the_missing_record() {
+        let directory = test_directory();
+        fs::create_dir_all(&directory).expect("jobs directory creates");
+        // `restart_job` resolves paths through the real companion root, so this
+        // only asserts the id guard, which runs before any file access.
+        assert!(restart_job("../escape").is_err());
+        assert!(restart_job("").is_err());
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn a_paused_job_state_survives_a_round_trip() {
+        let directory = test_directory();
+        let mut state = initial_job_state(&sample_download_request("job-paused"));
+        state.status = "paused".into();
+        state.status_text = "일시정지했습니다.".into();
+        state.progress = Some(42);
+        persist_job_state_in(&directory, &mut state, 1).expect("state persists");
+
+        let restored = read_job_state(&job_state_path_in(&directory, "job-paused").unwrap())
+            .expect("state reads back");
+        assert_eq!(restored.status, "paused");
+        assert_eq!(restored.progress, Some(42));
+
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    fn sample_download_request(job_id: &str) -> Request {
+        Request {
+            kind: "youtube-download".into(),
+            request_id: String::new(),
+            job_id: job_id.into(),
+            url: "https://youtu.be/abc".into(),
+            filename: String::new(),
+            folder: String::new(),
+            data: String::new(),
+            quality: default_quality(),
+            protocol: PROTOCOL_VERSION,
+            raw_message: Value::Null,
+            message_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn the_hello_reply_advertises_the_new_commands() {
+        // The extension decides which controls to show from this list, so a
+        // command added to the dispatch must appear here too.
+        let source = include_str!("main.rs");
+        for capability in ["pause", "resume", "retry", "set-download-folder", "play-file"] {
+            assert!(
+                source.contains(&format!("\"{capability}\"")),
+                "capability {capability} is missing from the hello reply"
+            );
+        }
     }
 }

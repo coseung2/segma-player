@@ -5,8 +5,10 @@ __pycache__/
 *.crx
 *.pem
 native-host/target/
+companion-gui/target/
 artifacts/
 dist/
+output/
 .playwright-cli/
 scripts/laptop-package/*-report.txt
 

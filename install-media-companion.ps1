@@ -8,6 +8,10 @@ param(
   [ValidatePattern('^[a-p]{32}$')]
   [string]$EdgeExtensionId = '',
 
+  [Parameter(Mandatory = $false)]
+  [ValidatePattern('^[a-p]{32}$')]
+  [string[]]$AdditionalExtensionId = @(),
+
   [Parameter(Mandatory = $true)]
   [string]$ToolsArchive,
 
@@ -23,9 +27,25 @@ $ManifestPath = Join-Path $InstallRoot "$HostName.json"
 $ProjectRoot = $PSScriptRoot
 $BuiltHost = Join-Path $ProjectRoot 'native-host\target\release\aura-media-companion.exe'
 $InstalledHost = Join-Path $InstallRoot 'aura-media-companion.exe'
+$originConfigPath = Join-Path $ProjectRoot 'installer\companion-extension-origins.json'
+$originConfig = Get-Content -LiteralPath $originConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([string]::IsNullOrWhiteSpace($ChromeExtensionId)) {
+  $ChromeExtensionId = [string]$originConfig.chromeStoreExtensionId
+}
+$allowedExtensionIds = @(
+  $ChromeExtensionId
+  $EdgeExtensionId
+  @($originConfig.developmentExtensionIds)
+  @($AdditionalExtensionId)
+) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+foreach ($extensionId in $allowedExtensionIds) {
+  if ($extensionId -notmatch '^[a-p]{32}$') {
+    throw "Invalid Companion extension ID in $originConfigPath`: $extensionId"
+  }
+}
 
-if ([string]::IsNullOrWhiteSpace($ChromeExtensionId) -and [string]::IsNullOrWhiteSpace($EdgeExtensionId)) {
-  throw 'At least one ChromeExtensionId or EdgeExtensionId must be supplied.'
+if ($allowedExtensionIds.Count -eq 0) {
+  throw 'At least one Companion extension ID must be configured.'
 }
 if (-not (Test-Path -LiteralPath $ToolsArchive -PathType Leaf)) {
   throw "Tools archive not found: $ToolsArchive"
@@ -71,13 +91,7 @@ foreach ($tool in $requiredTools) {
   }
 }
 
-$allowedOrigins = @()
-if (-not [string]::IsNullOrWhiteSpace($ChromeExtensionId)) {
-  $allowedOrigins += "chrome-extension://$ChromeExtensionId/"
-}
-if (-not [string]::IsNullOrWhiteSpace($EdgeExtensionId) -and $EdgeExtensionId -ne $ChromeExtensionId) {
-  $allowedOrigins += "chrome-extension://$EdgeExtensionId/"
-}
+$allowedOrigins = @($allowedExtensionIds | ForEach-Object { "chrome-extension://$_/" })
 $manifest = [ordered]@{
   name = $HostName
   description = 'Aura Media Companion'

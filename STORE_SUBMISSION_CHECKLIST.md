@@ -1,4 +1,11 @@
-# Aura Media Downloader Chrome Web Store submission checklist
+# Aura Media Downloader Chromium store submission checklist
+
+> [!WARNING]
+> This checklist covers the extension-primary product and may be used only for
+> an explicitly scoped maintenance release of that package. Do not use it for a
+> Companion-first listing or rebrand until the connector-only scope, copy,
+> permissions, screenshots, and Companion dependency have been re-audited
+> against `PRODUCT_DIRECTION.md`.
 
 This checklist is the release gate for the commercial store distribution. Bracketed values are owner-supplied prerequisites; do not submit while any required placeholder remains.
 
@@ -12,22 +19,22 @@ This checklist is the release gate for the commercial store distribution. Bracke
 | Privacy-policy HTTPS URL | `[OWNER INPUT: PRIVACY_POLICY_HTTPS_URL]` |
 | Terms-of-use HTTPS URL | `[OWNER INPUT: TERMS_OF_USE_HTTPS_URL]` |
 | Upgrade URL | `[OWNER INPUT: UPGRADE_URL]` |
-| Product website | `[OWNER INPUT: PRODUCT_WEBSITE_URL]` |
+| Product website and Companion install guide | `https://aura.mdownloader.workers.dev/` / `https://aura.mdownloader.workers.dev/download` |
 | Primary language, category, visibility, and distribution countries | `[OWNER INPUT: LISTING_DISTRIBUTION_CHOICES]` |
 | Store screenshots and promotional images | Prepared under `assets/store-listing`; owner visual approval required |
 | Chrome Web Store extension ID | `kniniopdkceodiddkijnddnggdgmjmmo` |
 | Microsoft Edge Add-ons extension ID | `[OWNER INPUT: EDGE_EXTENSION_ID]` |
 | Native companion code-signing certificate | `[OWNER INPUT: CERTIFICATE_THUMBPRINT_AND_SIGNING_OWNER]` |
-| Hosted native companion installer URL | `[OWNER INPUT: NATIVE_INSTALLER_HTTPS_URL]` |
+| Hosted native companion installer URL | `https://aura.mdownloader.workers.dev/downloads/AuraMediaCompanionSetup.exe` |
 | Published companion download/tool license notices | `[OWNER INPUT: COMPANION_LICENSE_URLS]` |
 
 Each published extension ID is needed to write the final `allowed_origins` entries in the separately hosted native-host manifest. The native installer must be code-signed and must register `com.aura.media_companion` for the exact Chrome and/or Edge published origins; it is not part of either extension-store ZIP.
 
 ## Build and artifact gate
 
-- [ ] Replace the upgrade URL when building the release package:
+- [ ] Replace the upgrade and Companion guide URLs when building the release package:
 
-  `rtk pwsh -NoProfile -File scripts/build-store-package.ps1 -UpgradeUrl "[OWNER INPUT: UPGRADE_URL]" -OutputDirectory "[OWNER INPUT: RELEASE_OUTPUT_DIRECTORY]"`
+  `rtk pwsh -NoProfile -File scripts/build-store-package.ps1 -UpgradeUrl "[OWNER INPUT: UPGRADE_URL]" -CompanionInstallUrl "https://aura.mdownloader.workers.dev/download" -OutputDirectory "[OWNER INPUT: RELEASE_OUTPUT_DIRECTORY]"`
 
 - [ ] Confirm the packager prints `STORE_PACKAGE_OK`, the intended version, the ZIP path, and no placeholder warning.
 - [ ] Run `rtk node --test store-package.test.mjs`.
@@ -54,6 +61,7 @@ Each published extension ID is needed to write the final `allowed_origins` entri
 - [ ] Content scripts contain exactly the bundled `level5-page-bridge.js` at `world: "MAIN"`, `run_at: "document_start"`, followed by the isolated `content.js` detector at `run_at: "document_start"`; there are no other content-script entries.
 - [ ] Permissions match `store/manifest.json` and the justifications in `store/SINGLE_PURPOSE_AND_PERMISSIONS.md`; remove any permission not required by the current runtime before release.
 - [ ] The background runtime uses the `com.aura.media_companion` native messaging name.
+- [ ] `COMPANION_INSTALL_URL` is HTTPS. The popup shows it only when the Companion is unavailable; an empty URL keeps the link hidden.
 
 ## Listing and privacy gate
 
@@ -65,7 +73,7 @@ Each published extension ID is needed to write the final `allowed_origins` entri
 - [ ] Use `store/RELEASE_NOTES.md` for the version-specific release notes.
 - [ ] Do not claim DRM bypass, universal compatibility, or authorization to download third-party copyrighted media.
 
-## Companion release gate
+## Legacy combined Companion release gate
 
 - [ ] Build and sign the Windows companion with the owner’s code-signing certificate.
 - [ ] Host the installer and any required tools at the owner’s HTTPS installer URL with checksums and license notices.

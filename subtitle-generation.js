@@ -136,7 +136,9 @@ export async function requestGeneratedSubtitle({
   const startedAt = Date.now();
   while (Date.now() - startedAt < POLL_TIMEOUT_MS) {
     await wait(POLL_INTERVAL_MS, signal);
-    const result = await requestJson(`${SUBTITLE_API_URL}?id=${encodeURIComponent(jobId)}`, {}, signal);
+    const result = await requestJson(`${SUBTITLE_API_URL}?id=${encodeURIComponent(jobId)}`, {
+      headers: { authorization: `Bearer ${key}` },
+    }, signal);
     if (result.status === "running") {
       onProgress?.({
         phase: typeof result.phase === "string" ? result.phase : "queued",

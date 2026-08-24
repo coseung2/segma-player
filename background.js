@@ -87,6 +87,7 @@ import {
   companionStatus,
   listCompanionJobs,
   onCompanionEvent,
+  startCompanionSubtitleJob,
   startCompanionYouTubeDownload,
 } from "./companion-client.js";
 import {
@@ -265,7 +266,9 @@ const downloadJobsReady = chrome.storage.session.get({
   playbackSessions.restore(stored[PLAYBACK_SESSIONS_KEY]);
   syncWorkerLifecycleAlarm();
   for (const job of downloadJobs.values()) {
-    if (job?.source === "youtube" && !terminalDownloadJob(job)) watchCompanionJob(job.id);
+    if (["youtube", "companion"].includes(job?.source) && !terminalDownloadJob(job)) {
+      watchCompanionJob(job.id);
+    }
   }
 }).catch(() => {});
 
@@ -453,6 +456,7 @@ function isYouTubeDetectionCandidate(candidate) {
 }
 
 const YOUTUBE_QUALITIES = new Set(["best", "4320", "2160", "1440", "1080", "720", "480", "360", "240", "144"]);
+const ACTIVE_COMPANION_STATUSES = new Set(["created", "preparing", "submitting", "queued", "running"]);
 
 const companionJobPollers = new Map();
 
@@ -464,6 +468,7 @@ async function syncCompanionJob(jobId) {
   if (!remote) return false;
   const current = downloadJobs.get(jobId);
   if (!current || terminalDownloadJob(current)) return true;
+  const subtitleJob = remote.jobType === "subtitle" || current.source === "companion";
   const status = ["queued", "running", "completed", "failed", "cancelled"].includes(remote.status)
     ? remote.status
     : "running";
@@ -472,9 +477,9 @@ async function syncCompanionJob(jobId) {
     status,
     statusText: typeof remote.statusText === "string" && remote.statusText
       ? remote.statusText
-      : "Aura Companion에서 다운로드 중…",
+      : (subtitleJob ? "Aura Companion에서 자막 생성 중…" : "Aura Companion에서 다운로드 중…"),
     error: typeof remote.error === "string" ? remote.error.slice(0, 500) : "",
-    folderName: "Downloads\\Aura Media",
+    folderName: subtitleJob ? "Downloads\\Aura Media\\Subtitles" : "Downloads\\Aura Media",
   });
   return ["completed", "failed", "cancelled"].includes(status);
 }
@@ -486,14 +491,17 @@ async function restoreActiveCompanionJobs() {
   if (!Array.isArray(listed?.jobs)) return;
   for (const remote of listed.jobs) {
     if (!remote || typeof remote.jobId !== "string" || !remote.jobId) continue;
-    if (!["queued", "running"].includes(remote.status)) continue;
+    if (!ACTIVE_COMPANION_STATUSES.has(remote.status)) continue;
     if (!downloadJobs.has(remote.jobId)) {
+      const subtitleJob = remote.jobType === "subtitle";
       downloadJobs.set(remote.jobId, createDownloadJob({
         id: remote.jobId,
-        title: typeof remote.title === "string" && remote.title.trim() ? remote.title.trim() : "Aura Companion 다운로드",
-        mediaType: "YOUTUBE",
-        source: "youtube",
-        folderName: "Downloads\\Aura Media",
+        title: typeof remote.title === "string" && remote.title.trim()
+          ? remote.title.trim()
+          : (subtitleJob ? "Aura Companion 자막" : "Aura Companion 다운로드"),
+        mediaType: subtitleJob ? "SUBTITLE" : "YOUTUBE",
+        source: subtitleJob ? "companion" : "youtube",
+        folderName: subtitleJob ? "Downloads\\Aura Media\\Subtitles" : "Downloads\\Aura Media",
         now: Number.isFinite(Number(remote.updatedAt)) ? Number(remote.updatedAt) : Date.now(),
       }));
     }
@@ -1058,38 +1066,83 @@ async function dispatchMediaDownload(jobId, candidate) {
 async function startSubtitleGeneration(input) {
   const mediaUrl = canonicalHttpUrl(input?.mediaUrl)?.href || "";
   const sourceUrl = input?.sourceUrl ? canonicalHttpUrl(input.sourceUrl)?.href || "" : "";
+  const audioRenditionUrl = input?.audioRenditionUrl
+    ? canonicalHttpUrl(input.audioRenditionUrl)?.href || ""
+    : "";
   const sourceTabId = Number.isInteger(input?.sourceTabId) && input.sourceTabId > 0 ? input.sourceTabId : null;
   const sourceFrameId = Number.isInteger(input?.sourceFrameId) && input.sourceFrameId >= 0
     ? input.sourceFrameId
     : null;
   const sourceLanguage = input?.sourceLanguage === "en" ? "en" : "ja";
-  const mediaType = ["HLS_MASTER", "HLS_MEDIA", "PROGRESSIVE"].includes(input?.mediaType)
+  const mediaType = ["HLS_MASTER", "HLS_MEDIA", "PROGRESSIVE", "DASH"].includes(input?.mediaType)
     ? input.mediaType
     : "";
   const title = String(input?.title || "영상 자막").trim().slice(0, 240) || "영상 자막";
-  if (!mediaUrl || input?.sourceUrl && !sourceUrl) throw new Error("invalid-media-url");
-  if ((await resolveEdition()) !== "pro") throw new Error("pro-license-required");
-  await refreshLicense();
-  const license = await getStoredLicense();
-  if (license?.edition !== "pro" || typeof license.key !== "string" || !license.key) {
-    throw new Error("pro-license-required");
+  if (!mediaUrl || input?.sourceUrl && !sourceUrl || input?.audioRenditionUrl && !audioRenditionUrl) {
+    throw new Error("invalid-media-url");
   }
   await downloadJobsReady;
-  const jobId = crypto.randomUUID();
   const subtitleInput = {
     mediaUrl,
     sourceUrl,
+    audioRenditionUrl,
     title,
     sourceLanguage,
     sourceTabId,
     sourceFrameId,
     mediaType,
   };
+
+  const companion = await companionStatus();
+  if (companion.ok && companion.licenseConfigured === true) {
+    const accepted = await startCompanionSubtitleJob({
+      candidateId: `subtitle-${crypto.randomUUID()}`,
+      sourceLanguage,
+      media: {
+        type: mediaType.startsWith("HLS")
+          ? "hls"
+          : (mediaType === "DASH" ? "dash" : (mediaType === "PROGRESSIVE" ? "progressive" : "unknown")),
+        title,
+        pageUrl: sourceUrl,
+        resourceUrl: mediaUrl,
+        audioRenditionUrl,
+      },
+    });
+    const jobId = typeof accepted?.jobId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(accepted.jobId)
+      ? accepted.jobId
+      : "";
+    if (!accepted?.accepted || !jobId) throw new Error("subtitle-companion-start-failed");
+    downloadJobs.set(jobId, createDownloadJob({
+      id: jobId,
+      title,
+      mediaType: "SUBTITLE",
+      source: "companion",
+      folderName: "Downloads\\Aura Media\\Subtitles",
+      retryPayload: { kind: "subtitle", input: subtitleInput },
+    }));
+    await persistDownloadJobs();
+    await rememberDownloadOverlayJob(jobId);
+    void syncDownloadOverlayForAllTabs([jobId]);
+    await patchDownloadJob(jobId, {
+      status: "running",
+      statusText: "Aura Companion에서 자막 생성을 시작했습니다.",
+    });
+    watchCompanionJob(jobId);
+    return { jobId, mode: "subtitle-companion" };
+  }
+
+  if ((await resolveEdition()) !== "pro") throw new Error("pro-license-required");
+  await refreshLicense();
+  const license = await getStoredLicense();
+  if (license?.edition !== "pro" || typeof license.key !== "string" || !license.key) {
+    throw new Error("pro-license-required");
+  }
+  const jobId = crypto.randomUUID();
   downloadJobs.set(jobId, createDownloadJob({
     id: jobId,
     title,
     mediaType: "SUBTITLE",
-    folderName: "자막 폴더",
+    folderName: "Downloads\\Aura Media",
     retryPayload: { kind: "subtitle", input: subtitleInput },
   }));
   if (sourceTabId !== null) jobSourceTabs.set(jobId, sourceTabId);
@@ -1302,7 +1355,7 @@ async function cancelDownloadJob(jobId) {
   if (terminalDownloadJob(job)) return { ok: true, alreadyTerminal: true };
 
   youtubeJobControllers.get(jobId)?.abort();
-  if (job.source === "youtube") {
+  if (job.source === "youtube" || job.source === "companion") {
     await cancelCompanionJob(jobId).catch(() => null);
     const poller = companionJobPollers.get(jobId);
     if (poller) {

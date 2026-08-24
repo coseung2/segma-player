@@ -22,6 +22,14 @@ function memoryKv() {
   };
 }
 
+async function ownAsrJob(kv, jobId, licenseKey) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(licenseKey));
+  const owner = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  await kv.put(`asr-job-owner:${jobId}`, JSON.stringify({ owner }));
+}
+
 function environment(kv = memoryKv(), overrides = {}) {
   return {
     YT_SERVER_SECRET: SECRET,
@@ -117,6 +125,9 @@ test("pro subtitle jobs are proxied without exposing the worker secret", async (
     assert.equal(calls[0].options.headers.authorization, "Bearer modal-secret");
     assert.equal(JSON.parse(calls[0].options.body).licenseKey, undefined);
     assert.equal(JSON.parse(calls[0].options.body).sourceLanguage, "en");
+    const owner = await kv.get("asr-job-owner:fc-123", "json");
+    assert.match(owner.owner, /^[0-9a-f]{64}$/);
+    assert.equal(JSON.stringify(owner).includes(key), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -186,6 +197,290 @@ test("subtitle proxy rejects private media addresses and handles preflight", asy
   }), environment());
   assert.equal(options.status, 204);
   assert.equal(options.headers.get("access-control-allow-origin"), "*");
+  assert.match(options.headers.get("access-control-allow-methods"), /\bDELETE\b/);
+});
+
+test("subtitle result polling requires an approved license and forwards only the Modal credential", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"7".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  await ownAsrJob(kv, "fc-poll", key);
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (request, options) => {
+    calls.push({ request: String(request), options });
+    return new Response(JSON.stringify({ ok: true, status: "running", progress: 25 }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const env = environment(kv, {
+      MODAL_ASR_URL: "https://aura-asr.modal.run",
+      MODAL_ASR_TOKEN: "modal-secret",
+    });
+    const unauthorized = await worker.fetch(
+      new Request("https://aura.mdownloader.workers.dev/api/subtitles?id=fc-poll"),
+      env,
+    );
+    assert.equal(unauthorized.status, 401);
+    assert.deepEqual(await unauthorized.json(), { ok: false, error: "unauthorized" });
+    assert.equal(calls.length, 0);
+
+    const authorized = await worker.fetch(new Request(
+      "https://aura.mdownloader.workers.dev/api/subtitles?id=fc-poll",
+      { headers: { authorization: `Bearer ${key}` } },
+    ), env);
+    assert.equal(authorized.status, 202);
+    assert.deepEqual(await authorized.json(), { ok: true, status: "running", progress: 25 });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].request, "https://aura-asr.modal.run/result/fc-poll");
+    assert.equal(calls[0].options.headers.authorization, "Bearer modal-secret");
+    assert.equal(calls[0].request.includes(key), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subtitle status and cancellation reject a different approved license owner", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const ownerKey = `AM-${"8".repeat(36)}`;
+  const otherKey = `AM-${"9".repeat(36)}`;
+  await kv.put(ownerKey, JSON.stringify({ status: "approved" }));
+  await kv.put(otherKey, JSON.stringify({ status: "approved" }));
+  await ownAsrJob(kv, "fc-owned", ownerKey);
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response("unexpected");
+  };
+  try {
+    const env = environment(kv, {
+      MODAL_ASR_URL: "https://aura-asr.modal.run",
+      MODAL_ASR_TOKEN: "modal-secret",
+    });
+    for (const method of ["GET", "DELETE"]) {
+      const response = await worker.fetch(new Request(
+        "https://aura.mdownloader.workers.dev/api/subtitles?id=fc-owned",
+        { method, headers: { authorization: `Bearer ${otherKey}` } },
+      ), env);
+      assert.equal(response.status, 403);
+      assert.deepEqual(await response.json(), { ok: false, error: "subtitle-job-not-owned" });
+    }
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("authorized subtitle cancellation is proxied with only the Modal credential", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"1".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  await ownAsrJob(kv, "fc-123", key);
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (request, options) => {
+    calls.push({ request: String(request), options });
+    return new Response(JSON.stringify({ ok: true, status: "cancelled" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const response = await worker.fetch(new Request(
+      "https://aura.mdownloader.workers.dev/api/subtitles?id=fc-123",
+      { method: "DELETE", headers: { authorization: `Bearer ${key}` } },
+    ), environment(kv, {
+      MODAL_ASR_URL: "https://aura-asr.modal.run",
+      MODAL_ASR_TOKEN: "modal-secret",
+    }));
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const responseText = await response.text();
+    assert.deepEqual(JSON.parse(responseText), { ok: true, status: "cancelled" });
+    assert.equal(responseText.includes("modal-secret"), false);
+    assert.equal(responseText.includes(key), false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].request, "https://aura-asr.modal.run/cancel/fc-123");
+    assert.equal(calls[0].options.method, "DELETE");
+    assert.equal(calls[0].options.headers.authorization, "Bearer modal-secret");
+    assert.equal(calls[0].options.body, undefined);
+    assert.equal(calls[0].request.includes(key), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subtitle cancellation rejects missing and unsafe job ids before contacting Modal", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"2".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    throw new Error("Modal must not be contacted for an invalid job id");
+  };
+  try {
+    for (const query of ["", "?id=bad%2Fid", `?id=${"x".repeat(161)}`]) {
+      const response = await worker.fetch(new Request(
+        `https://aura.mdownloader.workers.dev/api/subtitles${query}`,
+        { method: "DELETE", headers: { authorization: `Bearer ${key}` } },
+      ), environment(kv, {
+        MODAL_ASR_URL: "https://aura-asr.modal.run",
+        MODAL_ASR_TOKEN: "modal-secret",
+      }));
+      assert.equal(response.status, 400, query || "missing id");
+      assert.deepEqual(await response.json(), { ok: false, error: "invalid-job-id" });
+    }
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subtitle cancellation rejects callers without an approved license", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const pendingKey = `AM-${"3".repeat(36)}`;
+  await kv.put(pendingKey, JSON.stringify({ status: "pending", createdAt: new Date().toISOString() }));
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response("unexpected");
+  };
+  try {
+    for (const authorization of ["", `Bearer ${pendingKey}`, "Bearer not-a-license"]) {
+      const headers = authorization ? { authorization } : {};
+      const response = await worker.fetch(new Request(
+        "https://aura.mdownloader.workers.dev/api/subtitles?id=fc-unauthorized",
+        { method: "DELETE", headers },
+      ), environment(kv, {
+        MODAL_ASR_URL: "https://aura-asr.modal.run",
+        MODAL_ASR_TOKEN: "modal-secret",
+      }));
+      assert.equal(response.status, 401, authorization || "missing authorization");
+      assert.deepEqual(await response.json(), { ok: false, error: "unauthorized" });
+    }
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subtitle cancellation is rate limited before excess Modal calls", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"6".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  await ownAsrJob(kv, "fc-rate-limited", key);
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ ok: true, status: "cancelled" }), {
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const env = environment(kv, {
+      MODAL_ASR_URL: "https://aura-asr.modal.run",
+      MODAL_ASR_TOKEN: "modal-secret",
+    });
+    const request = () => new Request(
+      "https://aura.mdownloader.workers.dev/api/subtitles?id=fc-rate-limited",
+      {
+        method: "DELETE",
+        headers: {
+          authorization: `Bearer ${key}`,
+          "cf-connecting-ip": "198.51.100.60",
+        },
+      },
+    );
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const response = await worker.fetch(request(), env);
+      assert.equal(response.status, 200, `attempt ${attempt + 1}`);
+    }
+    const blocked = await worker.fetch(request(), env);
+    assert.equal(blocked.status, 429);
+    assert.deepEqual(await blocked.json(), { ok: false, error: "rate-limited" });
+    assert.equal(calls, 12);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subtitle cancellation preserves upstream failures and reports an unreachable Modal", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"4".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  await ownAsrJob(kv, "fc-failure", key);
+  const env = environment(kv, {
+    MODAL_ASR_URL: "https://aura-asr.modal.run",
+    MODAL_ASR_TOKEN: "modal-secret",
+  });
+  const request = () => new Request(
+    "https://aura.mdownloader.workers.dev/api/subtitles?id=fc-failure",
+    { method: "DELETE", headers: { authorization: `Bearer ${key}` } },
+  );
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ok: false, error: "job-cancellation-failed" }),
+      { status: 500, headers: { "content-type": "application/json" } },
+    );
+    const upstreamFailure = await worker.fetch(request(), env);
+    assert.equal(upstreamFailure.status, 500);
+    assert.deepEqual(await upstreamFailure.json(), { ok: false, error: "job-cancellation-failed" });
+
+    globalThis.fetch = async () => { throw new Error("network down"); };
+    const unreachable = await worker.fetch(request(), env);
+    assert.equal(unreachable.status, 502);
+    assert.deepEqual(await unreachable.json(), { ok: false, error: "asr-upstream-unreachable" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("subtitle cancellation keeps an already-completed job completed and is idempotent", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"5".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  await ownAsrJob(kv, "fc-completed", key);
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ ok: true, status: "completed" }), {
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const env = environment(kv, {
+      MODAL_ASR_URL: "https://aura-asr.modal.run",
+      MODAL_ASR_TOKEN: "modal-secret",
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await worker.fetch(new Request(
+        "https://aura.mdownloader.workers.dev/api/subtitles?id=fc-completed",
+        { method: "DELETE", headers: { authorization: `Bearer ${key}` } },
+      ), env);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { ok: true, status: "completed" });
+    }
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("license endpoint enforces three devices per key", async () => {

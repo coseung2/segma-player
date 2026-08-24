@@ -1,7 +1,9 @@
 import html
+import ipaddress
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -74,6 +76,8 @@ huggingface_secret = modal.Secret.from_name("huggingface")
 
 def safe_media_url(value):
     if not isinstance(value, str) or not value or len(value) > MAX_MEDIA_URL_LENGTH:
+        return None
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value):
         return None
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.fragment:
@@ -206,6 +210,26 @@ def origin_for(url):
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def pinned_public_resolution(url):
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        }
+        parsed_addresses = [ipaddress.ip_address(value) for value in addresses]
+    except (OSError, ValueError):
+        raise ValueError("media-host-unavailable")
+    if not parsed_addresses or any(not address.is_global for address in parsed_addresses):
+        raise ValueError("invalid-media-host")
+    address = str(sorted(parsed_addresses, key=lambda value: (value.version, str(value)))[0])
+    if ":" in address:
+        address = f"[{address}]"
+    return ["--resolve", f"{hostname}:{port}:{address}"]
+
+
 def media_input_error(error):
     stderr = error.stderr.decode("utf-8", "replace") if isinstance(error.stderr, bytes) else str(error.stderr or "")
     lowered = stderr.lower()
@@ -234,7 +258,8 @@ def curl_download(url, output_path, source_url):
         "--silent",
         "--show-error",
         "--compressed",
-        "--location",
+        "--noproxy",
+        "*",
         "--http1.1",
         "--retry",
         "2",
@@ -242,6 +267,7 @@ def curl_download(url, output_path, source_url):
         "20",
         "--max-time",
         str(MAX_DURATION_SECONDS + 120),
+        *pinned_public_resolution(url),
         *curl_headers(source_url, url),
         "--output",
         output_path,
@@ -268,7 +294,8 @@ def curl_text(url, source_url):
         "--silent",
         "--show-error",
         "--compressed",
-        "--location",
+        "--noproxy",
+        "*",
         "--http1.1",
         "--retry",
         "2",
@@ -276,6 +303,7 @@ def curl_text(url, source_url):
         "20",
         "--max-time",
         "60",
+        *pinned_public_resolution(url),
         *curl_headers(source_url, url),
         url,
     ]
@@ -452,37 +480,21 @@ def extract_remote_audio(request, audio_path):
     media_url = request["mediaUrl"]
     source_url = request["sourceUrl"]
     progress_key = request["progressKey"]
-    headers = f"Referer: {source_url}\r\nOrigin: {origin_for(source_url)}\r\n" if source_url else ""
     media_workdir = None
     try:
         set_job_progress(progress_key, "extracting-audio", 5)
+        media_workdir, local_media = browser_fingerprint_media(media_url, source_url)
         try:
             subprocess.run(
-                audio_extract_command(media_url, audio_path, headers=headers, remote=True),
+                audio_extract_command(local_media, audio_path, allow_all_extensions=True),
                 check=True,
-                timeout=MAX_DURATION_SECONDS + 120,
+                timeout=MAX_DURATION_SECONDS + 180,
                 capture_output=True,
             )
-        except subprocess.CalledProcessError as direct_error:
-            direct_stderr = direct_error.stderr.decode("utf-8", "replace") if isinstance(direct_error.stderr, bytes) else str(direct_error.stderr or "")
-            if not (re.search(r"403|forbidden|access denied", direct_stderr, re.IGNORECASE)
-                    or re.search(r"\.m3u8(?:$|[?#])", media_url, re.IGNORECASE)):
-                raise
-            media_log("direct ffmpeg blocked; retrying with curl")
-            set_job_progress(progress_key, "extracting-audio", 8)
-            media_workdir, local_media = browser_fingerprint_media(media_url, source_url)
-            try:
-                subprocess.run(
-                    audio_extract_command(local_media, audio_path, allow_all_extensions=True),
-                    check=True,
-                    timeout=MAX_DURATION_SECONDS + 180,
-                    capture_output=True,
-                )
-            except subprocess.CalledProcessError as retry_error:
-                retry_stderr = retry_error.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[-320:]
-                media_log(f"local ffmpeg retry failed code={retry_error.returncode} detail={retry_stderr}")
-                raise
-            media_log("local ffmpeg retry succeeded")
+        except subprocess.CalledProcessError as error:
+            detail = error.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[-320:]
+            media_log(f"local ffmpeg failed code={error.returncode} detail={detail}")
+            raise
     finally:
         if media_workdir:
             shutil.rmtree(media_workdir, ignore_errors=True)
@@ -907,5 +919,37 @@ def web():
             await job_progress.pop.aio(progress_key, None)
         await job_progress.pop.aio(f"call:{job_id}", None)
         return response({"ok": True, "status": "completed", "result": value})
+
+    @api.delete("/cancel/{job_id}")
+    async def cancel(job_id: str, request: Request):
+        if not authorized(request):
+            return response({"ok": False, "error": "unauthorized"}, 401)
+        if not JOB_ID_RE.fullmatch(job_id):
+            return response({"ok": False, "error": "invalid-job-id"}, 400)
+        progress_key = await job_progress.get.aio(f"call:{job_id}", "")
+        terminal = False
+        try:
+            call = modal.FunctionCall.from_id(job_id)
+            try:
+                await call.get.aio(timeout=0)
+            except TimeoutError:
+                pass
+            except Exception:
+                # A previously cancelled or failed call is safe to cancel again.
+                pass
+            else:
+                terminal = True
+                return response({"ok": True, "status": "completed"})
+            try:
+                await call.cancel.aio()
+            except Exception:
+                return response({"ok": False, "error": "job-cancellation-failed"}, 500)
+            terminal = True
+            return response({"ok": True, "status": "cancelled"})
+        finally:
+            if terminal:
+                if progress_key:
+                    await job_progress.pop.aio(progress_key, None)
+                await job_progress.pop.aio(f"call:{job_id}", None)
 
     return api

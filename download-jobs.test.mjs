@@ -45,6 +45,11 @@ test("download job list is newest first and contains popup-safe fields", () => {
   }]);
 });
 
+test("download jobs preserve Companion ownership without accepting arbitrary sources", () => {
+  assert.equal(createDownloadJob({ id: "subtitle-1", source: "companion" }).source, "companion");
+  assert.equal(createDownloadJob({ id: "unknown-1", source: "untrusted" }).source, "media");
+});
+
 test("download job diagnostics expose only redacted candidate metadata", () => {
   const job = createDownloadJob({
     id: "diagnostic-job",

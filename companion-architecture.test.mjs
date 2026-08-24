@@ -27,6 +27,9 @@ test("companion exposes persistent job recovery and cancellation to the extensio
   assert.match(background, /restoreActiveCompanionJobs/);
   assert.match(background, /watchCompanionJob/);
   assert.match(background, /cancelCompanionJob/);
+  assert.match(background, /ACTIVE_COMPANION_STATUSES = new Set\(\["created", "preparing", "submitting", "queued", "running"\]\)/);
+  assert.match(background, /remote\.jobType === "subtitle"/);
+  assert.match(background, /source: subtitleJob \? "companion" : "youtube"/);
 });
 
 test("companion installers register both Chrome and Edge origins when supplied", async () => {

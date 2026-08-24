@@ -9,7 +9,7 @@ function json(data, status = 200) {
       "cache-control": "no-store",
       "access-control-allow-origin": "*",
       "access-control-allow-headers": "content-type, authorization, x-aura-audio-upload, x-aura-audio-bytes, x-aura-audio-source, x-aura-source-language, x-aura-title",
-      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
     },
   });
 }
@@ -92,6 +92,9 @@ function licenseExpired(record) {
 
 const asrRequestsByIp = new Map();
 const MAX_ASR_AUDIO_BYTES = 80 * 1024 * 1024;
+const ASR_JOB_ID_RE = /^[A-Za-z0-9._:-]{1,160}$/;
+const ASR_JOB_OWNER_PREFIX = "asr-job-owner:";
+const ASR_JOB_OWNER_TTL_SECONDS = 24 * 60 * 60;
 
 function asrRateLimited(request, limit = 12, windowMs = 60 * 60 * 1000) {
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
@@ -108,6 +111,7 @@ function asrRateLimited(request, limit = 12, windowMs = 60 * 60 * 1000) {
 
 function isSafeAsrUrl(value) {
   if (typeof value !== "string" || value.length < 1 || value.length > 4096) return false;
+  if (/[\u0000-\u0020\u007f]/.test(value)) return false;
   try {
     const parsed = new URL(value);
     if (!["http:", "https:"].includes(parsed.protocol)) return false;
@@ -133,12 +137,32 @@ async function approvedAsrLicense(env, value) {
   return key;
 }
 
+async function asrLicenseFingerprint(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function rememberAsrJobOwner(env, jobId, licenseKey) {
+  if (!ASR_JOB_ID_RE.test(jobId)) throw new Error("invalid-job-id");
+  await env.LICENSES.put(
+    `${ASR_JOB_OWNER_PREFIX}${jobId}`,
+    JSON.stringify({ owner: await asrLicenseFingerprint(licenseKey) }),
+    { expirationTtl: ASR_JOB_OWNER_TTL_SECONDS },
+  );
+}
+
+async function asrJobOwnedBy(env, jobId, licenseKey) {
+  const record = await readRecord(env, `${ASR_JOB_OWNER_PREFIX}${jobId}`);
+  if (typeof record?.owner !== "string") return false;
+  return timingSafeEqual(record.owner, await asrLicenseFingerprint(licenseKey));
+}
+
 function modalAsrUrl(env, path) {
   if (typeof env.MODAL_ASR_URL !== "string" || !isSafeAsrUrl(env.MODAL_ASR_URL)) return null;
   return `${env.MODAL_ASR_URL.replace(/\/+$/, "")}${path}`;
 }
 
-async function forwardModalJson(response) {
+async function forwardModalJson(response, onSuccess = null) {
   const text = await response.text().catch(() => "");
   let body = null;
   try {
@@ -148,6 +172,13 @@ async function forwardModalJson(response) {
   }
   if (!body || typeof body !== "object") {
     return json({ ok: false, error: response.ok ? "invalid-modal-response" : "modal-request-failed" }, response.ok ? 502 : response.status);
+  }
+  if (response.ok && body.ok !== false && typeof onSuccess === "function") {
+    try {
+      await onSuccess(body);
+    } catch {
+      return json({ ok: false, error: "asr-job-owner-unavailable" }, 503);
+    }
   }
   return json(body, response.status);
 }
@@ -188,14 +219,13 @@ export default {
         headers: {
           "access-control-allow-origin": "*",
           "access-control-allow-headers": "content-type, authorization, x-aura-audio-upload, x-aura-audio-bytes, x-aura-audio-source, x-aura-source-language, x-aura-title",
-          "access-control-allow-methods": "GET, POST, OPTIONS",
+          "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
         },
       });
     }
 
     if (path === "/api/subtitles" && request.method === "POST") {
       if (!env.MODAL_ASR_TOKEN) return json({ ok: false, error: "asr-not-configured" }, 503);
-      if (asrRateLimited(request)) return json({ ok: false, error: "rate-limited" }, 429);
       const audioUpload = request.headers.get("x-aura-audio-upload") === "1";
       if (audioUpload) {
         const authorization = request.headers.get("authorization") || "";
@@ -233,9 +263,11 @@ export default {
           return json({ ok: false, error: "subtitle-audio-too-large" }, 413);
         }
         if (!request.body) return json({ ok: false, error: "invalid-audio-upload" }, 400);
-        if (!await approvedAsrLicense(env, licenseKey)) {
+        const approvedKey = await approvedAsrLicense(env, licenseKey);
+        if (!approvedKey) {
           return json({ ok: false, error: "pro-license-required" }, 403);
         }
+        if (asrRateLimited(request)) return json({ ok: false, error: "rate-limited" }, 429);
         const endpoint = modalAsrUrl(env, "/submit-audio");
         if (!endpoint) return json({ ok: false, error: "asr-not-configured" }, 503);
         try {
@@ -251,7 +283,10 @@ export default {
             },
             body: request.body,
           });
-          return forwardModalJson(response);
+          return forwardModalJson(
+            response,
+            (modalBody) => rememberAsrJobOwner(env, modalBody.jobId, approvedKey),
+          );
         } catch {
           return json({ ok: false, error: "asr-upstream-unreachable" }, 502);
         }
@@ -268,9 +303,11 @@ export default {
       if (!["ja", "en"].includes(sourceLanguage)) {
         return json({ ok: false, error: "invalid-source-language" }, 400);
       }
-      if (!await approvedAsrLicense(env, body?.licenseKey)) {
+      const approvedKey = await approvedAsrLicense(env, body?.licenseKey);
+      if (!approvedKey) {
         return json({ ok: false, error: "pro-license-required" }, 403);
       }
+      if (asrRateLimited(request)) return json({ ok: false, error: "rate-limited" }, 429);
       const endpoint = modalAsrUrl(env, "/submit");
       if (!endpoint) return json({ ok: false, error: "asr-not-configured" }, 503);
       try {
@@ -282,7 +319,10 @@ export default {
           },
           body: JSON.stringify({ mediaUrl, sourceUrl, title, sourceLanguage }),
         });
-        return forwardModalJson(response);
+        return forwardModalJson(
+          response,
+          (modalBody) => rememberAsrJobOwner(env, modalBody.jobId, approvedKey),
+        );
       } catch {
         return json({ ok: false, error: "asr-upstream-unreachable" }, 502);
       }
@@ -290,12 +330,48 @@ export default {
 
     if (path === "/api/subtitles" && request.method === "GET") {
       if (!env.MODAL_ASR_TOKEN) return json({ ok: false, error: "asr-not-configured" }, 503);
+      const authorization = request.headers.get("authorization") || "";
+      const licenseKey = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+      const approvedKey = await approvedAsrLicense(env, licenseKey);
+      if (!approvedKey) {
+        return json({ ok: false, error: "unauthorized" }, 401);
+      }
       const jobId = url.searchParams.get("id") || "";
-      if (!/^[A-Za-z0-9._:-]{1,160}$/.test(jobId)) return json({ ok: false, error: "invalid-job-id" }, 400);
+      if (!ASR_JOB_ID_RE.test(jobId)) return json({ ok: false, error: "invalid-job-id" }, 400);
+      if (!await asrJobOwnedBy(env, jobId, approvedKey)) {
+        return json({ ok: false, error: "subtitle-job-not-owned" }, 403);
+      }
       const endpoint = modalAsrUrl(env, `/result/${encodeURIComponent(jobId)}`);
       if (!endpoint) return json({ ok: false, error: "asr-not-configured" }, 503);
       try {
         const response = await fetch(endpoint, {
+          headers: { authorization: `Bearer ${env.MODAL_ASR_TOKEN}` },
+        });
+        return forwardModalJson(response);
+      } catch {
+        return json({ ok: false, error: "asr-upstream-unreachable" }, 502);
+      }
+    }
+
+    if (path === "/api/subtitles" && request.method === "DELETE") {
+      if (!env.MODAL_ASR_TOKEN) return json({ ok: false, error: "asr-not-configured" }, 503);
+      const authorization = request.headers.get("authorization") || "";
+      const licenseKey = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+      const approvedKey = await approvedAsrLicense(env, licenseKey);
+      if (!approvedKey) {
+        return json({ ok: false, error: "unauthorized" }, 401);
+      }
+      const jobId = url.searchParams.get("id") || "";
+      if (!ASR_JOB_ID_RE.test(jobId)) return json({ ok: false, error: "invalid-job-id" }, 400);
+      if (!await asrJobOwnedBy(env, jobId, approvedKey)) {
+        return json({ ok: false, error: "subtitle-job-not-owned" }, 403);
+      }
+      if (asrRateLimited(request)) return json({ ok: false, error: "rate-limited" }, 429);
+      const endpoint = modalAsrUrl(env, `/cancel/${encodeURIComponent(jobId)}`);
+      if (!endpoint) return json({ ok: false, error: "asr-not-configured" }, 503);
+      try {
+        const response = await fetch(endpoint, {
+          method: "DELETE",
           headers: { authorization: `Bearer ${env.MODAL_ASR_TOKEN}` },
         });
         return forwardModalJson(response);
@@ -458,6 +534,7 @@ export default {
         const listing = await env.LICENSES.list();
         const keys = [];
         for (const item of listing.keys) {
+          if (!isValidLicenseKey(item.name)) continue;
           const record = await readRecord(env, item.name);
           keys.push({ key: item.name, ...(record || {}) });
         }

@@ -1,4 +1,5 @@
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const JOB_SOURCES = new Set(["media", "youtube", "companion"]);
 
 function safeText(value, fallback = "") {
   return typeof value === "string" ? value.slice(0, 500) : fallback;
@@ -21,7 +22,7 @@ export function createDownloadJob({
     title: safeText(title, "미디어 다운로드"),
     mediaType: safeText(mediaType, "UNKNOWN"),
     candidateId: safeText(candidateId),
-    source: source === "youtube" ? "youtube" : "media",
+    source: JOB_SOURCES.has(source) ? source : "media",
     status: "queued",
     statusText: "다운로드 대기 중…",
     error: "",

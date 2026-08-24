@@ -4,15 +4,31 @@ import { readFile } from "node:fs/promises";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
-test("companion jobs are detached from both the native bridge and progress window", async () => {
+test("companion jobs are detached from the native bridge", async () => {
   const source = await read("./native-host/src/main.rs");
+  // A submitted job runs in its own process so the transfer survives the
+  // browser closing the native messaging port.
   assert.match(source, /spawn_detached\(&\["--run-job", &request_path_text\]\)/);
-  assert.match(source, /spawn_detached\(&\["--job-ui", &request\.job_id\]\)/);
   assert.match(source, /Some\("--run-job"\)/);
   assert.match(source, /execute_download\(request, \|_\| \{\}\)/);
-  assert.match(source, /Some\("--job-ui"\)/);
   assert.match(source, /read_job_state/);
-  assert.doesNotMatch(source, /run_job_ui\(move \|notify\| execute_download/);
+});
+
+test("the per-job Win32 progress window is gone and the manager binary owns the UI", async () => {
+  const source = await read("./native-host/src/main.rs");
+  // Progress used to open a throwaway Win32 window per job. The manager window
+  // in `companion-gui` replaced it, so the host must carry no window code and
+  // must not spawn a per-job UI process.
+  assert.doesNotMatch(source, /--job-ui/);
+  assert.doesNotMatch(source, /mod windows_ui/);
+  assert.doesNotMatch(source, /run_job_ui/);
+  assert.doesNotMatch(source, /CreateWindowExW/);
+
+  // `--manager` stays so an old Start Menu shortcut still opens the window, and
+  // it must resolve the separate binary rather than re-running the host.
+  assert.match(source, /Some\("--manager"\)/);
+  assert.match(source, /MANAGER_EXECUTABLE: &str = "aura-media-manager\.exe"/);
+  assert.match(source, /manager-not-installed/);
 });
 
 test("companion exposes persistent job recovery and cancellation to the extension", async () => {

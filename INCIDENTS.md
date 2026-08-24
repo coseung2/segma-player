@@ -285,3 +285,16 @@
 - Regression: 10 new tests in `avsee-title.test.mjs` prove the board title resolves to `MFC-361 さな - 사나`, that the document title is kept when no selector matches, that a repeated heading is not preferred, that selectors are published for the page and not for the CDN host, that the player frame is recognised, and that `content.js` hardcodes no site selectors. A new site regression fixture covers the progressive candidate inside the player frame. Full `npm test`: 503/503 pass, 0 fail.
 - Staging version: `0.4.0`; `npm run build:dev-staging` returned `DEV_STAGING_OK` for Pro with 88 files. The `0.3.98` and `0.3.99` staging builds are preserved alongside it.
 - Real-browser result: `LIVE-UNVERIFIED`; reload `0.4.0`, replay the exact URL, and confirm the job and saved filename carry `MFC-361 さな - 사나`. Detect, playback, progressive-probe, extension-download, subtitle, and overlay remain separate surfaces; Whale is not tested. Only this one AVsee layout was inspected, so other board tables may use a different heading element.
+
+### INC-2026-08-24-019 Legacy per-job Win32 progress window removed
+
+- Status: `RESOLVED`
+- Reproduction: not a user-visible defect. After INC-2026-08-24-016 moved the manager window into `companion-gui`, the host still carried the older per-job Win32 progress window and spawned one process per submitted job.
+- Browser and affected surface: Companion host process lifecycle. No browser or site path is involved.
+- Live evidence: `native-host/src/main.rs` still contained `mod windows_ui` with its own `RegisterClassW`/`CreateWindowExW` message loop, `spawn_job_runner` still ran `spawn_detached(["--job-ui", job_id])`, and `main` still routed `--job-ui`. Two dead-code warnings (`set_status`, `close_later`) came from that module.
+- Confirmed root cause: the legacy window was left in place during the manager-window migration, so every download opened an extra throwaway window process whose state now duplicates the manager's job list.
+- Code action in `0.4.1`: delete the `windows_ui` module, the `--job-ui` argument arm, and the per-job UI spawn; drop the now-unused `c_void` import. `--manager` is retained so an existing Start Menu shortcut still opens the window through `aura-media-manager.exe`.
+- Changed files: `native-host/src/main.rs`, `companion-architecture.test.mjs`, `manifest.json`, generated development staging files, and this incident record.
+- Regression: the architecture test was split. One case still pins job detachment (`--run-job` in its own process), and a new case asserts the host carries no `--job-ui`, no `mod windows_ui`, no `run_job_ui`, and no `CreateWindowExW`, while `--manager` still resolves `aura-media-manager.exe`. `native-host` builds warning-free with 30 tests passing. Full `npm test`: 504/504 pass.
+- Staging version: `0.4.1`; installer rebuilt at `dist/Aura-Media-Companion-0.4.1-win-x64.exe` and installed. Installed and built binaries match by SHA-256 for both the host and the manager.
+- Real-browser result: `RESOLVED` for removal. The window was launched from the installed path and opened with no network listener. Per-job progress now appears only in the manager window, which is `LIVE-UNVERIFIED` for a real download because no job was run after this install.

@@ -58,6 +58,38 @@
     }
   }
 
+  // Some pages keep only a short board code in `<title>` and the real media
+  // title in the body. Read-only DOM selectors are supplied per site by the
+  // background, which owns the site registry; the content script never decides
+  // which site it is on.
+  let titleSelectors = [];
+
+  function documentTitle() {
+    return [...document.title].slice(0, MAX_TITLE_CHARACTERS).join("");
+  }
+
+  function selectorTitle() {
+    for (const selector of titleSelectors) {
+      let element = null;
+      try {
+        element = document.querySelector(selector);
+      } catch {
+        continue;
+      }
+      const text = String(element?.textContent || "").replace(/\s+/g, " ").trim();
+      // A heading that merely repeats the document title adds nothing, so keep
+      // looking for one that is actually more specific.
+      if (text && text !== documentTitle().trim()) {
+        return [...text].slice(0, MAX_TITLE_CHARACTERS).join("");
+      }
+    }
+    return "";
+  }
+
+  function resolvedPageTitle() {
+    return selectorTitle() || documentTitle();
+  }
+
   function clearDoodRetry() {
     doodRetryAfter = 0;
     doodRetryAttempts = 0;
@@ -141,7 +173,7 @@
       confidence,
       observedAt,
       frameUrl: currentFrameUrl(),
-      pageTitle: [...document.title].slice(0, MAX_TITLE_CHARACTERS).join(""),
+      pageTitle: resolvedPageTitle(),
     };
     rememberReport(record);
     send(record);
@@ -602,6 +634,20 @@
     }
     if (message?.type === "rescan") {
       scheduleScan(true);
+      return false;
+    }
+    // The background owns the site registry, so it tells this frame where the
+    // page keeps its real media title. Applying it triggers a rescan so an
+    // already-reported candidate gets the corrected title.
+    if (message?.type === "set-title-selectors") {
+      titleSelectors = Array.isArray(message.selectors)
+        ? message.selectors
+          .map((selector) => String(selector || "").trim())
+          .filter((selector) => selector.length > 0 && selector.length <= 200)
+          .slice(0, 8)
+        : [];
+      scheduleScan(true);
+      sendResponse({ ok: true, applied: titleSelectors.length });
       return false;
     }
     if (handleRefreshMediaSource(message, sendResponse)) return true;

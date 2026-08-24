@@ -94,6 +94,7 @@ import {
   createMediaRequestDiagnosticStore,
   resolveMediaRequestContext,
 } from "./media-request-context.js";
+import { isPlayerFrameUrl, titleSelectorsForPage } from "./sites/registry.js";
 
 const candidates = new Map();
 const PROGRESSIVE_REDIRECT_TARGET_LIMIT = 1000;
@@ -1474,11 +1475,30 @@ function rerankTabCandidates(tabId) {
 
 function observeCandidate(candidate, { nonPersistent = false } = {}) {
   if (!candidate || isYouTubeDetectionCandidate(candidate)) return null;
+  void applyTitleSelectors(candidate);
   const stored = upsertCandidate(candidates, candidate, LIMITS.candidates);
   if (nonPersistent || stored.tokenized || playerCandidateHasQuery(stored)) nonPersistentCandidates.add(stored);
   if (Number.isInteger(stored.tabId)) rerankTabCandidates(stored.tabId);
   persistCandidates();
   return stored;
+}
+
+// Sites whose real media title is not in `<title>` declare selectors in their
+// profile. The background owns the registry, so it pushes them to the reporting
+// frame once per tab and the content script re-reports with the better title.
+const titleSelectorTabs = new Map();
+
+async function applyTitleSelectors(candidate) {
+  const tabId = candidate?.tabId;
+  if (!Number.isInteger(tabId) || tabId <= 0) return;
+  const selectors = titleSelectorsForPage(candidate?.pageUrl, candidate?.siteUrl);
+  if (!selectors.length) return;
+
+  const signature = `${candidate.siteUrl || candidate.pageUrl || ""}|${selectors.join(",")}`;
+  if (titleSelectorTabs.get(tabId) === signature) return;
+  titleSelectorTabs.set(tabId, signature);
+
+  await sendTabMessageWithTimeout(tabId, { type: "set-title-selectors", selectors }, 2_000);
 }
 
 function persistCandidates() {
@@ -2648,7 +2668,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!sender.tab?.url || sender.id !== chrome.runtime.id) return false;
   const sanitized = sanitizePageMessage({
     ...message,
-    pageTitle: message.pageTitle || sender.tab.title || "",
+    // A player iframe has its own unrelated `<title>`, so prefer the tab's
+    // title for a candidate reported from inside one. Without this the job is
+    // named after the player instead of the video.
+    pageTitle: isPlayerFrameUrl(sender.url)
+      ? sender.tab.title || message.pageTitle || ""
+      : message.pageTitle || sender.tab.title || "",
     siteUrl: canonicalHttpUrl(sender.tab.url)?.href || "",
     pageUrl: canonicalHttpUrl(sender.url)?.href
       || (typeof message.frameUrl === "string" ? canonicalHttpUrl(message.frameUrl)?.href : null)

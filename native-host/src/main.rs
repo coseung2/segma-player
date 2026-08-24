@@ -2538,6 +2538,12 @@ fn manager_executable() -> io::Result<PathBuf> {
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no install directory"))?;
+    manager_executable_in(&directory)
+}
+
+/// Split out so the host-only install case is testable without a real install.
+#[cfg(target_os = "windows")]
+fn manager_executable_in(directory: &Path) -> io::Result<PathBuf> {
     let path = directory.join(MANAGER_EXECUTABLE);
     if path.is_file() {
         return Ok(path);
@@ -2712,7 +2718,24 @@ fn run_native_host() {
             },
             "show-ui" => match spawn_manager() {
                 Ok(()) => reply(&request, json!({ "ok": true })),
-                Err(error) => reply(&request, json!({ "ok": false, "error": error.to_string() })),
+                // A host-only install has no window binary. Report that
+                // explicitly instead of letting the click do nothing.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => reply(
+                    &request,
+                    json!({
+                        "ok": false,
+                        "errorCode": "manager-not-installed",
+                        "error": "Aura Media Companion 창 실행 파일이 없습니다. 컴패니언을 다시 설치하세요."
+                    }),
+                ),
+                Err(error) => reply(
+                    &request,
+                    json!({
+                        "ok": false,
+                        "errorCode": "manager-launch-failed",
+                        "error": error.to_string()
+                    }),
+                ),
             },
             "open-folder" => match open_download_folder() {
                 Ok(()) => reply(&request, json!({ "ok": true })),
@@ -3987,5 +4010,29 @@ mod tests {
                 "capability {capability} is missing from the hello reply"
             );
         }
+    }
+
+    #[test]
+    fn a_host_only_install_reports_that_the_window_binary_is_missing() {
+        // The window lives in a separate binary now. When only the host is
+        // installed, `show-ui` must say so rather than appearing to do nothing.
+        let directory = test_directory();
+        fs::create_dir_all(&directory).expect("directory creates");
+        assert!(
+            !directory.join(MANAGER_EXECUTABLE).exists(),
+            "the fixture must not contain a manager binary"
+        );
+
+        let error = manager_executable_in(&directory).expect_err("resolution fails");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.to_string(), "manager-not-installed");
+
+        fs::write(directory.join(MANAGER_EXECUTABLE), b"stub").expect("stub writes");
+        assert_eq!(
+            manager_executable_in(&directory).expect("resolution succeeds"),
+            directory.join(MANAGER_EXECUTABLE)
+        );
+
+        fs::remove_dir_all(directory).expect("test directory removes");
     }
 }

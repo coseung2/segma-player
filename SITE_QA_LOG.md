@@ -587,3 +587,18 @@ The av19 result is a confirmed current live detection regression and remains the
 - Confirmed code failure: completed subtitle output attempted only the File System Access subtitle folder and never used the installed Companion native writer
 - Evidence: `C:\Users\coseung2\AppData\Local\Temp\aura-subtitle-companion\tabs.json`, `page-diagnostics.json`, user report, and the verified `download-worker.js` save path
 - Code/version action: fix candidate `0.3.96` makes Companion the first SRT/media destination and reuses the generated subtitle cache; post-reload subtitle save remains `NOT_RUN`
+
+### 2026-08-24 — AVsee board job title used the board code only (INC-2026-08-24-018)
+
+- Browser/channel: `NOT_RUN` in a browser for this entry; page structure was verified by direct server fetch. Whale was not used
+- Extension version: `0.3.99` as reported by the user; fix candidate is `0.4.0`
+- Site URL / ID: `https://01.avsee.is/bbs/board.php?bo_table=javmgs&wr_id=90512`, site id `avsee`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Detect: `PASS` by direct user report — the download started, so the progressive candidate was found
+- Job naming: `FAIL` by direct user report — the job was named `MFC-361` instead of `MFC-361 さな - 사나`
+- Playback / progressive-probe / extension-download / subtitle / overlay: `NOT_RUN` for this naming issue
+- Live diagnostic: the served page has `<title>MFC-361</title>` and the same `og:title`, while the full title is the first `h2` inside `div.view-content`. The player is a same-origin iframe at `/player/player.php?720=http://cdn.apiavsee.com/h/2026/08/19/MFC-361.mp4`, and fetching that iframe returns `<title>AVseeTV player</title>`
+- Confirmed code failure: `content.js` reported `document.title` unconditionally, and a candidate detected inside the player iframe reported the iframe's own generic title because the frame-supplied title outranked the tab title
+- Evidence: direct `Invoke-WebRequest` fetches of the board page and the player iframe on 2026-08-24; deterministic fixtures in `sites/avsee/regressions.js`
+- Code/version action: `0.4.0` adds an `avsee` site profile with verified read-only title selectors, pushes them from the background to the reporting frame, and prefers the tab title for a player-frame candidate. Post-reload job naming in a real browser remains `NOT_RUN`
+- Scope limit: only the `javmgs` board layout was inspected. Other AVsee board tables may use a different heading element and are `NOT_RUN`

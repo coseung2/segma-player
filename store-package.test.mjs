@@ -84,6 +84,7 @@ const expectedFiles = [
   "providers/signals.js",
   "sites/asianporn/profile.js",
   "sites/av19/profile.js",
+  "sites/avsee/profile.js",
   "sites/beeg/profile.js",
   "sites/dood/profile.js",
   "sites/missav/profile.js",

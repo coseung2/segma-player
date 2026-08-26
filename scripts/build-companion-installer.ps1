@@ -52,6 +52,7 @@ if ([string]::IsNullOrWhiteSpace($AllowedExtensionIds)) {
 
 $required = @(
   (Join-Path $ToolsDirectory 'ffmpeg\ffmpeg.exe'),
+  (Join-Path $ToolsDirectory 'mpv\mpv.exe'),
   (Join-Path $ToolsDirectory 'yt-dlp.exe'),
   (Join-Path $ToolsDirectory 'node.exe'),
   (Join-Path $ToolsDirectory 'THIRD_PARTY_NOTICES.txt')
@@ -60,6 +61,29 @@ foreach ($path in $required) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
     throw "Required redistributable companion file is missing: $path"
   }
+}
+$thirdPartyNotices = Get-Content -LiteralPath (Join-Path $ToolsDirectory 'THIRD_PARTY_NOTICES.txt') -Raw -Encoding UTF8
+if ($thirdPartyNotices -notmatch '(?im)^mpv\b') {
+  throw 'THIRD_PARTY_NOTICES.txt must include the bundled mpv build and license notice.'
+}
+
+# YouTube began requiring a GVS PO token for the android_vr high-quality
+# streams that older yt-dlp builds still selected. 2026.08.19 switches the
+# tokenless default to a viable client; reject stale redistributable toolsets
+# so a new Companion installer cannot silently reintroduce HTTP 403 failures.
+$MinimumYtDlpVersion = [version]'2026.8.19'
+$ytDlpPath = Join-Path $ToolsDirectory 'yt-dlp.exe'
+$ytDlpVersionText = [string](& $ytDlpPath --version 2>&1 | Select-Object -First 1)
+# The Windows standalone build can leave PowerShell's LASTEXITCODE at -1 when
+# its stdout is captured even though it emitted a valid version. Validate the
+# release identifier itself instead of treating that wrapper artifact as a
+# failed executable.
+if ($ytDlpVersionText.Trim() -notmatch '^\d{4}\.\d{1,2}\.\d{1,2}$') {
+  throw "Bundled yt-dlp did not report a valid release version: $ytDlpVersionText"
+}
+$ytDlpVersion = [version]$ytDlpVersionText.Trim()
+if ($ytDlpVersion -lt $MinimumYtDlpVersion) {
+  throw "Bundled yt-dlp $ytDlpVersion is too old; Companion requires $MinimumYtDlpVersion or newer."
 }
 
 & cargo build --release --manifest-path (Join-Path $ProjectRoot 'native-host\Cargo.toml')

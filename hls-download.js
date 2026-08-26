@@ -38,7 +38,8 @@ const PRO_HLS_DOWNLOAD_CONCURRENCY = 10;
 const CHECKPOINT_SEGMENT_INTERVAL = 48;
 const CHECKPOINT_BYTE_INTERVAL = 48 * 1024 * 1024;
 const SEGMENT_RETRY_DELAYS_MS = [0, 400, 1200];
-const SEGMENT_RETRY_STATUSES = new Set([403, 408, 425, 429, 500, 502, 503, 504]);
+const SEGMENT_RETRY_STATUSES = new Set([403, 404, 408, 410, 422, 425, 429, 500, 502, 503, 504]);
+const HLS_REFRESH_STATUSES = new Set([401, 403, 404, 410, 422]);
 export const MAX_SUBTITLE_AUDIO_UPLOAD_BYTES = 80 * 1024 * 1024;
 const CURRENT_PLAN = productPlan(PRODUCT_EDITION);
 let activePlan = CURRENT_PLAN;
@@ -58,6 +59,7 @@ export function hlsDownloadConcurrencyForPlan(plan = activePlan) {
 }
 
 export function createDownloadContext({
+  jobId = null,
   onStatus = null,
   frameId = null,
   tabId = null,
@@ -70,6 +72,7 @@ export function createDownloadContext({
   consumer = "download-media",
 } = {}) {
   return {
+    jobId: typeof jobId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(jobId) ? jobId : null,
     onStatus: typeof onStatus === "function" ? onStatus : null,
     pauseGate: typeof pauseGate === "function" ? pauseGate : null,
     paceBytes: typeof paceBytes === "function" ? paceBytes : null,
@@ -492,7 +495,7 @@ async function fetchArrayBuffer(url, referrer, label, context = defaultDownloadC
 }
 
 function refreshableHttpFailure(error) {
-  return error?.httpStatus === 401 || error?.httpStatus === 403;
+  return HLS_REFRESH_STATUSES.has(error?.httpStatus);
 }
 
 async function requestFreshDownloadCandidate(context = defaultDownloadContext) {
@@ -518,17 +521,23 @@ function sameHlsShape(current, fresh) {
   if (!Array.isArray(current?.segments) || !Array.isArray(fresh?.segments)
     || current.segments.length !== fresh.segments.length || current.segments.length === 0) return false;
   if (Number(current.mediaSequence || 0) !== Number(fresh.mediaSequence || 0)) return false;
-  let matchingPaths = 0;
+  let matchingSegmentNames = 0;
   for (let index = 0; index < current.segments.length; index += 1) {
     try {
       const left = new URL(current.segments[index]);
       const right = new URL(fresh.segments[index]);
-      if (left.pathname === right.pathname) matchingPaths += 1;
+      const leftName = left.pathname.split("/").filter(Boolean).at(-1) || "";
+      const rightName = right.pathname.split("/").filter(Boolean).at(-1) || "";
+      if (leftName && leftName === rightName) matchingSegmentNames += 1;
     } catch {
       return false;
     }
   }
-  return matchingPaths >= Math.max(1, Math.floor(current.segments.length * 0.8));
+  // Archive CDNs may rotate the generation directory while retaining the
+  // playlist sequence and ordered segment names. Matching only the complete
+  // path would reject that legitimate refresh even though the media shape is
+  // unchanged.
+  return matchingSegmentNames >= Math.max(1, Math.ceil(current.segments.length * 0.8));
 }
 
 async function refreshHlsMedia(media, referrer, videoTabId, context = defaultDownloadContext) {
@@ -1130,6 +1139,7 @@ async function prepareProgressiveFetch(session, context = defaultDownloadContext
   const policy = downloadPolicyForCandidate(context.candidate, session.url);
   if (!session.authenticatedProbeRequired) {
     if (policy.preferSourceFrameProgressive
+      && !(policy.preferParallelProgressiveWhenRangeSupported && context.rangeSupported)
       && Number.isInteger(context.tabId) && Number.isInteger(context.frameId)) {
       return {
         ...session,
@@ -1283,6 +1293,18 @@ async function streamFetchToWritable(url, referrer, writable, onProgress, contex
   return totalBytes;
 }
 
+function nativeWriterMetadata(filename, context = defaultDownloadContext) {
+  const candidate = context.candidate || {};
+  const title = String(candidate.pageTitle || filename || "미디어 다운로드").trim();
+  return {
+    jobId: context.jobId,
+    title,
+    inputKind: candidate.mediaType || "MEDIA",
+    total: context.totalBytes,
+    showUi: false,
+  };
+}
+
 async function parallelFetchToWritable(
   url,
   filename,
@@ -1317,42 +1339,59 @@ async function parallelFetchToWritable(
 
 async function saveProgressiveWithCompanion(session, filename, pageUrl, context, checkpointKey = null) {
   const referrer = referrerFor(session.url, session.referrer || pageUrl, context);
+  const checkpoint = checkpointKey ? await getDownloadCheckpoint(checkpointKey, "main") : null;
   let writer = null;
-  if (context.rangeSupported) {
-    try {
-      writer = await createNativeFileWriter(filename);
-      const result = await parallelFetchToWritable(
+  let lastCheckpointBytes = checkpoint?.bytesWritten || 0;
+  const persistCheckpoint = async (bytesWritten, force = false) => {
+    if (!checkpointKey || !writer?.name) return;
+    if (!force && bytesWritten - lastCheckpointBytes < 8 * 1024 * 1024) return;
+    lastCheckpointBytes = bytesWritten;
+    await setDownloadCheckpoint(checkpointKey, "main", {
+      filename: writer.name,
+      bytesWritten,
+      resumeFromSegment: 0,
+    });
+  };
+  try {
+    writer = await createNativeFileWriter(filename, {
+      ...nativeWriterMetadata(filename, context),
+      resumeFileName: checkpoint?.filename || "",
+      resumeFrom: checkpoint?.bytesWritten || 0,
+      onCommitted: (bytesWritten) => persistCheckpoint(bytesWritten),
+    });
+    await persistCheckpoint(writer.committedBytes, true);
+    const result = context.rangeSupported
+      ? await parallelFetchToWritable(
         session.url,
         filename,
         referrer,
         writer,
         context,
-        0,
+        writer.committedBytes,
+      )
+      : await streamFetchToWritable(
+        session.url,
+        referrer,
+        writer,
+        (value) => setStatus(saveProgressText(value, context.totalBytes), false, context),
+        context,
+        writer.committedBytes,
       );
-      if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
-      return { bytes: result.bytes, native: true };
-    } catch (error) {
-      const opened = Boolean(writer);
-      try { await writer?.abort(); } catch { /* best effort */ }
-      writer = null;
-      if (!opened || context.signal?.aborted) throw error;
-    }
-  }
-  try {
-    writer = await createNativeFileWriter(filename);
-    const bytes = await streamFetchToWritable(
-      session.url,
-      referrer,
-      writer,
-      (value) => setStatus(saveProgressText(value, context.totalBytes), false, context),
-      context,
-      0,
-    );
     await writer.close();
     if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
-    return { bytes, native: true };
+    const bytes = Number.isFinite(result?.bytes) ? result.bytes : result;
+    return { bytes, native: true, resumed: Boolean(checkpoint) };
   } catch (error) {
-    try { await writer?.abort(); } catch { /* best effort */ }
+    if (context.signal?.aborted || error?.code === "download-cancelled") {
+      try { await writer?.abort(); } catch { /* best effort */ }
+      if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, "main");
+      throw error;
+    }
+    if (writer) {
+      const committedBytes = await writer.suspend();
+      await persistCheckpoint(committedBytes, true);
+      error.resumable = committedBytes > 0;
+    }
     throw error;
   }
 }
@@ -1389,6 +1428,7 @@ async function saveProgressive(
     return await saveProgressiveWithCompanion(session, filename, pageUrl, context, checkpointKey);
   } catch (error) {
     if (context.signal?.aborted) throw error;
+    if (error?.resumable) throw error;
     companionError = error;
   }
 
@@ -1524,23 +1564,69 @@ async function saveProgressive(
   }
 }
 
-async function saveHlsWithCompanion(media, filename, referrer, videoTabId, context) {
+async function saveHlsWithCompanion(
+  media,
+  filename,
+  referrer,
+  videoTabId,
+  context,
+  checkpointKey = null,
+  scope = "main",
+) {
+  const checkpoint = checkpointKey ? await getDownloadCheckpoint(checkpointKey, scope) : null;
   let writer = null;
-  let bytes = 0;
-  let count = 0;
+  let bytes = checkpoint?.bytesWritten || 0;
+  let count = checkpoint?.resumeFromSegment || 0;
+  let segmentsSinceCheckpoint = 0;
+  let lastCheckpointBytes = bytes;
+  const persistCheckpoint = async (force = false) => {
+    if (!checkpointKey || !writer?.name) return;
+    if (!force && segmentsSinceCheckpoint < CHECKPOINT_SEGMENT_INTERVAL
+      && bytes - lastCheckpointBytes < CHECKPOINT_BYTE_INTERVAL) return;
+    await setDownloadCheckpoint(checkpointKey, scope, {
+      filename: writer.name,
+      bytesWritten: bytes,
+      resumeFromSegment: count,
+    });
+    segmentsSinceCheckpoint = 0;
+    lastCheckpointBytes = bytes;
+  };
   try {
-    writer = await createNativeFileWriter(filename);
-    for await (const chunk of mediaChunks(media, referrer, videoTabId, context)) {
+    writer = await createNativeFileWriter(filename, {
+      ...nativeWriterMetadata(filename, context),
+      resumeFileName: checkpoint?.filename || "",
+      resumeFrom: checkpoint?.bytesWritten || 0,
+    });
+    bytes = writer.committedBytes;
+    await persistCheckpoint(true);
+    let expectingInit = count === 0 && Boolean(media.initUrl);
+    for await (const chunk of mediaChunks(media, referrer, videoTabId, context, {
+      resumeFromSegment: count,
+      startingBytes: bytes,
+    })) {
       await writeChunk(writer, chunk);
-      bytes += chunk.byteLength;
-      count += 1;
+      bytes = writer.committedBytes;
+      if (expectingInit) expectingInit = false;
+      else count += 1;
+      segmentsSinceCheckpoint += 1;
+      await persistCheckpoint();
       setStatus(saveProgressText(bytes, context.totalBytes), false, context);
     }
     if (bytes === 0) throw new Error("저장된 파일이 비어 있습니다. 주소가 만료되었거나 접근 권한이 필요할 수 있습니다.");
     await writer.close();
-    return { count, native: true };
+    if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, scope);
+    return { count, native: true, resumed: Boolean(checkpoint) };
   } catch (error) {
-    try { await writer?.abort(); } catch { /* best effort */ }
+    if (context.signal?.aborted || error?.code === "download-cancelled") {
+      try { await writer?.abort(); } catch { /* best effort */ }
+      if (checkpointKey) await clearDownloadCheckpoint(checkpointKey, scope);
+      throw error;
+    }
+    if (writer) {
+      bytes = await writer.suspend();
+      await persistCheckpoint(true);
+      error.resumable = bytes > 0;
+    }
     throw error;
   }
 }
@@ -1557,9 +1643,18 @@ async function saveHlsToNative(
 ) {
   let companionError = null;
   try {
-    return await saveHlsWithCompanion(media, filename, referrer, videoTabId, context);
+    return await saveHlsWithCompanion(
+      media,
+      filename,
+      referrer,
+      videoTabId,
+      context,
+      checkpointKey,
+      scope,
+    );
   } catch (error) {
     if (context.signal?.aborted) throw error;
+    if (error?.resumable) throw error;
     companionError = error;
   }
   const saveHandle = dirHandle || await getStoredSaveDirectory();
@@ -1705,6 +1800,7 @@ const downloaderRegistry = createDownloaderRegistry({
 });
 
 export async function prepareDownloadCandidate(candidate, {
+  jobId = null,
   onStatus = null,
   pauseGate = null,
   paceBytes = null,
@@ -1714,6 +1810,7 @@ export async function prepareDownloadCandidate(candidate, {
     throw new Error("다운로드 후보가 올바르지 않습니다.");
   }
   const context = createDownloadContext({
+    jobId,
     onStatus,
     pauseGate,
     paceBytes: paceBytes || createSpeedGate(activePlan.downloadSpeedLimitBytesPerSecond),

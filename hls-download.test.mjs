@@ -24,6 +24,7 @@ const {
 test("Companion progressive saves use bounded Range requests when the server supports them", async () => {
   globalThis.btoa ||= (value) => Buffer.from(value, "binary").toString("base64");
   const nativeMessages = [];
+  const nativeEnvelopes = [];
   const ranges = [];
   let nativeMessageListener = null;
   const nativePort = {
@@ -31,6 +32,7 @@ test("Companion progressive saves use bounded Range requests when the server sup
     onDisconnect: { addListener() {} },
     postMessage(message) {
       nativeMessages.push(message.type);
+      nativeEnvelopes.push(message);
       queueMicrotask(() => nativeMessageListener?.({
         jobId: message.jobId,
         status: "ok",
@@ -65,6 +67,7 @@ test("Companion progressive saves use bounded Range requests when the server sup
     });
   };
   const context = createDownloadContext({
+    jobId: "extension-job-42",
     totalBytes,
     tabId: 17,
     frameId: 4,
@@ -95,9 +98,13 @@ test("Companion progressive saves use bounded Range requests when the server sup
     },
     selectedFolder,
   );
-  assert.deepEqual(result, { bytes: totalBytes, native: true });
+  assert.deepEqual(result, { bytes: totalBytes, native: true, resumed: false });
   assert.deepEqual(ranges, [`bytes=0-${totalBytes - 1}`]);
   assert.equal(nativeMessages[0], "media-open");
+  assert.equal(nativeEnvelopes[0].jobId, "extension-job-42");
+  assert.equal(nativeEnvelopes[0].inputKind, "PROGRESSIVE");
+  assert.equal(nativeEnvelopes[0].total, totalBytes);
+  assert.equal(nativeEnvelopes[0].showUi, false);
   assert.equal(nativeMessages.at(-1), "media-close");
   assert.ok(nativeMessages.includes("media-chunk"));
   assert.equal(selectedFolderQueries, 0);
@@ -229,6 +236,92 @@ test("Dood progressive candidates prefer the authenticated source frame", async 
   );
   assert.equal(session.sourceFrameFallbackPreferred, true);
   assert.equal(session.sourceFrameFallbackReason, "authenticated-source-frame");
+});
+
+test("Dood progressive candidates keep the parallel Companion path when Range is supported", async () => {
+  const context = createDownloadContext({
+    tabId: 21,
+    frameId: 7,
+    candidate: {
+      mediaType: "PROGRESSIVE",
+      downloadMode: "DIRECT_PROGRESSIVE",
+      pageUrl: "https://playmogo.com/e/example",
+      resourceUrl: "https://asw188q.cloudatacdn.com/video.mp4",
+      player: "video.js",
+    },
+  });
+  context.rangeSupported = true;
+  const session = await prepareProgressiveFetch(
+    {
+      url: "https://asw188q.cloudatacdn.com/video.mp4",
+      referrer: "https://playmogo.com/e/example",
+      authenticatedProbeRequired: false,
+    },
+    context,
+  );
+  assert.equal(session.sourceFrameFallbackPreferred, undefined);
+});
+
+test("Dood preparation upgrades a successful Range probe from source-frame fallback to parallel saving", async () => {
+  const posted = [];
+  globalThis.chrome = {
+    runtime: {
+      connect: () => {
+        const port = {
+          onDisconnect: { addListener() {} },
+          onMessage: { addListener(listener) { port.listener = listener; } },
+          postMessage(message) {
+            posted.push(message);
+            if (message.type === "start") queueMicrotask(() => port.listener?.({
+              type: "fetch-required",
+              url: "https://asw188q.cloudatacdn.com/video.mp4",
+              referrer: "https://playmogo.com/e/example",
+              videoFrameId: 7,
+              authenticatedProbeRequired: false,
+            }));
+          },
+          disconnect() {},
+        };
+        return port;
+      },
+      sendMessage: async (message) => {
+        if (message.type === "get-request-headers") return { ok: true, headers: {} };
+        if (message.type === "ensure-media-routes") return { ok: true };
+        if (message.type === "prepare-media-fetch") return { ok: true, leaseId: "lease-jamak-range" };
+        if (message.type === "release-media-fetch") return { ok: true };
+        throw new Error(`unexpected runtime message: ${message.type}`);
+      },
+    },
+  };
+  globalThis.fetch = async () => new Response(new Uint8Array([0]), {
+    status: 206,
+    headers: {
+      "content-range": "bytes 0-0/780363155",
+      "content-type": "video/mp4",
+    },
+  });
+  try {
+    const prepared = await prepareDownloadCandidate({
+      id: "jamak-dood-range",
+      resourceUrl: "https://asw188q.cloudatacdn.com/video.mp4",
+      pageUrl: "https://playmogo.com/e/example",
+      pageTitle: "FC2-PPV-2594710",
+      tabId: 21,
+      frameId: 7,
+      mediaType: "PROGRESSIVE",
+      downloadMode: "DIRECT_PROGRESSIVE",
+      providerId: "dood",
+      siteId: "playmogo",
+      player: "video.js",
+    });
+    assert.equal(posted[0].type, "start");
+    assert.equal(prepared.context.rangeSupported, true);
+    assert.equal(prepared.context.totalBytes, 780363155);
+    assert.equal(prepared.session.sourceFrameFallbackPreferred, false);
+  } finally {
+    delete globalThis.fetch;
+    delete globalThis.chrome;
+  }
 });
 
 test("loadMediaPlaylist accepts EXT-X-BYTERANGE playlists", async () => {
@@ -541,6 +634,91 @@ test("403 segment failures refresh the exact Level5 manifest from the source fra
     assert.equal(media.segments.every((url) => url.includes("token=fresh")), true);
     assert.equal(context.candidate.resourceUrl.includes("token=fresh"), true);
     assert.equal(requested.some((url) => url.includes("master.m3u8?token=fresh")), true);
+  } finally {
+    delete globalThis.fetch;
+    delete globalThis.chrome;
+  }
+});
+
+test("422 archive segment failures refresh the Recu HLS manifest and continue", async () => {
+  const requested = [];
+  let refreshRequests = 0;
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: async (message) => {
+        if (message.type === "ensure-media-routes") return { ok: true };
+        if (message.type === "prepare-media-fetch") return { ok: true, leaseId: crypto.randomUUID() };
+        if (message.type === "release-media-fetch" || message.type === "touch-media-fetch") return { ok: true };
+        if (message.type === "refresh-download-candidate") {
+          refreshRequests += 1;
+          return {
+            ok: true,
+            candidate: {
+              ...message.candidate,
+              resourceUrl: "https://f62.mediafront.net/hl/ellinrose/fresh/media.m3u8",
+              pageUrl: "https://recu.me/ellinrose/video/195409102/play",
+            },
+          };
+        }
+        return { ok: true };
+      },
+    },
+  };
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    requested.push(value);
+    if (value.endsWith("/fresh/media.m3u8")) {
+      return new Response(
+        "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\nseg-1-v1-a1.ts?fresh=1\n#EXTINF:4,\nseg-2-v1-a1.ts?fresh=1\n",
+        { status: 200, headers: { "content-type": "application/vnd.apple.mpegurl" } },
+      );
+    }
+    if (value.includes("/stale/")) return new Response(new Uint8Array(), { status: 422 });
+    if (value.includes("seg-1-v1-a1.ts?fresh=1")) return new Response(new Uint8Array([1]), { status: 200 });
+    if (value.includes("seg-2-v1-a1.ts?fresh=1")) return new Response(new Uint8Array([2]), { status: 200 });
+    throw new Error(`unexpected fetch: ${value}`);
+  };
+
+  try {
+    const candidate = {
+      id: "candidate-recu-archive",
+      siteId: "recu",
+      resourceUrl: "https://f62.mediafront.net/hl/ellinrose/stale/media.m3u8",
+      pageUrl: "https://recu.me/ellinrose/video/195409102/play",
+      pageTitle: "ellinrose archive",
+      tabId: 9,
+      frameId: 0,
+      mediaType: "HLS_MEDIA",
+    };
+    const media = {
+      initUrl: null,
+      initByterange: null,
+      segments: [
+        "https://f62.mediafront.net/hl/ellinrose/stale/seg-1-v1-a1.ts",
+        "https://f62.mediafront.net/hl/ellinrose/stale/seg-2-v1-a1.ts",
+      ],
+      keys: [],
+      variants: [],
+      mediaSequence: 1,
+      byteranges: [null, null],
+      baseUrl: candidate.resourceUrl,
+    };
+    const context = createDownloadContext({
+      tabId: candidate.tabId,
+      frameId: candidate.frameId,
+      candidate,
+      hlsConcurrency: 2,
+    });
+    const chunks = [];
+    for await (const chunk of mediaChunks(media, candidate.pageUrl, candidate.tabId, context)) {
+      chunks.push([...new Uint8Array(chunk)]);
+    }
+
+    assert.deepEqual(chunks, [[1], [2]]);
+    assert.equal(refreshRequests, 1);
+    assert.equal(media.segments.every((url) => url.includes("fresh=1")), true);
+    assert.equal(context.candidate.resourceUrl.endsWith("/fresh/media.m3u8"), true);
+    assert.equal(requested.some((url) => url.includes("/stale/seg-1-v1-a1.ts")), true);
   } finally {
     delete globalThis.fetch;
     delete globalThis.chrome;

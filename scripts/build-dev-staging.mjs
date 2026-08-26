@@ -6,33 +6,17 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = path.dirname(scriptDirectory);
 
 export const STORE_RUNTIME_FILES = Object.freeze([
-  "aes-cbc.js",
   "background.js",
-  "browser-download-monitor.js",
-  "companion-client.js",
   "candidate.js",
   "candidate-ranking.js",
+  "companion-client.js",
   "content.js",
-  "dash.js",
-  "download-checkpoint.js",
   "download-errors.js",
-  "download-job-view.js",
-  "download-jobs.js",
   "download-mode.js",
   "download-policy.js",
-  "downloaders/dash.js",
-  "downloaders/hls.js",
   "downloaders/ids.js",
-  "downloaders/progressive.js",
-  "downloaders/registry.js",
-  "download-scheduler.js",
-  "download-worker.html",
-  "download-worker.js",
   "download.js",
   "edition.js",
-  "filename-template.js",
-  "hls-download.js",
-  "hls.js",
   "i18n.js",
   "icons/icon16.png",
   "icons/icon32.png",
@@ -40,30 +24,16 @@ export const STORE_RUNTIME_FILES = Object.freeze([
   "icons/icon128.png",
   "level5-key-error.js",
   "level5-page-bridge.js",
-  "license.js",
   "manifest.json",
-  "media-fetch-lease.js",
   "media-request-context.js",
   "mobile-user-agent.js",
-  "native-file-writer.js",
   "options.html",
   "options.js",
   "page-media-observer.js",
-  "parallel-download.js",
-  "playback-session.js",
-  "player-subtitle.js",
   "player-page-resolver.js",
   "popup.css",
   "popup.html",
   "popup.js",
-  "product-plan.js",
-  "progressive-redirect.js",
-  "qr-code.js",
-  "request-header-store.js",
-  "save-directory.js",
-  "subtitle-folder.js",
-  "subtitle-generation.js",
-  "subtitle-save.js",
   "providers/dood.js",
   "providers/hlsjs.js",
   "providers/ids.js",
@@ -79,25 +49,15 @@ export const STORE_RUNTIME_FILES = Object.freeze([
   "sites/missav/profile.js",
   "sites/onlyjerk/profile.js",
   "sites/playmogo/profile.js",
+  "sites/recu/profile.js",
+  "sites/jamak/profile.js",
   "sites/shackledshow/profile.js",
   "sites/profile.js",
   "sites/registry.js",
   "sites/youtube/profile.js",
-  "worker-lifecycle.js",
-  "youtube-server.js",
 ].sort());
 
-export const DEV_EXTRA_FILES = Object.freeze([
-  "collection.js",
-  "contextual-hls-loader.js",
-  "hls-playback-recovery.js",
-  "playback-addon.js",
-  "player.html",
-  "player.js",
-  "popup-play.html",
-  "subtitle-folder.html",
-  "vendor/hls.min.mjs",
-].sort());
+export const DEV_EXTRA_FILES = Object.freeze([]);
 
 export const DEV_STAGING_FILES = Object.freeze(
   [...new Set([...STORE_RUNTIME_FILES, ...DEV_EXTRA_FILES])].sort(),
@@ -217,12 +177,9 @@ async function listFiles(directory, prefix = "") {
 function expectedStorePermissions() {
   return [
     "activeTab",
-    "alarms",
     "contextMenus",
     "declarativeNetRequest",
-    "downloads",
     "nativeMessaging",
-    "offscreen",
     "scripting",
     "storage",
     "webRequest",
@@ -236,7 +193,7 @@ function arraysEqual(left, right) {
 function validateAuditedManifest(manifest) {
   if (manifest.manifest_version !== 3) throw new Error("Store manifest must be Manifest V3.");
   if (Number(manifest.minimum_chrome_version) < 111) throw new Error("Store manifest requires Chrome 111+.");
-  if (manifest.name !== "Aura Media Downloader") throw new Error("Store manifest branding mismatch.");
+  if (manifest.name !== "Segma Player") throw new Error("Store manifest branding mismatch.");
   if ("key" in manifest || "declarative_net_request" in manifest) {
     throw new Error("Store manifest contains a forbidden fixed key or static DNR rule.");
   }
@@ -279,8 +236,7 @@ async function writeDevelopmentManifest({ repositoryRoot, stageDirectory, versio
   const manifest = JSON.parse(await readFile(path.join(repositoryRoot, "store", "manifest.json"), "utf8"));
   validateAuditedManifest(manifest);
   manifest.version = version;
-  manifest.action.default_popup = "popup-play.html";
-  manifest.permissions = [...new Set([...(manifest.permissions || []), "bookmarks"])].sort();
+  manifest.action.default_popup = "popup.html";
   await writeFile(path.join(stageDirectory, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 }
 
@@ -293,10 +249,9 @@ async function auditStage(stageDirectory, version, edition) {
   }
 
   const manifest = JSON.parse(await readFile(path.join(stageDirectory, "manifest.json"), "utf8"));
-  if (manifest.version !== version || manifest.action?.default_popup !== "popup-play.html") {
+  if (manifest.version !== version || manifest.action?.default_popup !== "popup.html") {
     throw new Error("Development manifest version or popup mismatch.");
   }
-  if (!manifest.permissions.includes("bookmarks")) throw new Error("Development manifest is missing bookmarks permission.");
 
   const editionModule = await readFile(path.join(stageDirectory, "edition.js"), "utf8");
   if (!editionModule.includes(`PRODUCT_EDITION = ${JSON.stringify(edition)}`)) {

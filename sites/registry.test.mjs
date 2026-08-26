@@ -39,6 +39,27 @@ test("Shackledshow keeps MxDrop iframe media on the progressive downloader", () 
   assert.deepEqual(profile.modules.fallbackDownloaders, ["hls"]);
 });
 
+test("Jamak keeps player-page resolution local while downloading the resolved media progressively", () => {
+  const profile = siteProfileForUrls(
+    "https://www.jamak.cc/bbs/board.php?bo_table=gallery&wr_id=83&page=5",
+    "https://streamtape.com/e/2PXX3pz824FZg6X",
+  );
+  assert.equal(profile.id, "jamak");
+  assert.equal(profile.primaryMode, "PLAYER_PAGE_GRAPH");
+  assert.equal(profile.modules.primaryDownloader, "progressive");
+});
+
+test("Recu keeps mediafront archive streams on the shared HLS downloader", () => {
+  const profile = siteProfileForUrls(
+    "https://recu.me/ellinrose/video/195409102/play",
+    "https://f62.mediafront.net/hl/ellinrose/archive/media.m3u8",
+  );
+  assert.equal(profile.id, "recu");
+  assert.equal(profile.primaryMode, "HLS_MANIFEST");
+  assert.equal(profile.modules.primaryDownloader, "hls");
+  assert.deepEqual(profile.modules.fallbackDownloaders, ["progressive"]);
+});
+
 test("site registry ids and host ownership are unique", () => {
   const ids = SITE_PROFILES.map((profile) => profile.id);
   const hosts = SITE_PROFILES.flatMap((profile) => profile.hosts);

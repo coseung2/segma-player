@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1080" viewBox="0 0 720 1080">
+
+  <defs>
+    <linearGradient id="surface-poster" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1C2A42"/>
+      <stop offset="1" stop-color="#0E1420"/>
+    </linearGradient>
+    <linearGradient id="accent-poster" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#75E6DA"/>
+      <stop offset="0.52" stop-color="#63A8FF"/>
+      <stop offset="1" stop-color="#8B7CFF"/>
+    </linearGradient>
+    <radialGradient id="glow-poster" cx="50%" cy="34%" r="62%">
+      <stop offset="0" stop-color="#63A8FF" stop-opacity="0.34"/>
+      <stop offset="0.62" stop-color="#63A8FF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#63A8FF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="720" height="1080" fill="url(#surface-poster)"/>
+  <circle cx="360" cy="230" r="360" fill="url(#glow-poster)"/>
+  <g transform="translate(220 72) scale(0.273)">
+
+  <defs>
+    <linearGradient id="surface-logo-1024-c" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1C2A42"/>
+      <stop offset="1" stop-color="#0E1420"/>
+    </linearGradient>
+    <linearGradient id="accent-logo-1024-c" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#75E6DA"/>
+      <stop offset="0.52" stop-color="#63A8FF"/>
+      <stop offset="1" stop-color="#8B7CFF"/>
+    </linearGradient>
+    <radialGradient id="glow-logo-1024-c" cx="50%" cy="34%" r="62%">
+      <stop offset="0" stop-color="#63A8FF" stop-opacity="0.34"/>
+      <stop offset="0.62" stop-color="#63A8FF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#63A8FF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="url(#surface-logo-1024-c)"/>
+  <circle cx="512" cy="512" r="426" fill="url(#glow-logo-1024-c)"/>
+  <path d="M512 120v126" fill="none" stroke="url(#accent-logo-1024-c)" stroke-width="78" stroke-linecap="round"/>
+  <path d="M430 166l82 92 82-92" fill="none" stroke="url(#accent-logo-1024-c)" stroke-width="78" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="212" y="302" width="600" height="406" rx="116" fill="#101827" fill-opacity="0.58" stroke="url(#accent-logo-1024-c)" stroke-width="76"/>
+  <path d="M456 392 L614 505 L456 618 Z" fill="#F7FBFF"/>
+  <path d="M332 812h360" fill="none" stroke="#F7FBFF" stroke-width="58" stroke-linecap="round" opacity="0.92"/>
+</g>
+  <text x="360" y="448" text-anchor="middle" fill="#F7FBFF" font-family="Segoe UI, Arial, sans-serif" font-size="64" font-weight="700" letter-spacing="-1.5">Save videos.</text>
+  <text x="360" y="528" text-anchor="middle" fill="#F7FBFF" font-family="Segoe UI, Arial, sans-serif" font-size="64" font-weight="700" letter-spacing="-1.5">Play them your way.</text>
+  <text x="360" y="594" text-anchor="middle" fill="#AAB6C8" font-family="Segoe UI, Arial, sans-serif" font-size="24">Download, organize, and watch.</text>
+  <g transform="translate(72 678) scale(0.76)">
+    <rect width="760" height="500" rx="28" fill="#101827" stroke="#2B3852" stroke-width="2"/>
+    <rect width="760" height="58" rx="28" fill="#18243A"/>
+    <circle cx="34" cy="29" r="8" fill="#FF6B61"/>
+    <circle cx="60" cy="29" r="8" fill="#F7BD4F"/>
+    <circle cx="86" cy="29" r="8" fill="#38C172"/>
+    <rect x="128" y="18" width="250" height="22" rx="11" fill="#26324B"/>
+    <rect x="42" y="96" width="164" height="340" rx="20" fill="#18243A"/>
+    <rect x="70" y="126" width="84" height="18" rx="9" fill="#AAB6C8" opacity="0.55"/>
+    <rect x="70" y="174" width="108" height="16" rx="8" fill="#AAB6C8" opacity="0.28"/>
+    <rect x="70" y="218" width="92" height="16" rx="8" fill="#AAB6C8" opacity="0.28"/>
+    <rect x="70" y="262" width="114" height="16" rx="8" fill="#AAB6C8" opacity="0.28"/>
+    <rect x="238" y="96" width="480" height="258" rx="24" fill="#0B111D"/>
+    <path d="M452 166l118 84-118 84z" fill="#63A8FF"/>
+    <rect x="238" y="382" width="480" height="54" rx="16" fill="#18243A"/>
+    <circle cx="268" cy="409" r="14" fill="#63A8FF"/>
+    <rect x="300" y="403" width="238" height="12" rx="6" fill="#AAB6C8" opacity="0.32"/>
+    <rect x="300" y="403" width="126" height="12" rx="6" fill="#63A8FF"/>
+    <rect x="610" y="398" width="78" height="22" rx="11" fill="#F7FBFF" opacity="0.9"/>
+  </g>
+</svg>

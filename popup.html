@@ -3,13 +3,26 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title data-i18n="app.title">Aura Media Downloader</title>
+    <title data-i18n="app.title">Segma Player</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main class="popup-shell">
       <header class="popup-header">
-        <div><p class="eyebrow">AURA</p><div class="title-row"><h1 data-i18n="app.heading">Media Download</h1><span id="plan-badge" class="plan-badge"></span></div></div>
+        <div class="brand-block">
+          <svg class="brand-mark" width="28" height="28" viewBox="192 192 640 640" aria-hidden="true" focusable="false">
+            <path d="M232 192H512V296C554 296 568 330 568 352C568 374 554 408 512 408V512H408C408 554 374 568 352 568C330 568 296 554 296 512H192V232C192 210 210 192 232 192Z" fill="#17191D"/>
+            <path d="M512 192H792C814 192 832 210 832 232V512H728C728 554 694 568 672 568C650 568 616 554 616 512H512V408C554 408 568 374 568 352C568 330 554 296 512 296V192Z" fill="#59616D"/>
+            <path d="M192 512H296C296 554 330 568 352 568C374 568 408 554 408 512H512V616C554 616 568 650 568 672C568 694 554 728 512 728V832H232C210 832 192 814 192 792V512Z" fill="#D6D9DE"/>
+            <path d="M512 512H616C616 554 650 568 672 568C694 568 728 554 728 512H832V792C832 814 814 832 792 832H512V728C554 728 568 694 568 672C568 650 554 616 512 616V512Z" fill="#FFA31A"/>
+            <path d="M455 434L589 512L455 590V434Z" fill="#FFFFFF"/>
+          </svg>
+          <div class="title-copy">
+            <div class="title-row">
+              <h1 data-i18n="app.heading">Segma Player</h1>
+            </div>
+          </div>
+        </div>
         <div class="header-actions">
           <div class="locale-menu-wrap">
             <button id="locale" class="icon-button" type="button" data-i18n-label="app.language" aria-label="Language" title="Language" aria-haspopup="true" aria-expanded="false">
@@ -21,24 +34,14 @@
             </button>
             <div id="locale-menu" class="locale-menu" role="menu" data-i18n-label="app.language" aria-label="Language" hidden></div>
           </div>
-          <button id="settings" class="icon-button" type="button" data-i18n-label="app.settings" aria-label="Settings" title="Settings">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-          </button>
           <button id="refresh" class="icon-button" type="button" data-i18n-label="app.refresh" aria-label="Reload the current tab">↻</button>
         </div>
       </header>
 
-      <section id="plan-card" class="plan-card" data-i18n-label="app.planRegion" aria-label="Current plan">
-        <p id="plan-summary" class="plan-summary"></p>
-        <div id="pro-offer" class="pro-offer" hidden>
-          <p id="pro-benefits" class="pro-benefits"></p>
-          <a id="upgrade-link" class="upgrade-link" target="_blank" rel="noreferrer" data-i18n="plan.viewPro" hidden>See Pro</a>
-          <a id="license-entry" class="upgrade-link" href="#" data-i18n="plan.enterKey">Enter Pro key</a>
-        </div>
+      <section id="companion-card" class="companion-card" data-i18n-label="companion.statusRegion" aria-label="Segma Player connection">
+        <p id="companion-status" class="companion-status" role="status" aria-live="polite" data-i18n="companion.checking">Checking Segma Player…</p>
         <a id="companion-help" class="companion-help" target="_blank" rel="noreferrer" data-i18n="companion.install" hidden>Install Windows Companion</a>
+        <button id="companion-open" class="secondary-button" type="button" data-i18n="companion.open">Open Segma Player</button>
       </section>
 
       <div class="tab-list" role="tablist" data-i18n-label="app.tablist" aria-label="Download tools">
@@ -54,46 +57,27 @@
             <label class="main-toggle"><input id="main-only" type="checkbox" checked /> <span data-i18n="detect.mainOnly">Main only</span></label>
           </div>
         </div>
-        <div id="detect-jobs-tools" class="job-list-tools" hidden>
-          <button id="detect-jobs-toggle" class="job-list-tool" type="button" aria-expanded="true" data-i18n="jobs.collapse">Collapse list</button>
-          <button id="detect-jobs-clear" class="job-list-tool" type="button" data-i18n="jobs.clear">Clear history</button>
-        </div>
         <section id="candidates" class="candidate-list" aria-live="polite"></section>
-        <button id="rescan" class="primary-button" type="button" data-i18n="detect.rescan">Scan this page again</button>
-        <section id="detect-jobs" class="job-list" aria-live="polite" hidden></section>
+        <button id="rescan" class="primary-button action-button" type="button" data-i18n="detect.rescan">Scan this page again</button>
       </section>
 
       <section id="panel-link" class="tab-panel" role="tabpanel" aria-labelledby="tab-link" hidden>
-        <p class="storage-note" data-i18n="link.note">Paste a media address or player page to save it.</p>
+        <p class="storage-note" data-i18n="link.note">Paste a media address or player page to send it to Segma Player.</p>
         <label class="field-label" for="direct-url" data-i18n="link.addressLabel">Media address</label>
         <input id="direct-url" type="url" data-i18n-placeholder="link.addressPlaceholder" placeholder="Media / player" spellcheck="false" />
         <div id="youtube-quality-row" class="quality-row" hidden>
           <label class="field-label" for="youtube-quality" data-i18n="quality.label">Quality</label>
           <select id="youtube-quality">
+            <option value="best">Best quality · Auto</option>
             <option value="1080">Up to 1080p</option>
             <option value="720">Up to 720p</option>
             <option value="480">Up to 480p</option>
           </select>
         </div>
-        <button id="download-url" class="primary-button" type="button" data-i18n="action.download">Download</button>
+        <button id="download-url" class="primary-button action-button" type="button" data-i18n="action.download">Download</button>
         <p id="direct-status" class="field-status" role="status" aria-live="polite" hidden></p>
-        <div id="link-jobs-tools" class="job-list-tools" hidden>
-          <button id="link-jobs-toggle" class="job-list-tool" type="button" aria-expanded="true" data-i18n="jobs.collapse">Collapse list</button>
-          <button id="link-jobs-clear" class="job-list-tool" type="button" data-i18n="jobs.clear">Clear history</button>
-        </div>
-        <section id="link-jobs" class="job-list" aria-live="polite" hidden></section>
-        <p id="link-save-status" class="save-status" role="status" hidden></p>
       </section>
-
     </main>
-
-    <section id="settings-overlay" class="settings-overlay" role="dialog" aria-modal="true" data-i18n-label="app.settings" aria-label="Settings" hidden>
-      <header class="settings-overlay-header">
-        <h2 data-i18n="app.settings">Settings</h2>
-        <button id="settings-close" class="icon-button" type="button" data-i18n-label="app.settingsClose" aria-label="Close settings">×</button>
-      </header>
-      <iframe id="settings-frame" src="options.html" title="Aura Media settings"></iframe>
-    </section>
 
     <script type="module" src="popup.js"></script>
   </body>

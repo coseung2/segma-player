@@ -15,6 +15,7 @@ test("Dood source-frame behavior is isolated behind the provider adapter", () =>
   assert.equal(dood.downloaderId, "progressive");
   assert.equal(dood.preserveSourceFrame, true);
   assert.equal(dood.preferSourceFrameProgressive, true);
+  assert.equal(dood.preferParallelProgressiveWhenRangeSupported, true);
 
   const generic = downloadPolicyForCandidate({
     mediaType: "PROGRESSIVE",
@@ -25,6 +26,7 @@ test("Dood source-frame behavior is isolated behind the provider adapter", () =>
   assert.equal(generic.siteId, "generic");
   assert.equal(generic.downloaderId, "progressive");
   assert.equal(generic.preferSourceFrameProgressive, false);
+  assert.equal(generic.preferParallelProgressiveWhenRangeSupported, false);
 });
 
 test("site profile selects preferred providers without implementing the transport", () => {

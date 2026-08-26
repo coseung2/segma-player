@@ -2,7 +2,6 @@ import {
   createCheckpointingSink,
   downloadPreparedCandidate,
   prepareDownloadCandidate,
-  prepareSubtitleAudioUpload,
   probeProgressiveCandidateSize,
   setRuntimePlan,
 } from "./hls-download.js";
@@ -18,8 +17,6 @@ import {
   setDownloadCheckpoint,
 } from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
-import { loadGeneratedSubtitle, requestGeneratedSubtitle, storeGeneratedSubtitle } from "./subtitle-generation.js";
-import { saveGeneratedSubtitleSrt } from "./subtitle-save.js";
 import {
   MIN_HEARTBEAT_CADENCE_MS,
   heartbeatPortName,
@@ -91,6 +88,7 @@ async function report(jobId, patch) {
   await chrome.runtime.sendMessage({ type: "download-job-update", jobId, patch }).catch(() => {});
 }
 
+/* Legacy extension subtitle generation was removed from the runtime.
 function subtitleStatus(progress = {}) {
   const phase = progress.phase || "queued";
   const percent = Math.max(0, Math.min(99, Number(progress.progress) || 0));
@@ -177,6 +175,8 @@ async function runSubtitleJob(jobId, input, licenseKey = "") {
   }
 }
 
+*/
+
 function cancellationError() {
   const error = new Error("사용자가 다운로드를 취소했습니다.");
   error.code = "download-cancelled";
@@ -254,6 +254,7 @@ async function run(jobId, candidate) {
   await report(jobId, { status: "running", statusText: "다운로드를 준비하는 중…", folderName });
   try {
     const prepared = await prepareWithTimeout(candidate, {
+      jobId,
       onStatus: (statusText) => void report(jobId, { status: "running", statusText }),
       pauseGate: () => waitWhilePaused(jobId),
       signal: controller.signal,
@@ -442,21 +443,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       pauseWaiters.delete(message.jobId);
       for (const resolve of waiters) resolve();
     }
-    sendResponse({ ok: true });
-    return false;
-  }
-
-  if (message?.type === "run-subtitle-job" && sender.id === chrome.runtime.id) {
-    if (typeof message.jobId !== "string" || !message.input || typeof message.input !== "object") {
-      sendResponse({ ok: false, error: "invalid-subtitle-job" });
-      return false;
-    }
-    if (acceptedJobIds.has(message.jobId)) {
-      sendResponse({ ok: false, error: "duplicate-download-job" });
-      return false;
-    }
-    acceptedJobIds.add(message.jobId);
-    void runSubtitleJob(message.jobId, message.input, message.licenseKey);
     sendResponse({ ok: true });
     return false;
   }

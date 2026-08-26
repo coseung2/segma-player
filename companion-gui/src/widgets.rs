@@ -4,8 +4,9 @@
 //! native window and the design stay in step: button, status chip, media type
 //! chip, progress bar, nav item, and the job row.
 
-use eframe::egui::{self, Color32, Response, RichText, Sense, Ui, Vec2};
+use eframe::egui::{self, Color32, Response, RichText, Sense, TextureHandle, Ui, Vec2};
 
+use crate::icons::{self, Icon};
 use crate::model::{Action, JobView};
 use crate::theme::{color, corner, hairline, margin_xy, metric, radius, text, Tone};
 
@@ -13,17 +14,77 @@ use crate::theme::{color, corner, hairline, margin_xy, metric, radius, text, Ton
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonStyle {
     Primary,
+    Inverse,
     Secondary,
     Quiet,
+    Danger,
+}
+
+const HOVER_MOTION_TIME: f32 = 0.12;
+const PRESS_MOTION_TIME: f32 = 0.10;
+const CLICK_PULSE_TIME: f64 = 0.14;
+
+/// Returns animated hover/press progress. A short post-click pulse keeps a
+/// fast pointer click perceptible instead of relying on one-frame state.
+pub(crate) fn interaction_state(ui: &Ui, response: &Response) -> (f32, f32) {
+    let now = ui.input(|input| input.time);
+    if response.clicked() {
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                response.id.with("click-pulse-until"),
+                now + CLICK_PULSE_TIME,
+            );
+        });
+    }
+    let pulse_until = ui
+        .ctx()
+        .data(|data| data.get_temp::<f64>(response.id.with("click-pulse-until")))
+        .unwrap_or(0.0);
+    let hovering = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        HOVER_MOTION_TIME,
+    );
+    let pressing = ui.ctx().animate_bool_with_time(
+        response.id.with("press"),
+        response.is_pointer_button_down_on() || now < pulse_until,
+        PRESS_MOTION_TIME,
+    );
+    (hovering, pressing)
+}
+
+pub(crate) fn paint_button_motion(
+    ui: &Ui,
+    response: &Response,
+    style: ButtonStyle,
+    hovering: f32,
+    pressing: f32,
+) {
+    if hovering > 0.0 {
+        let hover_fill = if style == ButtonStyle::Danger {
+            color::BG_DANGER
+        } else {
+            color::BG_SUBTLE
+        };
+        ui.painter().rect_filled(
+            response.rect,
+            corner(radius::MD),
+            hover_fill.gamma_multiply(hovering * 0.9),
+        );
+    }
+    if pressing > 0.0 {
+        ui.painter().rect_filled(
+            response.rect,
+            corner(radius::MD),
+            color::BG_INVERSE.gamma_multiply(pressing * 0.10),
+        );
+    }
 }
 
 pub fn button(ui: &mut Ui, label: &str, style: ButtonStyle, enabled: bool) -> Response {
     let (fill, stroke, foreground) = match style {
-        ButtonStyle::Primary => (
-            color::BG_INVERSE,
-            egui::Stroke::NONE,
-            color::TEXT_INVERSE,
-        ),
+        ButtonStyle::Primary => (color::ACCENT, egui::Stroke::NONE, color::TEXT_INVERSE),
+        ButtonStyle::Inverse => (color::BG_INVERSE, egui::Stroke::NONE, color::TEXT_INVERSE),
         ButtonStyle::Secondary => (
             color::BG_SURFACE,
             hairline(color::BORDER_DEFAULT),
@@ -34,6 +95,7 @@ pub fn button(ui: &mut Ui, label: &str, style: ButtonStyle, enabled: bool) -> Re
             egui::Stroke::NONE,
             color::TEXT_SECONDARY,
         ),
+        ButtonStyle::Danger => (color::BG_DANGER, egui::Stroke::NONE, color::TEXT_DANGER),
     };
 
     let widget = egui::Button::new(RichText::new(label).size(text::LABEL_MD).color(foreground))
@@ -42,7 +104,115 @@ pub fn button(ui: &mut Ui, label: &str, style: ButtonStyle, enabled: bool) -> Re
         .corner_radius(corner(radius::MD))
         .min_size(Vec2::new(0.0, metric::CONTROL_HEIGHT));
 
-    ui.add_enabled(enabled, widget)
+    let response = ui.add_enabled(enabled, widget);
+    let (hovering, pressing) = interaction_state(ui, &response);
+    paint_button_motion(ui, &response, style, hovering, pressing);
+    response
+}
+
+/// Square icon-only control. The hit area is always the shared control height,
+/// so a row of icon buttons lines up with text buttons and chips.
+pub fn icon_button(
+    ui: &mut Ui,
+    icon: Icon,
+    accessible_label: &str,
+    style: ButtonStyle,
+    enabled: bool,
+) -> Response {
+    let (fill, stroke, foreground) = match style {
+        ButtonStyle::Primary => (color::ACCENT, egui::Stroke::NONE, color::TEXT_INVERSE),
+        ButtonStyle::Inverse => (color::BG_INVERSE, egui::Stroke::NONE, color::TEXT_INVERSE),
+        ButtonStyle::Secondary => (
+            color::BG_SURFACE,
+            hairline(color::BORDER_DEFAULT),
+            color::TEXT_PRIMARY,
+        ),
+        ButtonStyle::Quiet => (
+            Color32::TRANSPARENT,
+            egui::Stroke::NONE,
+            color::TEXT_SECONDARY,
+        ),
+        ButtonStyle::Danger => (color::BG_DANGER, egui::Stroke::NONE, color::TEXT_DANGER),
+    };
+
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("")
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(corner(radius::MD))
+            .min_size(Vec2::splat(metric::CONTROL_HEIGHT)),
+    );
+    let (hovering, pressing) = interaction_state(ui, &response);
+    paint_button_motion(ui, &response, style, hovering, pressing);
+    let tint = if enabled {
+        foreground
+    } else {
+        color::TEXT_MUTED
+    };
+    let icon_size = metric::ICON_SM - pressing;
+    icons::paint_centered(
+        ui,
+        icon,
+        egui::Rect::from_center_size(
+            response.rect.center() + egui::vec2(0.0, pressing),
+            Vec2::splat(icon_size),
+        ),
+        icon_size,
+        tint,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, accessible_label)
+    });
+    response
+}
+
+/// One row inside a popup menu: leading icon, label, single background layer.
+pub fn menu_row(ui: &mut Ui, icon: Icon, label: &str, danger: bool) -> Response {
+    let height = metric::CONTROL_HEIGHT;
+    let width = ui.available_width();
+    let response = ui.allocate_response(Vec2::new(width, height), Sense::click());
+    let foreground = if danger {
+        color::TEXT_DANGER
+    } else {
+        color::TEXT_PRIMARY
+    };
+
+    let (hovering, pressing) = interaction_state(ui, &response);
+    if hovering > 0.0 {
+        ui.painter().rect_filled(
+            response.rect,
+            corner(radius::MD),
+            if danger {
+                color::BG_DANGER.gamma_multiply(hovering)
+            } else {
+                color::BG_SUBTLE.gamma_multiply(hovering)
+            },
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if pressing > 0.0 {
+        ui.painter().rect_filled(
+            response.rect,
+            corner(radius::MD),
+            color::BG_INVERSE.gamma_multiply(pressing * 0.10),
+        );
+    }
+
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(response.rect.left() + 8.0, response.rect.top()),
+        Vec2::new(metric::ICON_SM, response.rect.height()),
+    );
+    icons::paint_centered(ui, icon, icon_rect, metric::ICON_SM, foreground);
+    ui.painter().text(
+        egui::pos2(icon_rect.right() + 8.0, response.rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(text::BODY_MD),
+        foreground,
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response
 }
 
 /// Status chip and media type chip. Both are pill shaped in the design; the
@@ -61,12 +231,10 @@ pub fn chip(ui: &mut Ui, label: &str, tone: Tone, mono: bool) -> Response {
 
 /// ProgressBar. `percent` is `None` while the host has not reported enough to
 /// know, and the track is drawn alone rather than guessing a position.
-pub fn progress(ui: &mut Ui, percent: Option<u8>) {
+pub fn progress(ui: &mut Ui, percent: Option<u8>, indeterminate: bool) {
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(width, metric::PROGRESS_HEIGHT),
-        Sense::hover(),
-    );
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(width, metric::PROGRESS_HEIGHT), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, corner(radius::FULL), color::BG_TRACK);
     if let Some(value) = percent {
@@ -74,7 +242,18 @@ pub fn progress(ui: &mut Ui, percent: Option<u8>) {
         if ratio > 0.0 {
             let mut filled = rect;
             filled.set_width(rect.width() * ratio);
-            painter.rect_filled(filled, corner(radius::FULL), color::BG_INVERSE);
+            painter.rect_filled(filled, corner(radius::FULL), color::ACCENT);
+        }
+    } else if indeterminate {
+        let phase = (ui.ctx().input(|input| input.time) * 0.55).fract() as f32;
+        let segment = rect.width() * 0.28;
+        let travel = rect.width() + segment;
+        let left = rect.left() + phase * travel - segment;
+        let mut filled = rect;
+        filled.set_left(left.max(rect.left()));
+        filled.set_right((left + segment).min(rect.right()));
+        if filled.width() > 0.0 {
+            painter.rect_filled(filled, corner(radius::FULL), color::ACCENT);
         }
     }
 }
@@ -82,10 +261,7 @@ pub fn progress(ui: &mut Ui, percent: Option<u8>) {
 /// NavItem / Selected and NavItem / Default.
 pub fn nav_item(ui: &mut Ui, label: &str, selected: bool) -> Response {
     let width = ui.available_width();
-    let response = ui.allocate_response(
-        Vec2::new(width, metric::NAV_ITEM_HEIGHT),
-        Sense::click(),
-    );
+    let response = ui.allocate_response(Vec2::new(width, metric::NAV_ITEM_HEIGHT), Sense::click());
     let hovered = response.hovered();
     let painter = ui.painter();
 
@@ -112,7 +288,10 @@ pub fn nav_item(ui: &mut Ui, label: &str, selected: bool) -> Response {
         (color::TEXT_SECONDARY, text::BODY_MD)
     };
     painter.text(
-        egui::pos2(dot_center.x + metric::NAV_DOT_RADIUS + 10.0, response.rect.center().y),
+        egui::pos2(
+            dot_center.x + metric::NAV_DOT_RADIUS + 10.0,
+            response.rect.center().y,
+        ),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(label_size),
@@ -178,8 +357,8 @@ pub fn job_row(ui: &mut Ui, view: &JobView) -> Option<RowEvent> {
                 );
             }
 
-            if view.percent.is_some() {
-                progress(ui, view.percent);
+            if view.percent.is_some() || view.active || view.paused {
+                progress(ui, view.percent, view.active && view.percent.is_none());
             }
 
             ui.horizontal(|ui| {
@@ -201,10 +380,18 @@ pub fn job_row(ui: &mut Ui, view: &JobView) -> Option<RowEvent> {
                         // The action that continues or repeats work gets the
                         // stronger treatment; stopping stays quiet.
                         let style = match action {
-                            Action::Resume | Action::Retry | Action::Play => ButtonStyle::Secondary,
+                            Action::Resume | Action::Retry => ButtonStyle::Secondary,
                             _ => ButtonStyle::Quiet,
                         };
-                        if button(ui, action.label(), style, true).clicked() {
+                        let icon = match action {
+                            Action::Pause => Icon::Pause,
+                            Action::Resume => Icon::Resume,
+                            Action::Retry => Icon::Retry,
+                            Action::Play => Icon::Play,
+                            Action::Cancel => Icon::Cancel,
+                            Action::OpenFolder => Icon::FolderOpen,
+                        };
+                        if icon_button(ui, icon, action.label(), style, true).clicked() {
                             let id = view.id.clone();
                             event = Some(match action {
                                 Action::Pause => RowEvent::Pause(id),
@@ -221,6 +408,120 @@ pub fn job_row(ui: &mut Ui, view: &JobView) -> Option<RowEvent> {
         });
 
     event
+}
+
+/// MediaTile thumbnail. The image is the object: no surrounding card chrome.
+pub fn media_thumbnail(
+    ui: &mut Ui,
+    texture: Option<&TextureHandle>,
+    type_label: &str,
+    width: f32,
+) -> Response {
+    let size = Vec2::new(width, width * 9.0 / 16.0);
+    if let Some(texture) = texture {
+        return ui.add(
+            egui::Image::new(texture)
+                .fit_to_exact_size(size)
+                .corner_radius(corner(radius::LG))
+                .sense(Sense::click()),
+        );
+    }
+    let response = ui.allocate_response(size, Sense::click());
+    ui.painter()
+        .rect_filled(response.rect, corner(radius::LG), color::BG_SUBTLE);
+    ui.painter().text(
+        response.rect.center(),
+        egui::Align2::CENTER_CENTER,
+        type_label,
+        egui::FontId::monospace(text::MONO_SM),
+        color::TEXT_MUTED,
+    );
+    response
+}
+
+/// What a library row's overflow menu reported back. `None` means no action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TileMenuEvent {
+    Play(String),
+    GenerateSubtitle(String),
+    Reveal(String),
+    MoveTo(String),
+    Delete(String),
+}
+
+/// Overflow toggle for one library item, placed on its title row.
+///
+/// The popup is a single surface: rows carry their own hover background, so
+/// there is no nested button-inside-menu wrapper.
+pub fn tile_menu(ui: &mut Ui, file_name: &str, has_folders: bool) -> Option<TileMenuEvent> {
+    let response = icon_button(
+        ui,
+        Icon::MoreVertical,
+        "파일 메뉴",
+        ButtonStyle::Quiet,
+        true,
+    );
+
+    let mut event = None;
+    egui::Popup::menu(&response).gap(4.0).show(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
+        let labels: &[&str] = if has_folders {
+            &["재생", "자막 생성", "폴더에서 보기", "폴더로 이동", "삭제"]
+        } else {
+            &["재생", "자막 생성", "폴더에서 보기", "삭제"]
+        };
+        let longest = labels
+            .iter()
+            .map(|label| {
+                ui.painter()
+                    .layout_no_wrap(
+                        (*label).to_string(),
+                        egui::FontId::proportional(text::BODY_MD),
+                        color::TEXT_PRIMARY,
+                    )
+                    .rect
+                    .width()
+            })
+            .fold(0.0, f32::max);
+        ui.set_width(popup_menu_width(longest));
+        if menu_row(ui, Icon::Play, "재생", false).clicked() {
+            event = Some(TileMenuEvent::Play(file_name.to_string()));
+            ui.close();
+        }
+        if menu_row(ui, Icon::CaptionsOn, "자막 생성", false).clicked() {
+            event = Some(TileMenuEvent::GenerateSubtitle(file_name.to_string()));
+            ui.close();
+        }
+        if menu_row(ui, Icon::FolderOpen, "폴더에서 보기", false).clicked() {
+            event = Some(TileMenuEvent::Reveal(file_name.to_string()));
+            ui.close();
+        }
+        if has_folders && menu_row(ui, Icon::FolderMove, "폴더로 이동", false).clicked() {
+            event = Some(TileMenuEvent::MoveTo(file_name.to_string()));
+            ui.close();
+        }
+        if menu_row(ui, Icon::Trash, "삭제", true).clicked() {
+            event = Some(TileMenuEvent::Delete(file_name.to_string()));
+            ui.close();
+        }
+    });
+    event
+}
+
+fn popup_menu_width(longest_label_width: f32) -> f32 {
+    longest_label_width + metric::ICON_SM + 32.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_width_tracks_its_longest_label_instead_of_a_fixed_minimum() {
+        assert_eq!(popup_menu_width(40.0), 40.0 + metric::ICON_SM + 32.0);
+        assert_eq!(popup_menu_width(90.0) - popup_menu_width(40.0), 50.0);
+        assert!(popup_menu_width(40.0) < 150.0);
+    }
 }
 
 /// Empty state. Dashed in the design; egui has no dashed frame stroke, so a
@@ -240,25 +541,4 @@ pub fn empty_state(ui: &mut Ui, message: &str) {
                 );
             });
         });
-}
-
-/// SettingRow: title, value, and an optional trailing chip.
-pub fn setting_row(ui: &mut Ui, title: &str, value: &str, mono: bool, badge: Option<(&str, Tone)>) {
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(
-                RichText::new(title)
-                    .size(text::BODY_MD)
-                    .color(color::TEXT_PRIMARY),
-            );
-            let size = if mono { text::MONO_SM } else { text::BODY_SM };
-            ui.label(RichText::new(value).size(size).color(color::TEXT_MUTED));
-        });
-        if let Some((label, tone)) = badge {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                chip(ui, label, tone, false);
-            });
-        }
-    });
 }

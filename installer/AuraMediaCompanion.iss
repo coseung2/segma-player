@@ -5,7 +5,7 @@
   #define OutputDirectory "output"
 #endif
 
-#define AppName "Aura Media Companion"
+#define AppName "Segma Player"
 #ifndef AppVersion
   #error AppVersion must be supplied by build-companion-installer.ps1
 #endif
@@ -29,6 +29,8 @@ OutputBaseFilename=Aura-Media-Companion-{#AppVersion}-win-x64
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\microsoft-store\source\segma-player.ico
+UninstallDisplayIcon={app}\aura-media-manager.exe
 UninstallDisplayName={#AppName}
 #ifdef SignToolName
 SignTool={#SignToolName}
@@ -39,14 +41,21 @@ SignedUninstaller=yes
 Source: "..\native-host\target\release\aura-media-companion.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\companion-gui\target\release\aura-media-manager.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ToolsDirectory}\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\assets\microsoft-store\source\segma-player.ico"; DestDir: "{app}"; DestName: "segma-player.ico"; Flags: ignoreversion
 
 [Icons]
 ; Points straight at the GUI binary. The host still accepts `--manager` and
 ; relaunches this executable, so an old shortcut keeps working.
-Name: "{autoprograms}\Aura Media Companion"; Filename: "{app}\aura-media-manager.exe"; WorkingDir: "{app}"
+Name: "{autoprograms}\Segma Player"; Filename: "{app}\aura-media-manager.exe"; WorkingDir: "{app}"; IconFilename: "{app}\segma-player.ico"
+Name: "{autodesktop}\Segma Player"; Filename: "{app}\aura-media-manager.exe"; WorkingDir: "{app}"; IconFilename: "{app}\segma-player.ico"
+
+[InstallDelete]
+Type: files; Name: "{autodesktop}\Aura Media Companion.lnk"
+Type: files; Name: "{autoprograms}\Aura Media Companion.lnk"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\{#NativeHostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\{#NativeHostName}.json"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Naver\Naver Whale\NativeMessagingHosts\{#NativeHostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\{#NativeHostName}.json"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\{#NativeHostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\{#NativeHostName}.json"; Flags: uninsdeletekey
 
 [Code]
@@ -108,7 +117,7 @@ begin
   SetArrayLength(ManifestLines, 7);
   ManifestLines[0] := '{';
   ManifestLines[1] := '  "name": "{#NativeHostName}",';
-  ManifestLines[2] := '  "description": "Aura Media Companion",';
+  ManifestLines[2] := '  "description": "Segma Player",';
   ManifestLines[3] := '  "path": "' + JsonEscape(HostPath) + '",';
   ManifestLines[4] := '  "type": "stdio",';
   ManifestLines[5] := '  "allowed_origins": [' + AllowedOriginsJson() + ']';

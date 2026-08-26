@@ -25,8 +25,11 @@ export function splitNativeChunks(value, maximum = MAX_NATIVE_CHUNK_BYTES) {
   return chunks;
 }
 
-export async function createNativeFileWriter(filename) {
-  const jobId = crypto.randomUUID();
+export async function createNativeFileWriter(filename, metadata = {}) {
+  const requestedJobId = typeof metadata?.jobId === "string" ? metadata.jobId : "";
+  const jobId = /^[A-Za-z0-9_-]{1,128}$/.test(requestedJobId)
+    ? requestedJobId
+    : crypto.randomUUID();
   const port = chrome.runtime.connect({ name: "native-file-writer" });
   const pending = [];
   let disconnected = false;
@@ -43,8 +46,11 @@ export async function createNativeFileWriter(filename) {
     if (message?.jobId !== jobId) return;
     const waiter = pending.shift();
     if (!waiter) return;
-    if (message.status === "failed") waiter.reject(new Error(message.statusText || message.error || "기본 Downloads 저장에 실패했습니다."));
-    else waiter.resolve(message);
+    if (message.status === "failed") {
+      const error = new Error(message.statusText || message.error || "기본 Downloads 저장에 실패했습니다.");
+      if (typeof message.errorCode === "string") error.code = message.errorCode;
+      waiter.reject(error);
+    } else waiter.resolve(message);
   });
   port.onDisconnect.addListener(() => {
     disconnected = true;
@@ -54,18 +60,37 @@ export async function createNativeFileWriter(filename) {
 
   let opened;
   try {
-    opened = await request({ type: "media-open", filename });
+    opened = await request({
+      type: "media-open",
+      filename,
+      title: typeof metadata?.title === "string" ? metadata.title : "",
+      inputKind: typeof metadata?.inputKind === "string" ? metadata.inputKind : "",
+      total: Number.isFinite(metadata?.total) && metadata.total > 0 ? Math.round(metadata.total) : undefined,
+      showUi: metadata?.showUi !== false,
+      resumeFileName: typeof metadata?.resumeFileName === "string" ? metadata.resumeFileName : "",
+      resumeFrom: Number.isFinite(metadata?.resumeFrom) && metadata.resumeFrom >= 0
+        ? Math.floor(metadata.resumeFrom)
+        : undefined,
+    });
   } catch (error) {
     try { port.disconnect(); } catch { /* already disconnected */ }
     throw error;
   }
+  let committedBytes = Number.isFinite(opened.bytesWritten) && opened.bytesWritten >= 0
+    ? Math.floor(opened.bytesWritten)
+    : 0;
   return {
     name: opened.fileName || filename,
+    get committedBytes() { return committedBytes; },
     async write(params) {
       const value = params?.data ?? params;
       const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
       for (const chunk of splitNativeChunks(bytes)) {
-        await request({ type: "media-chunk", data: bytesToBase64(chunk) });
+        const response = await request({ type: "media-chunk", data: bytesToBase64(chunk) });
+        committedBytes = Number.isFinite(response?.bytesWritten)
+          ? Math.floor(response.bytesWritten)
+          : committedBytes + chunk.byteLength;
+        await metadata?.onCommitted?.(committedBytes);
       }
     },
     async close() {
@@ -76,6 +101,14 @@ export async function createNativeFileWriter(filename) {
     async abort() {
       try { await request({ type: "media-abort" }); } catch { /* best effort */ }
       try { port.disconnect(); } catch { /* already disconnected */ }
+    },
+    async suspend() {
+      try {
+        const response = await request({ type: "media-suspend" });
+        if (Number.isFinite(response?.bytesWritten)) committedBytes = Math.floor(response.bytesWritten);
+      } catch { /* a disconnected host still leaves its .part file intact */ }
+      try { port.disconnect(); } catch { /* already disconnected */ }
+      return committedBytes;
     },
   };
 }

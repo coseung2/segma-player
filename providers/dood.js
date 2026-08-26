@@ -19,6 +19,7 @@ export const doodProvider = Object.freeze({
     return Object.freeze({
       preserveSourceFrame: true,
       preferSourceFrameProgressive: true,
+      preferParallelProgressiveWhenRangeSupported: true,
       decodeHlsKeyInSourceFrame: false,
     });
   },

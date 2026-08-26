@@ -75,16 +75,6 @@ export function exactMediaFetchRule({ ruleId, tabId, url, referrer = "", request
   };
 }
 
-export function playbackMediaFetchRule({ ruleId, tabId, url, referrer = "", requestHeaders = [] }) {
-  const parsed = new URL(url);
-  if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) throw new Error("invalid-playback-media-url");
-  const rule = exactMediaFetchRule({ ruleId, tabId, url, referrer, requestHeaders });
-  delete rule.condition.regexFilter;
-  delete rule.condition.urlFilter;
-  rule.condition.urlFilter = `|${parsed.origin}/`;
-  return rule;
-}
-
 export function createMediaFetchRuleIdAllocator(start = MEDIA_FETCH_RULE_ID_START) {
   if (!Number.isInteger(start) || start <= 0 || start > MAX_RULE_ID) {
     throw new Error("invalid-media-fetch-rule-id-start");

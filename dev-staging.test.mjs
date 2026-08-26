@@ -55,8 +55,8 @@ test("cross-platform development staging builds an exact Pro directory without a
 
   const manifest = JSON.parse(await readFile(path.join(stageDirectory, "manifest.json"), "utf8"));
   assert.equal(manifest.version, "9.8.7");
-  assert.equal(manifest.action.default_popup, "popup-play.html");
-  assert.equal(manifest.permissions.includes("bookmarks"), true);
+  assert.equal(manifest.action.default_popup, "popup.html");
+  assert.equal(manifest.permissions.includes("bookmarks"), false);
   assert.equal("key" in manifest, false);
   assert.equal("declarative_net_request" in manifest, false);
 
@@ -64,5 +64,29 @@ test("cross-platform development staging builds an exact Pro directory without a
   assert.match(edition, /PRODUCT_EDITION = "pro"/);
   assert.match(edition, /COMPANION_INSTALL_URL = "https:\/\/aura\.example\/companion"/);
   assert.match(await readFile(path.join(stageDirectory, "background.js"), "utf8"), /media-request-context\.js/);
-  assert.match(await readFile(path.join(stageDirectory, "player.js"), "utf8"), /hls-playback-recovery\.js/);
+  const stagedNames = new Set(await filesUnder(stageDirectory));
+  for (const retired of [
+    "playback-addon.js",
+    "playback-session.js",
+    "player.html",
+    "player.js",
+    "player-subtitle.js",
+    "popup-play.html",
+    "subtitle-folder.html",
+    "subtitle-folder.js",
+    "subtitle-generation.js",
+    "subtitle-save.js",
+  ]) {
+    assert.equal(stagedNames.has(retired), false, `${retired} must stay out of staging`);
+  }
+
+  for (const file of [...stagedNames].filter((value) => value.endsWith(".js"))) {
+    const source = await readFile(path.join(stageDirectory, file), "utf8");
+    const imports = [...source.matchAll(/\bfrom\s+["'](\.\.?\/[^"']+)["']/g)]
+      .map((match) => match[1]);
+    for (const specifier of imports) {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file.replaceAll("\\", "/")), specifier));
+      assert.equal(stagedNames.has(target), true, `${file} imports missing staged module ${target}`);
+    }
+  }
 });

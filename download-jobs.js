@@ -84,7 +84,43 @@ export function persistedDownloadJobs(jobs, limit = 30) {
   return [...jobs]
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, limit)
-    .map(({ retryPayload: _retryPayload, ...job }) => job);
+    // storage.session is extension-private and survives service-worker restarts.
+    // Keep the bounded retry payload here so a failed transfer can reconnect to
+    // its existing checkpoint instead of forcing a brand-new download.
+    .map((job) => ({ ...job }));
+}
+
+export function publicCompanionJobs(jobs, limit = 30) {
+  const statusFor = (value) => {
+    if (["completed", "failed", "cancelled"].includes(value)) return value;
+    if (value === "paused") return "paused";
+    if (["created", "preparing", "submitting", "queued"].includes(value)) return "queued";
+    return "running";
+  };
+  return (Array.isArray(jobs) ? jobs : [])
+    .filter((job) => job && typeof job.jobId === "string" && job.jobId)
+    .map((job) => {
+      const status = statusFor(job.status);
+      const createdAt = Number.isFinite(Number(job.createdAt)) ? Number(job.createdAt) : 0;
+      const updatedAt = Number.isFinite(Number(job.updatedAt)) ? Number(job.updatedAt) : createdAt;
+      return {
+        id: safeText(job.jobId),
+        title: safeText(job.title, "Segma Player 다운로드"),
+        mediaType: safeText(job.inputKind, job.jobType === "youtube" ? "YOUTUBE" : "UNKNOWN"),
+        candidateId: safeText(job.candidateId),
+        status,
+        statusText: safeText(job.statusText, "Segma Player에서 처리 중…"),
+        error: safeText(job.error),
+        errorCode: safeText(job.errorCode),
+        folderName: "",
+        createdAt,
+        updatedAt,
+        source: "companion",
+        retryable: status === "failed" || status === "cancelled",
+      };
+    })
+    .sort((left, right) => right.createdAt - left.createdAt)
+    .slice(0, limit);
 }
 
 export function retryPayloadForJob(job) {

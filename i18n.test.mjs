@@ -49,23 +49,22 @@ function collectKeys(locale) {
 }
 
 const PROBE_KEYS = [
-  "app.heading", "app.settings", "plan.free", "plan.pro", "plan.summaryFree", "plan.summaryPro",
-  "tab.detect", "tab.link", "detect.rescan", "detect.empty", "jobs.collapse", "jobs.clear",
-  "media.progressive", "media.stream", "action.download", "action.cancel", "action.retry",
-  "quality.label", "link.addressLabel", "save.path", "status.queued", "status.completed",
-  "stage.saving", "msg.savingSegments", "overlay.heading", "app.language", "settings.license",
-  "settings.activateKey", "settings.saveFolder", "settings.changeFolder", "settings.buyPro",
+  "app.heading", "app.language", "companion.connected", "companion.unavailable",
+  "companion.update", "companion.open", "companion.install", "tab.detect", "tab.link",
+  "detect.rescan", "detect.empty", "media.progressive", "media.stream",
+  "action.download", "action.sent", "quality.label", "link.addressLabel",
+  "settings.title", "settings.companion", "overlay.heading", "status.queued",
+  "status.completed", "stage.saving", "msg.savingSegments",
 ];
 
 test("interpolates placeholders and falls back to English for unknown locales", () => {
   const ko = translator("ko");
   assert.equal(ko("detect.candidateCount", { count: 3 }), "3개 후보");
-  assert.equal(ko("save.path", { name: "test" }), "저장 경로: test");
   const zh = translator("zh");
   assert.equal(zh("quality.cap", { height: 1080 }), "最高 1080p");
   const unknown = translator("fr");
   assert.equal(unknown.locale, DEFAULT_LOCALE);
-  assert.equal(unknown("action.download"), "Download");
+  assert.equal(unknown("action.download"), "Download in app");
 });
 
 test("maps canonical Korean pipeline status lines onto the active locale", () => {

@@ -17,7 +17,7 @@ export function createProgressiveDownloader(deps) {
         fallbackFilename,
       );
       deps.setStatus("영상을 확인하는 중…", false, context);
-      const session = await deps.prepareProgressiveFetch(
+      let session = await deps.prepareProgressiveFetch(
         await deps.progressiveSession(
           candidate.resourceUrl,
           candidate.pageUrl,
@@ -43,6 +43,13 @@ export function createProgressiveDownloader(deps) {
         }
         context.totalBytes = Number.isFinite(probed.total) && probed.total >= 0 ? probed.total : null;
         context.rangeSupported = probed.rangeSupported === true;
+      }
+      if (session.sourceFrameFallbackPreferred && context.rangeSupported) {
+        session = await deps.prepareProgressiveFetch({
+          ...session,
+          sourceFrameFallbackPreferred: false,
+          sourceFrameFallbackReason: null,
+        }, context);
       }
       return {
         type: "progressive",

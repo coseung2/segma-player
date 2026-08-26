@@ -1,5 +1,4 @@
-import { ensureSaveDirectory, getStoredSaveDirectory } from "./save-directory.js";
-import { LICENSE_API_URL } from "./license.js";
+import { COMPANION_INSTALL_URL } from "./edition.js";
 import {
   LOCALE_STORAGE_KEY,
   applyStaticTranslations,
@@ -7,231 +6,104 @@ import {
   normalizeLocale,
   translator,
 } from "./i18n.js";
-import { encodeQr } from "./qr-code.js";
 
-const PURCHASE_API_ORIGIN = LICENSE_API_URL.replace(/\/api\/license$/, "");
+const MEDIA_DOWNLOAD_CAPABILITY = "media-download-v1";
+
 let t = translator();
-const licenseStatusElement = document.querySelector("#license-status");
-const licenseDeviceStatusElement = document.querySelector("#license-device-status");
-const licenseAuthStatusElement = document.querySelector("#license-auth-status");
-const licenseKeyInput = document.querySelector("#license-key");
-const licenseActivateButton = document.querySelector("#license-activate");
-const licenseCopyButton = document.querySelector("#license-copy");
-const licenseSection = document.querySelector("#license-section");
-const parallelFolderButton = document.querySelector("#parallel-folder");
-const parallelStatusElement = document.querySelector("#parallel-status");
-const purchasePeriodSelect = document.querySelector("#purchase-period");
-const purchaseCreateButton = document.querySelector("#purchase-create");
-const purchaseToggleButton = document.querySelector("#purchase-toggle");
-const purchasePanel = document.querySelector("#purchase-panel");
-const purchaseOrderBox = document.querySelector("#purchase-order");
-const purchaseAddress = document.querySelector("#purchase-address");
-const purchaseAmount = document.querySelector("#purchase-amount");
-const purchaseTxInput = document.querySelector("#purchase-tx");
-const purchaseVerifyButton = document.querySelector("#purchase-verify");
-const purchaseStatus = document.querySelector("#purchase-status");
-const purchaseQr = document.querySelector("#purchase-qr");
-let purchaseOrderId = null;
+const companionStatusElement = document.querySelector("#companion-status");
+const companionOpenButton = document.querySelector("#companion-open");
+const companionHelpLink = document.querySelector("#companion-help");
 
-function renderPurchaseQr(walletAddress, amountUsdt) {
-  if (!purchaseQr) return;
-  try {
-    // Scan the payment with a phone wallet: the TRON URI carries the address
-    // and the expected amount in one scan.
-    const uri = `tron:${String(walletAddress)}?amount=${Number(amountUsdt)}`;
-    const encoded = encodeQr(uri);
-    const context = purchaseQr.getContext("2d");
-    const quiet = 4;
-    const scale = Math.floor(purchaseQr.width / (encoded.size + quiet * 2));
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, purchaseQr.width, purchaseQr.height);
-    context.fillStyle = "#000000";
-    for (let row = 0; row < encoded.size; row += 1) {
-      for (let column = 0; column < encoded.size; column += 1) {
-        if (!encoded.modules[row][column]) continue;
-        context.fillRect((column + quiet) * scale, (row + quiet) * scale, scale, scale);
-      }
+function sendBackground(message) {
+  return chrome.runtime.sendMessage(message);
+}
+
+function configuredInstallUrl() {
+  return /^https:\/\//i.test(COMPANION_INSTALL_URL) ? COMPANION_INSTALL_URL : "";
+}
+
+function companionNeedsUpdate(status) {
+  if (!status?.ok) return false;
+  if (status.updateRequired === true || status.needsUpdate === true) return true;
+  const capabilities = Array.isArray(status.capabilities) ? status.capabilities : [];
+  if (!capabilities.length) return false;
+  return !capabilities.includes(MEDIA_DOWNLOAD_CAPABILITY);
+}
+
+function renderCompanionStatus(status) {
+  const installUrl = configuredInstallUrl();
+  companionOpenButton.disabled = false;
+  companionHelpLink.hidden = true;
+  companionHelpLink.removeAttribute("href");
+  companionStatusElement.classList.remove("is-error", "is-ready");
+
+  if (status?.ok && companionNeedsUpdate(status)) {
+    companionStatusElement.textContent = t("companion.update");
+    companionStatusElement.classList.add("is-error");
+    if (installUrl) {
+      companionHelpLink.href = installUrl;
+      companionHelpLink.textContent = t("companion.updateAction");
+      companionHelpLink.hidden = false;
     }
-  } catch {
-    // The QR is a convenience; the address line below remains the source of truth.
-  }
-}
-
-purchaseToggleButton.addEventListener("click", () => {
-  const opening = purchasePanel.hidden;
-  purchasePanel.hidden = !opening;
-  purchaseToggleButton.setAttribute("aria-expanded", String(opening));
-});
-
-async function refreshParallelStatus() {
-  const handle = await getStoredSaveDirectory();
-  parallelStatusElement.textContent = handle
-    ? t("save.path", { name: handle.name })
-    : t("settings.folderMissing");
-}
-
-parallelFolderButton.addEventListener("click", async () => {
-  try {
-    const handle = await ensureSaveDirectory({ pick: true });
-    parallelStatusElement.textContent = handle
-      ? t("save.path", { name: handle.name })
-      : t("settings.folderCancelled");
-  } catch {
-    parallelStatusElement.textContent = t("settings.folderBlocked");
-  }
-});
-
-async function refreshLicenseStatus() {
-  licenseStatusElement.textContent = t("settings.checking");
-  try {
-    const response = await chrome.runtime.sendMessage({ type: "license-status" });
-    const key = typeof response?.key === "string" ? response.key : "";
-    licenseSection.hidden = false;
-    licenseKeyInput.disabled = false;
-    licenseActivateButton.disabled = false;
-    licenseCopyButton.disabled = !key;
-    if (key) licenseKeyInput.value = key;
-    const devices = typeof response?.devices === "number" ? response.devices : null;
-    const limit = typeof response?.limit === "number" ? response.limit : 3;
-    licenseDeviceStatusElement.textContent = devices === null
-      ? t("settings.deviceLimit", { limit })
-      : t("settings.deviceLimitUsed", { limit, devices });
-    const authenticated = Boolean(response?.ok && response.edition === "pro" && key);
-    licenseAuthStatusElement.textContent = authenticated
-      ? t("settings.authenticated")
-      : t("settings.unauthenticated");
-    licenseAuthStatusElement.classList.toggle("authenticated", authenticated);
-    licenseStatusElement.textContent = "";
-  } catch {
-    licenseStatusElement.textContent = t("settings.statusUnavailable");
-  }
-}
-
-licenseCopyButton.addEventListener("click", async () => {
-  const key = licenseKeyInput.value.trim();
-  if (!key) {
-    licenseStatusElement.textContent = t("settings.noKeyToCopy");
     return;
   }
-  try {
-    await navigator.clipboard.writeText(key);
-    licenseStatusElement.textContent = t("settings.keyCopied");
-  } catch {
-    licenseKeyInput.focus();
-    licenseKeyInput.select();
-    try {
-      document.execCommand("copy");
-      licenseStatusElement.textContent = t("settings.keyCopied");
-    } catch {
-      licenseStatusElement.textContent = t("settings.copyManually");
-    }
-  }
-});
 
-licenseActivateButton.addEventListener("click", async () => {
-  const key = licenseKeyInput.value.trim();
-  if (!key) {
-    licenseStatusElement.textContent = t("settings.enterKey");
+  if (status?.ok) {
+    companionStatusElement.textContent = t("companion.connected");
+    companionStatusElement.classList.add("is-ready");
     return;
   }
-  licenseStatusElement.textContent = t("settings.checking");
-  const response = await chrome.runtime.sendMessage({ type: "license-activate", key });
-  if (response?.ok) {
-    await refreshLicenseStatus();
-  } else if (response?.error === "license-pending") {
-    licenseStatusElement.textContent = t("settings.keyPending");
-  } else if (response?.error === "invalid-key") {
-    licenseStatusElement.textContent = t("settings.keyInvalid");
-  } else if (response?.error === "license-server-unreachable") {
-    licenseStatusElement.textContent = t("settings.keyServerDown");
-  } else if (response?.error === "device-limit-reached") {
-    licenseStatusElement.textContent = t("settings.keyDeviceLimit");
-  } else {
-    licenseStatusElement.textContent = t("settings.keyNotApproved");
-  }
-});
 
-purchaseCreateButton.addEventListener("click", async () => {
-  purchaseCreateButton.disabled = true;
-  purchaseStatus.textContent = t("settings.creatingOrder");
+  companionStatusElement.textContent = t("companion.unavailable");
+  companionStatusElement.classList.add("is-error");
+  if (installUrl) {
+    companionHelpLink.href = installUrl;
+    companionHelpLink.textContent = t("companion.install");
+    companionHelpLink.hidden = false;
+  }
+}
+
+async function refreshCompanionStatus() {
+  companionStatusElement.textContent = t("companion.checking");
+  companionStatusElement.classList.remove("is-error", "is-ready");
+  companionHelpLink.hidden = true;
   try {
-    const response = await fetch(`${PURCHASE_API_ORIGIN}/api/pay/order`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ period: purchasePeriodSelect.value }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      purchaseStatus.textContent = data?.error === "payment-not-configured"
-        ? t("settings.paymentNotConfigured")
-        : t("settings.orderFailed");
-      return;
-    }
-    purchaseOrderId = data.orderId;
-    purchaseAddress.textContent = t("settings.walletAddress", {
-      network: String(data.network).toUpperCase(),
-      address: data.walletAddress,
-    });
-    purchaseAmount.textContent = t("settings.payAmount", { amount: data.amountUsdt });
-    renderPurchaseQr(data.walletAddress, data.amountUsdt);
-    purchaseOrderBox.hidden = false;
-    purchaseStatus.textContent = t("settings.sendThenVerify");
+    const status = await sendBackground({ type: "companion-status" });
+    renderCompanionStatus(status);
   } catch {
-    purchaseStatus.textContent = t("settings.orderFailed");
+    renderCompanionStatus({ ok: false });
+  }
+}
+
+async function openCompanion() {
+  companionOpenButton.disabled = true;
+  try {
+    const response = await sendBackground({ type: "show-companion-ui" });
+    if (!response?.ok) throw new Error(response?.error || "media-companion-unavailable");
+  } catch {
+    companionStatusElement.textContent = t("companion.openFailed");
+    companionStatusElement.classList.add("is-error");
+    companionStatusElement.classList.remove("is-ready");
+    const installUrl = configuredInstallUrl();
+    if (installUrl) {
+      companionHelpLink.href = installUrl;
+      companionHelpLink.textContent = t("companion.install");
+      companionHelpLink.hidden = false;
+    }
   } finally {
-    purchaseCreateButton.disabled = false;
+    companionOpenButton.disabled = false;
   }
-});
-
-purchaseVerifyButton.addEventListener("click", async () => {
-  const txHash = purchaseTxInput.value.trim();
-  if (!txHash || !purchaseOrderId) {
-    purchaseStatus.textContent = t("settings.txRequired");
-    return;
-  }
-  purchaseVerifyButton.disabled = true;
-  purchaseStatus.textContent = t("settings.verifyingPayment");
-  try {
-    const response = await fetch(`${PURCHASE_API_ORIGIN}/api/pay/verify`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ orderId: purchaseOrderId, txHash }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      // Raw server codes are not user-facing; map the known ones and fall back
-      // to a generic failure so a code like `trongrid-http-429` never surfaces.
-      const messages = {
-        "transaction-not-confirmed": "settings.txUnconfirmed",
-        "usdt-transfer-not-found": "settings.txNotFound",
-        "order-not-found": "settings.orderExpired",
-        "already-confirmed": "settings.alreadyConfirmed",
-        "payment-not-configured": "settings.paymentNotConfigured",
-        "invalid-request": "settings.txRequired",
-      };
-      const key = messages[data?.error];
-      purchaseStatus.textContent = key ? t(key) : t("settings.verifyFailed");
-      return;
-    }
-    licenseKeyInput.value = data.key;
-    purchaseStatus.textContent = t("settings.paymentConfirmed");
-    purchaseOrderBox.hidden = true;
-    licenseActivateButton.click();
-  } catch {
-    purchaseStatus.textContent = t("settings.verifyFailed");
-  } finally {
-    purchaseVerifyButton.disabled = false;
-  }
-});
+}
 
 function applyLocale(locale) {
   t = translator(locale);
   document.documentElement.lang = t.locale;
   document.title = t("settings.title");
   applyStaticTranslations(document, t);
-  void refreshParallelStatus();
-  void refreshLicenseStatus();
+  void refreshCompanionStatus();
 }
+
+companionOpenButton.addEventListener("click", () => void openCompanion());
 
 chrome.storage?.onChanged?.addListener((changes, area) => {
   if (area !== "local" || !changes[LOCALE_STORAGE_KEY]) return;
@@ -239,30 +111,13 @@ chrome.storage?.onChanged?.addListener((changes, area) => {
   if (next && next !== t.locale) applyLocale(next);
 });
 
+window.addEventListener("focus", () => void refreshCompanionStatus());
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) void refreshCompanionStatus();
+});
+
 async function start() {
   applyLocale(await loadLocale());
 }
 
 void start();
-
-// The settings page lives inside a popup iframe whose height the popup adjusts
-// from outside. Tell the parent whenever the document height changes so the
-// payment QR panel never gets clipped.
-if (window.parent !== window) {
-  const reportHeight = () => {
-    try {
-      window.parent.postMessage({
-        source: "aura-media-settings",
-        height: document.documentElement.scrollHeight || document.body.scrollHeight || 0,
-      }, "*");
-    } catch {
-      // The parent may be unavailable while the overlay is closed.
-    }
-  };
-  if (typeof ResizeObserver === "function") {
-    const observer = new ResizeObserver(reportHeight);
-    observer.observe(document.body);
-  }
-  window.addEventListener("load", reportHeight);
-  setInterval(reportHeight, 1200);
-}

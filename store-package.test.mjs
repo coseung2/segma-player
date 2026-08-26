@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { STORE_RUNTIME_FILES } from "./scripts/build-dev-staging.mjs";
 
 const repositoryRoot = path.dirname(fileURLToPath(import.meta.url));
 const packager = path.join(repositoryRoot, "scripts", "build-store-package.ps1");
@@ -16,7 +17,7 @@ const powershellAvailable = spawnSync(
   ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
   { encoding: "utf8" },
 ).status === 0;
-const expectedFiles = [
+const retiredExpectedFiles = [
   "aes-cbc.js",
   "background.js",
   "browser-download-monitor.js",
@@ -61,8 +62,6 @@ const expectedFiles = [
   "options.js",
   "parallel-download.js",
   "page-media-observer.js",
-  "playback-session.js",
-  "player-subtitle.js",
   "player-page-resolver.js",
   "popup.css",
   "popup.html",
@@ -72,9 +71,6 @@ const expectedFiles = [
   "progressive-redirect.js",
   "request-header-store.js",
   "save-directory.js",
-  "subtitle-folder.js",
-  "subtitle-generation.js",
-  "subtitle-save.js",
   "providers/dood.js",
   "providers/hlsjs.js",
   "providers/ids.js",
@@ -89,7 +85,9 @@ const expectedFiles = [
   "sites/dood/profile.js",
   "sites/missav/profile.js",
   "sites/onlyjerk/profile.js",
-  "sites/playmogo/profile.js",
+    "sites/playmogo/profile.js",
+    "sites/recu/profile.js",
+    "sites/jamak/profile.js",
   "sites/shackledshow/profile.js",
   "sites/profile.js",
   "sites/registry.js",
@@ -97,6 +95,7 @@ const expectedFiles = [
   "worker-lifecycle.js",
   "youtube-server.js",
 ].sort();
+const expectedFiles = [...STORE_RUNTIME_FILES];
 
 function runPackager(outputDirectory, upgradeUrl = null, edition = null) {
   const args = [
@@ -165,19 +164,17 @@ test("store packager builds and audits the exact free-edition ZIP", async (conte
     const manifest = JSON.parse(await readFile(path.join(extracted, "manifest.json"), "utf8"));
     assert.equal(manifest.manifest_version, 3);
     assert.equal(manifest.minimum_chrome_version, "111");
-    assert.equal(manifest.name, "Aura Media Downloader");
+    assert.equal(manifest.name, "Segma Player");
+    assert.equal(manifest.action.default_popup, "popup.html");
     assert.equal("key" in manifest, false);
     assert.equal("declarative_net_request" in manifest, false);
     assert.equal(manifest.icons["128"], "icons/icon128.png");
     assert.equal(manifest.action.default_icon["32"], "icons/icon32.png");
     assert.deepEqual(manifest.permissions, [
       "activeTab",
-      "alarms",
       "contextMenus",
       "declarativeNetRequest",
-      "downloads",
       "nativeMessaging",
-      "offscreen",
       "scripting",
       "storage",
       "webRequest",
@@ -196,30 +193,9 @@ test("store packager builds and audits the exact free-edition ZIP", async (conte
     }]);
 
     const edition = await import(`${pathToFileURL(path.join(extracted, "edition.js"))}?test=${Date.now()}`);
-    const plan = await import(`${pathToFileURL(path.join(extracted, "product-plan.js"))}?test=${Date.now()}`);
     assert.equal(edition.PRODUCT_EDITION, "free");
     assert.equal(edition.UPGRADE_URL, "");
     assert.equal(edition.COMPANION_INSTALL_URL, "https://aura.mdownloader.workers.dev/download");
-    assert.deepEqual(plan.productPlan("free"), {
-      id: "free",
-      label: "일반",
-      maxConcurrentMediaJobs: 1,
-      maxDownloadBytes: 1 * plan.GIBIBYTE,
-      youtubeEnabled: true,
-      youtubeMaxHeight: 1080,
-      backgroundDownloads: false,
-      downloadSpeedLimitBytesPerSecond: 4 * 1024 * 1024,
-    });
-    assert.deepEqual(plan.productPlan("pro"), {
-      id: "pro",
-      label: "Pro",
-      maxConcurrentMediaJobs: null,
-      maxDownloadBytes: null,
-      youtubeEnabled: true,
-      youtubeMaxHeight: null,
-      backgroundDownloads: true,
-      downloadSpeedLimitBytesPerSecond: null,
-    });
 
     const textFiles = await Promise.all(expectedFiles.filter((file) => /\.(?:js|html|css|json)$/i.test(file)).map(async (file) => [
       file,
@@ -229,13 +205,11 @@ test("store packager builds and audits the exact free-edition ZIP", async (conte
     for (const [file, text] of textFiles) assert.doesNotMatch(text, forbidden, file);
     const packagedManifest = JSON.parse(textFiles.find(([file]) => file === "manifest.json")[1]);
     assert.ok(packagedManifest.permissions.includes("nativeMessaging"));
-    assert.match(textFiles.find(([file]) => file === "background.js")[1], /native-file-writer/);
+    assert.equal(packagedManifest.permissions.includes("downloads"), false);
+    assert.equal(packagedManifest.permissions.includes("offscreen"), false);
+    assert.doesNotMatch(textFiles.find(([file]) => file === "background.js")[1], /download-worker|native-file-writer|chrome\.downloads/);
     assert.match(textFiles.find(([file]) => file === "companion-client.js")[1], /com\.aura\.media_companion/);
-    assert.match(textFiles.find(([file]) => file === "download-worker.js")[1], /productPlan\(PRODUCT_EDITION\)/);
-    assert.doesNotMatch(textFiles.find(([file]) => file === "download-worker.js")[1], /chrome\.tabs|chrome\.windows/);
-    assert.match(textFiles.find(([file]) => file === "background.js")[1], /chrome\.tabs\.onActivated/);
-    assert.match(textFiles.find(([file]) => file === "hls-download.js")[1], /assertDownloadWithinPlan/);
-    assert.match(textFiles.find(([file]) => file === "hls-download.js")[1], /tryBrowserDownloadFallback/);
+    assert.match(textFiles.find(([file]) => file === "background.js")[1], /startCompanionMediaDownload/);
     const bridge = textFiles.find(([file]) => file === "level5-page-bridge.js")[1];
     assert.match(bridge, /cachedKey\(hls, url\.href\)/);
     assert.match(bridge, /loadKey\(hls, url\.href\)/);
@@ -249,23 +223,12 @@ test("store packager builds and audits the exact free-edition ZIP", async (conte
     const content = textFiles.find(([file]) => file === "content.js")[1];
     assert.match(content, /function reportDoodPlayer/);
     assert.match(content, /requestLevel5Key/);
-    const hls = textFiles.find(([file]) => file === "hls-download.js")[1];
-    assert.match(hls, /requestPageDecodedKey/);
-    assert.match(hls, /type:\s*["']decode-hls-key["']/);
     assert.match(textFiles.find(([file]) => file === "level5-key-error.js")[1], /export function normalizeLevel5KeyError/);
 
     for (const file of expectedFiles.filter((value) => value.endsWith(".js"))) {
       const syntax = spawnSync(process.execPath, ["--check", path.join(extracted, file)], { encoding: "utf8" });
       assert.equal(syntax.status, 0, `${file}\n${syntax.stdout || ""}\n${syntax.stderr || ""}`);
     }
-    const hlsModuleUrl = pathToFileURL(path.join(extracted, "hls-download.js")).href;
-    const linkProbe = spawnSync(process.execPath, [
-      "--input-type=module",
-      "-e",
-      `globalThis.document={querySelector(){return null}}; await import(${JSON.stringify(hlsModuleUrl)});`,
-    ], { encoding: "utf8" });
-    assert.equal(linkProbe.status, 0, `staged module graph failed to link\n${linkProbe.stdout || ""}\n${linkProbe.stderr || ""}`);
-
     const firstHash = sha256(zipPath);
     const second = runPackager(temporaryRoot);
     assert.equal(second.status, 0, second.output);
@@ -308,7 +271,8 @@ test("store packager builds and audits the Pro test ZIP", async (context) => {
     const manifest = JSON.parse(await readFile(path.join(extracted, "manifest.json"), "utf8"));
     assert.equal(manifest.manifest_version, 3);
     assert.equal(manifest.minimum_chrome_version, "111");
-    assert.equal(manifest.name, "Aura Media Downloader");
+    assert.equal(manifest.name, "Segma Player");
+    assert.equal(manifest.action.default_popup, "popup.html");
     assert.equal("key" in manifest, false);
     assert.equal("declarative_net_request" in manifest, false);
 

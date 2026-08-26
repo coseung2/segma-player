@@ -126,6 +126,34 @@ pub fn format_bytes(value: Option<u64>) -> Option<String> {
     Some(format!("{trimmed} {}", units[unit]))
 }
 
+/// Compact library usage line for the rail, e.g. `1.4 GB`.
+pub fn media_usage_label(bytes: u64) -> String {
+    format_bytes(Some(bytes)).unwrap_or_else(|| "0 B".to_string())
+}
+
+/// Hide `C:\Users\<name>` so the rail shows `Downloads\...` instead.
+pub fn compact_home_path(path: &str, home: Option<&str>) -> String {
+    let normalized = path.replace('/', "\\");
+    let Some(home) = home.filter(|value| !value.is_empty()) else {
+        return normalized;
+    };
+    let home = home.replace('/', "\\").trim_end_matches('\\').to_string();
+    if home.is_empty() {
+        return normalized;
+    }
+    let stripped = if let Some(rest) = normalized.strip_prefix(&home) {
+        Some(rest)
+    } else if let Some(rest) = normalized.strip_prefix(&format!("{home}\\")) {
+        Some(rest)
+    } else {
+        None
+    };
+    match stripped {
+        Some(rest) => rest.trim_start_matches('\\').to_string(),
+        None => normalized,
+    }
+}
+
 pub fn progress_percent(job: &JobState) -> Option<u8> {
     if let Some(progress) = job.progress {
         return Some(progress.min(100));
@@ -277,7 +305,10 @@ pub fn available_actions(job: &JobState, restartable: bool, file_present: bool) 
         // Pause only applies to a transfer in flight. A queued job has nothing
         // partial to keep, and subtitle work runs remotely with no resume point.
         let mut actions = Vec::new();
-        if job.status.eq_ignore_ascii_case("running") && job_kind(job) == JobKind::Download {
+        if restartable
+            && job.status.eq_ignore_ascii_case("running")
+            && job_kind(job) == JobKind::Download
+        {
             actions.push(Action::Pause);
         }
         actions.push(Action::Cancel);
@@ -375,7 +406,6 @@ pub fn subtitle_views(jobs: &[JobState], restartable_ids: &RestartableJobs) -> V
         .collect()
 }
 
-
 pub fn queue_summary(jobs: &[JobState]) -> String {
     let downloads: Vec<&JobState> = jobs
         .iter()
@@ -424,6 +454,7 @@ pub struct LibraryEntry {
     pub size: Option<String>,
     /// `None` when no job state matches the file.
     pub job_id: Option<String>,
+    pub thumbnail_key: String,
     pub modified_at: u64,
 }
 
@@ -461,6 +492,7 @@ pub fn library_entries(files: &[MediaFile], jobs: &[JobState]) -> Vec<LibraryEnt
                     .unwrap_or_else(|| extension_label(&file.file_name)),
                 size: format_bytes(Some(file.size)),
                 job_id: job.map(|job| job.job_id.clone()),
+                thumbnail_key: crate::thumbnails::key(file),
                 modified_at: file.modified_at,
             }
         })
@@ -476,13 +508,9 @@ pub fn missing_output_count(files: &[MediaFile], jobs: &[JobState]) -> usize {
         .filter(|job| {
             job_kind(job) == JobKind::Download
                 && job.status.eq_ignore_ascii_case("completed")
-                && job
-                    .file_name
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|name| {
-                        !name.is_empty() && !files.iter().any(|file| file.file_name == name)
-                    })
+                && job.file_name.as_deref().map(str::trim).is_some_and(|name| {
+                    !name.is_empty() && !files.iter().any(|file| file.file_name == name)
+                })
         })
         .count()
 }
@@ -538,6 +566,32 @@ mod tests {
     }
 
     #[test]
+    fn media_usage_uses_the_same_decimal_units() {
+        assert_eq!(media_usage_label(0), "0 B");
+        assert_eq!(media_usage_label(320_000_000), "320 MB");
+        assert_eq!(media_usage_label(1_400_000_000), "1.4 GB");
+    }
+
+    #[test]
+    fn compact_home_path_drops_the_user_profile_prefix() {
+        assert_eq!(
+            compact_home_path(
+                r"C:\\Users\\coseung2\\Downloads\\Aura Media",
+                Some(r"C:\\Users\\coseung2"),
+            ),
+            r"Downloads\\Aura Media"
+        );
+        assert_eq!(
+            compact_home_path(r"D:\\Videos", Some(r"C:\\Users\\coseung2")),
+            r"D:\\Videos"
+        );
+        assert_eq!(
+            compact_home_path(r"C:\\Users\\coseung2", Some(r"C:\\Users\\coseung2")),
+            ""
+        );
+    }
+
+    #[test]
     fn progress_prefers_the_host_percentage_then_falls_back_to_bytes() {
         let mut state = job("a", "running");
         state.progress = Some(38);
@@ -566,6 +620,11 @@ mod tests {
         assert_eq!(
             available_actions(&job("a", "running"), true, false),
             vec![Action::Pause, Action::Cancel]
+        );
+        assert_eq!(
+            available_actions(&job("a", "running"), false, false),
+            vec![Action::Cancel],
+            "streamed browser media has no native restart record, so pause must not be offered"
         );
         assert_eq!(
             available_actions(&job("a", "queued"), true, false),
@@ -633,12 +692,18 @@ mod tests {
     fn a_subtitle_job_offers_neither_pause_nor_play() {
         let mut running = job("s", "running");
         running.job_type = Some("subtitle".into());
-        assert_eq!(available_actions(&running, true, false), vec![Action::Cancel]);
+        assert_eq!(
+            available_actions(&running, true, false),
+            vec![Action::Cancel]
+        );
 
         let mut done = job("s2", "completed");
         done.job_type = Some("subtitle".into());
         done.file_name = Some("clip.ko.vtt".into());
-        assert_eq!(available_actions(&done, false, true), vec![Action::OpenFolder]);
+        assert_eq!(
+            available_actions(&done, false, true),
+            vec![Action::OpenFolder]
+        );
     }
 
     #[test]
@@ -678,9 +743,16 @@ mod tests {
 
     #[test]
     fn text_is_collapsed_to_one_line_and_bounded() {
-        assert_eq!(single_line("line one\r\nline two", 200), "line one line two");
+        assert_eq!(
+            single_line("line one\r\nline two", 200),
+            "line one line two"
+        );
         let long = single_line(&"x".repeat(400), 50);
-        assert!(long.chars().count() <= 51, "length {}", long.chars().count());
+        assert!(
+            long.chars().count() <= 51,
+            "length {}",
+            long.chars().count()
+        );
         assert!(long.ends_with('…'));
     }
 
@@ -758,7 +830,10 @@ mod tests {
 
         assert_eq!(entries.len(), 2, "the folder decides the list");
         assert_eq!(entries[0].file_name, "recorded.mp4");
-        assert_eq!(entries[0].title, "ticket show", "job title is used when known");
+        assert_eq!(
+            entries[0].title, "ticket show",
+            "job title is used when known"
+        );
         assert_eq!(entries[0].type_label, "HLS");
         assert_eq!(entries[0].job_id.as_deref(), Some("a"));
         assert_eq!(entries[0].size.as_deref(), Some("320 MB"));
@@ -847,7 +922,10 @@ mod tests {
         assert_eq!(queue_summary(&jobs), "진행 1건 · 일시정지 1건 · 실패 1건");
 
         // A paused job must not inflate the active count.
-        assert_eq!(queue_summary(&[job("only", "paused")]), "진행 0건 · 일시정지 1건");
+        assert_eq!(
+            queue_summary(&[job("only", "paused")]),
+            "진행 0건 · 일시정지 1건"
+        );
     }
 
     #[test]

@@ -3,34 +3,21 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title data-i18n="app.title">Aura Media Downloader</title>
+    <title data-i18n="app.title">Segma Player</title>
     <link rel="stylesheet" href="popup.css" />
-    <style>
-      .playback-toast {
-        position: fixed;
-        right: 12px;
-        bottom: 12px;
-        z-index: 10;
-        max-width: min(280px, calc(100vw - 24px));
-        margin: 0;
-        padding: 10px 12px;
-        border-radius: 10px;
-        background: rgba(20, 28, 40, 0.95);
-        border: 1px solid rgba(255, 255, 255, 0.14);
-        color: #fff;
-        font-size: 12px;
-        line-height: 1.4;
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
-      }
-      .browser-play-button {
-        margin-top: 0;
-      }
-    </style>
   </head>
   <body>
     <main class="popup-shell">
       <header class="popup-header">
-        <div><p class="eyebrow">AURA</p><div class="title-row"><h1 data-i18n="app.heading">Media Download</h1><span id="plan-badge" class="plan-badge"></span></div></div>
+        <div class="brand-block">
+          <img class="brand-mark" src="assets/aura-media-mark.svg" width="28" height="28" alt="" />
+          <div class="title-copy">
+            <div class="title-row">
+              <h1 data-i18n="app.heading">Media Download</h1>
+              <span id="plan-badge" class="plan-badge"></span>
+            </div>
+          </div>
+        </div>
         <div class="header-actions">
           <div class="locale-menu-wrap">
             <button id="locale" class="icon-button" type="button" data-i18n-label="app.language" aria-label="Language" title="Language" aria-haspopup="true" aria-expanded="false">
@@ -85,7 +72,7 @@
       </section>
 
       <section id="panel-link" class="tab-panel" role="tabpanel" aria-labelledby="tab-link" hidden>
-        <p class="storage-note" data-i18n="link.note">Paste a media address or player page to save it.</p>
+        <p class="storage-note" data-i18n="link.note">Paste a media address or player page to send it to Segma Player.</p>
         <label class="field-label" for="direct-url" data-i18n="link.addressLabel">Media address</label>
         <input id="direct-url" type="url" data-i18n-placeholder="link.addressPlaceholder" placeholder="Media / player" spellcheck="false" />
         <div id="youtube-quality-row" class="quality-row" hidden>
@@ -113,17 +100,9 @@
         <h2 data-i18n="app.settings">Settings</h2>
         <button id="settings-close" class="icon-button" type="button" data-i18n-label="app.settingsClose" aria-label="Close settings">×</button>
       </header>
-      <section id="subtitle-settings" class="subtitle-settings" aria-label="Subtitle folder">
-        <div class="subtitle-settings-head">
-          <h3 id="subtitle-folder-label">Subtitle folder</h3>
-          <span id="subtitle-folder-status" role="status"></span>
-        </div>
-        <button id="subtitle-folder-change" class="subtitle-folder-button" type="button">Choose subtitle folder</button>
-      </section>
-      <iframe id="settings-frame" src="options.html" title="Aura Media settings"></iframe>
+      <iframe id="settings-frame" src="options.html" title="Segma Player settings"></iframe>
     </section>
 
     <script type="module" src="popup.js"></script>
-    <script type="module" src="playback-addon.js"></script>
   </body>
 </html>

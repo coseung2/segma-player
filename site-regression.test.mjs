@@ -53,7 +53,7 @@ for (const fixture of fixtures) {
       pageUrl: candidate.pageUrl,
       siteUrl: candidate.siteUrl || fixture.liveUrl,
       resourceUrl: candidate.resourceUrl,
-      contentType: "application/vnd.apple.mpegurl",
+      contentType: candidate.contentType || "application/vnd.apple.mpegurl",
       tabId: 1,
       frameId: candidate.frameId,
       main: candidate.main,

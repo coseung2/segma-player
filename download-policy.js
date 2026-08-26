@@ -7,6 +7,7 @@ const EMPTY_LIST = Object.freeze([]);
 const DEFAULT_PROVIDER_POLICY = Object.freeze({
   preserveSourceFrame: false,
   preferSourceFrameProgressive: false,
+  preferParallelProgressiveWhenRangeSupported: false,
   decodeHlsKeyInSourceFrame: false,
 });
 

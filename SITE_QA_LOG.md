@@ -602,3 +602,78 @@ The av19 result is a confirmed current live detection regression and remains the
 - Evidence: direct `Invoke-WebRequest` fetches of the board page and the player iframe on 2026-08-24; deterministic fixtures in `sites/avsee/regressions.js`
 - Code/version action: `0.4.0` adds an `avsee` site profile with verified read-only title selectors, pushes them from the background to the reporting frame, and prefers the tab title for a player-frame candidate. Post-reload job naming in a real browser remains `NOT_RUN`
 - Scope limit: only the `javmgs` board layout was inspected. Other AVsee board tables may use a different heading element and are `NOT_RUN`
+
+### 2026-08-25 — PlayMogo Companion manager auto-open diagnosis (0.4.1)
+
+- Browser/channel: user's headed Chrome profile `사용자 이름 1`; screenshot shows `https://playmogo.com/d/0p6sbp4xtvw1`
+- Extension version: source and installed Companion baseline `0.4.1`; fix candidate `0.4.2`
+- Site URL / ID: `https://playmogo.com/d/0p6sbp4xtvw1` / `playmogo`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Native-page playback: `PASS` by user screenshot; the resume prompt is visible over the playing-page surface
+- Detect: `PASS` by direct user report; pressing the extension download button starts saving
+- Extension-download: `PARTIAL` — native saving starts, but the manager window does not open and the transfer remains visible only in the extension
+- Companion manager: `FAIL` on `0.4.1` — normal `media-open` never called `show-ui` and created no manager-readable state file
+- Progressive-probe / subtitle / overlay: `NOT_RUN`
+- Confirmed code failure: installed-Companion detection selected the native writer, but the writer and manager were disconnected contracts; `media-open` used a random writer ID and the native host only opened the window for the separate `show-ui` command
+- Code/version action: `0.4.2` carries the extension job ID and metadata into `media-open`, persists native progress to the manager job folder, and opens or focuses the manager. Post-reload live download remains `NOT_RUN`
+
+### 2026-08-25 — Jamak DS / PlayMogo Dood slow-download diagnosis (0.4.2)
+
+- Browser/channel: user's headed Chrome profile `사용자 이름 1`; Whale was not used
+- Extension version: installed/source baseline `0.4.2`; fix candidate `0.4.3`
+- Site URL / ID: `https://jamak.cc/bbs/board.php?bo_table=gallery&wr_id=126&sst=wr_hit&sod=desc&sop=and&page=4`; top-level site is unregistered, embedded provider site is `playmogo` / provider `dood`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Playback: `PASS` — activating the DS server loaded `https://playmogo.com/e/6rspotukejm4` and exposed the media source
+- Detect: `PASS` — primary candidate was a tokenized `cloudatacdn.com` `PROGRESSIVE` MP4 with `providerId=dood`, `siteId=playmogo`
+- Progressive-probe: `PASS` — fresh real URL returned HTTP 206 to `Range: bytes=0-0`, `Content-Range: bytes 0-0/780363155`, `Content-Type: video/mp4`; token values are not recorded
+- Extension-download: `FAIL/SLOW` by direct user report on `0.4.2`; confirmed routing chose the browser source-frame path before the Companion bounded Range path
+- Subtitle/overlay: `NOT_RUN`
+- Code/version action: `0.4.3` retains source-frame fallback for Dood authorization failures but lets prepared Range-capable direct MP4 media use the six-way Companion Range downloader. Post-reload completion and measured throughput are `NOT_RUN`
+
+### 2026-08-25 — Jamak Streamtape detection repair (0.4.3)
+
+- Browser/channel: user's headed Chrome profile `사용자 이름 1`; Whale was not used
+- Extension version: baseline `0.4.3`; fix candidate `0.4.4`
+- Site URL / ID: `https://www.jamak.cc/bbs/board.php?bo_table=gallery&wr_id=83&page=5` / `jamak`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Native-page playback: `PASS` — Streamtape iframe `https://streamtape.com/e/2PXX3pz824FZg6X` and player controls loaded
+- Detect: `FAIL` on baseline — candidate list remained empty; `CODE-FIXED / LIVE-UNVERIFIED` on `0.4.4`
+- Player-page resolution: `PASS` in current live diagnosis — the rotated Streamtape element expression resolved to a validated same-origin `/get_video` URL with the iframe URL as referrer; token values are not recorded
+- Progressive-probe / extension-download / subtitle / overlay: `NOT_RUN`
+- Code/version action: `0.4.4` accepts the current known Streamtape element-name rotation, resolves known player iframe responses immediately, and registers the narrow Jamak fixture. A fresh extension reload and download are still required
+
+### 2026-08-25 — Companion YouTube link transient 403 (0.4.3)
+
+- Browser/channel: extension link input feeding the locally installed Companion; browser profile/version not re-read for this job
+- Extension/Companion baseline: source `0.4.3`; fix candidate `0.4.4`
+- URL: `https://www.youtube.com/watch?v=GKLEMACUWps`; quality `1080`
+- Link input: `FAIL` — job `1e96253e-708e-499d-935e-93ef6d4420dc` ended with yt-dlp HTTP 403 while downloading video data
+- Reproduction comparison: `PASS` when the same URL, quality, and installed tools were immediately rerun, indicating transient or expired Googlevideo media URLs rather than permanent unavailability
+- Code/version action: `0.4.4` retries bounded transport failures and performs one fresh yt-dlp extraction after a terminal 403. Post-install explicit Retry and completed-file verification remain `NOT_RUN`
+- Detect / native-page playback / progressive-probe / subtitle / overlay: `NOT_RUN`
+
+### 2026-08-25 — Recu mediafront archive HLS 422 (0.4.4)
+
+- Browser/channel: user-reported browser session; exact browser version/channel was not re-read
+- Extension version: baseline inferred as the installed pre-fix build; fix candidate `0.4.5`
+- Site URL / ID: `https://recu.me/ellinrose/video/195409102/play` / `recu`
+- AdBlock/VPN mode: `NOT_REPORTED`
+- Native-page playback: `PASS` by direct user report
+- Detect: `PASS` by failure evidence — the extension obtained the mediafront HLS playlist and attempted segment 1
+- Extension-download: `FAIL` — `https://f62.mediafront.net/hl/ellinrose/2026-08-23,21-24/seg-1-v1-a1.ts` returned HTTP 422 during the job
+- Follow-up network observation: the same historical segment later returned 404 under multiple ordinary header combinations, indicating an expired or replaced generation path; this is not a post-fix download success
+- Progressive-probe / subtitle / overlay: `NOT_RUN`
+- Code/version action: `0.4.5` refreshes the source-page HLS candidate on 404/410/422 and permits the same media sequence and ordered segment filenames to move to a new generation directory. Deterministic regression is required to pass; live extension-download remains `NOT_RUN` until staging is reloaded
+
+### 2026-08-26 — Segma connector detection and Companion readiness after feature split (0.4.26)
+
+- Browser/channel: Playwright cached Chromium, isolated temporary profile, exact `artifacts/chrome-web-store/staging-pro`; the user's active Chrome/Whale profiles were not restarted or modified
+- Extension/Companion version: extension `0.4.26`, installed Segma Player `0.4.26`, extension ID `fnnilboncpjgaachejfhednccmfflmkl`
+- Site URL / ID: `https://beeg.com/-0211503327065170` / `beeg`
+- AdBlock/VPN mode: Aura AdBlock `on`; VPN `NOT_REPORTED`
+- Detect: `PASS` — 14 candidates, including main `video.beeg.com` `HLS_MEDIA` candidates
+- Companion detection: `PASS` — protocol 2, `toolsReady=true`, capability `media-download-v1`
+- Playback: `NOT_RUN` — browser playback is no longer a shipped extension surface
+- Progressive-probe / extension-download / subtitle / overlay: `NOT_RUN`
+- Evidence: `artifacts/live-media-0.4.26-staging-beeg-pass.json`; `ok=true`, `rawOk=true`, `companionReady=true`
+- Scope limit: the user's existing Chrome/Whale service workers still require an extension reload before their popup and settings surfaces can adopt the corrected background code

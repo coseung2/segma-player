@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+
+  <defs>
+    <linearGradient id="surface-logo-1024-c" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1C2A42"/>
+      <stop offset="1" stop-color="#0E1420"/>
+    </linearGradient>
+    <linearGradient id="accent-logo-1024-c" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#75E6DA"/>
+      <stop offset="0.52" stop-color="#63A8FF"/>
+      <stop offset="1" stop-color="#8B7CFF"/>
+    </linearGradient>
+    <radialGradient id="glow-logo-1024-c" cx="50%" cy="34%" r="62%">
+      <stop offset="0" stop-color="#63A8FF" stop-opacity="0.34"/>
+      <stop offset="0.62" stop-color="#63A8FF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#63A8FF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="url(#surface-logo-1024-c)"/>
+  <circle cx="512" cy="512" r="426" fill="url(#glow-logo-1024-c)"/>
+  <path d="M512 120v126" fill="none" stroke="url(#accent-logo-1024-c)" stroke-width="78" stroke-linecap="round"/>
+  <path d="M430 166l82 92 82-92" fill="none" stroke="url(#accent-logo-1024-c)" stroke-width="78" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="212" y="302" width="600" height="406" rx="116" fill="#101827" fill-opacity="0.58" stroke="url(#accent-logo-1024-c)" stroke-width="76"/>
+  <path d="M456 392 L614 505 L456 618 Z" fill="#F7FBFF"/>
+  <path d="M332 812h360" fill="none" stroke="#F7FBFF" stroke-width="58" stroke-linecap="round" opacity="0.92"/>
+</svg>

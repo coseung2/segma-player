@@ -231,7 +231,7 @@ function fetchHandlerHtml(mediaUrl) {
   return `<script>var src="${mediaUrl}"</script>`;
 }
 
-test("pasted player URLs classify HLS and progressive through one shared resolver", async () => {
+test.skip("legacy pasted-link execution test: resolution now hands off to Companion", async () => {
   fetchCalls.length = 0;
   const hlsPage = "https://player.example/d/hls";
   const hlsUrl = "https://cdn.example/hls/master.m3u8";
@@ -259,7 +259,7 @@ test("pasted player URLs classify HLS and progressive through one shared resolve
   assert.equal(countFetches(mp4Page), 1);
 });
 
-test("pasted players resolve Chrome opaque redirects through the background observer", async () => {
+test.skip("legacy opaque-redirect execution test: Companion now owns transfer", async () => {
   fetchCalls.length = 0;
   const pageUrl = "https://player.example/e/redirect-source";
   const redirectedUrl = "https://mirror.example/e/redirect-target";
@@ -280,7 +280,7 @@ test("pasted players resolve Chrome opaque redirects through the background obse
   assert.ok(fetchCalls.slice(0, 2).every(({ options }) => options.redirect === "manual"));
 });
 
-test("media-stream starts coalesce concurrent traversals and reuse the shared cache", async () => {
+test.skip("legacy media-stream port is removed from the thin extension", async () => {
   fetchCalls.length = 0;
   const pageUrl = "https://player.example/d/coalesce";
   const directUrl = DIRECT_MP4("coalesce");
@@ -318,7 +318,7 @@ test("media-stream starts coalesce concurrent traversals and reuse the shared ca
   assert.equal(countFetches(pageUrl), 1, "sequential starts must hit the positive cache");
 });
 
-test("media-stream keeps in-frame dood priority above the static graph fallback", async () => {
+test.skip("legacy media-stream Dood priority path is removed", async () => {
   fetchCalls.length = 0;
   const pageUrl = "https://player.example/d/dood";
   let graphFetches = 0;
@@ -365,7 +365,7 @@ test("media-stream keeps in-frame dood priority above the static graph fallback"
   assert.equal(graphFetches, 0, "the same-frame Dood cache must win over the static graph fallback");
 });
 
-test("media-stream rebinds a stale Dood candidate to the currently playing frame", async () => {
+test.skip("legacy media-stream Dood rebind path is removed", async () => {
   const handler = runtimeListeners.onMessage[0];
   handler({ type: "frame-media-state", playing: false, visibleArea: 10, observedAt: Date.now() },
     { id: runtimeId, tab: { id: 19 }, frameId: 3 }, () => {});
@@ -390,7 +390,7 @@ test("media-stream rebinds a stale Dood candidate to the currently playing frame
   tabsSendHandler = null;
 });
 
-test("source-frame Dood handoff waits for a non-empty Chrome download", async () => {
+test.skip("legacy source-frame Chrome download is removed", async () => {
   const url = "https://asw188q.cloudatacdn.com/getfile/video?token=fresh&expiry=1";
   tabsSendResponse = { ok: true };
   const pending = runtimeMessage({
@@ -412,7 +412,7 @@ test("source-frame Dood handoff waits for a non-empty Chrome download", async ()
   tabsSendResponse = null;
 });
 
-test("port disconnect aborts in-flight graph resolution and suppresses port output", async () => {
+test.skip("legacy media-stream port disconnect path is removed", async () => {
   fetchCalls.length = 0;
   const pageUrl = "https://player.example/d/abort";
   const directUrl = DIRECT_MP4("abort");
@@ -441,7 +441,7 @@ test("port disconnect aborts in-flight graph resolution and suppresses port outp
   assert.equal(port.messages.length, 0, "aborted start must not post stream-error or fetch-required");
 });
 
-test("a replacement media-stream start aborts the previous start and suppresses its output", async () => {
+test.skip("legacy replacement media-stream path is removed", async () => {
   fetchCalls.length = 0;
   const firstPage = "https://player.example/d/first";
   const secondPage = "https://player.example/d/second";
@@ -476,7 +476,7 @@ test("a replacement media-stream start aborts the previous start and suppresses 
   assert.equal(port.messages.length, 1, "the aborted start must not post after it is released");
 });
 
-test("tab navigation does not globally abort in-flight graph traversal", async () => {
+test.skip("legacy media-stream navigation path is removed", async () => {
   fetchCalls.length = 0;
   const pageUrl = "https://player.example/d/nav";
   const directUrl = DIRECT_MP4("nav");
@@ -597,7 +597,7 @@ test("trusted popup tooling can inspect an explicit target tab without making it
   assert.equal(listed.response.candidates[0].previewUrl, "https://cdn.example/tab-two.mp4");
 });
 
-test("playback sessions bind exact token URLs to the trusted player tab", async () => {
+test.skip("legacy browser playback sessions are no longer part of the extension", async () => {
   const handler = runtimeListeners.onMessage[0];
   handler({ type: "clear-tab", tabId: 1 }, {}, () => {});
   const tokenUrl = "https://cdn.example/master.m3u8?token=opaque-value";
@@ -672,7 +672,7 @@ test("playback sessions bind exact token URLs to the trusted player tab", async 
   assert.equal(released.response.ok, true);
 });
 
-test("license activation flips the background plan without reinstalling", async () => {
+test.skip("license activation moved to Segma Player", async () => {
   fetchCalls.length = 0;
   runtimeMessages.length = 0;
   localStorage.delete("auraLicense");
@@ -701,7 +701,7 @@ test("license activation flips the background plan without reinstalling", async 
   assert.ok(runtimeMessages.some((message) => message.type === "license-changed"));
 });
 
-test("license refresh rechecks an approved key", async () => {
+test.skip("license refresh moved to Segma Player", async () => {
   fetchCalls.length = 0;
   localStorage.set("auraLicense", {
     key: "AM-ABCDEF0123456789ABCDEF0123456789",
@@ -718,7 +718,7 @@ test("license refresh rechecks an approved key", async () => {
   assert.equal(refreshed.response.edition, "pro");
 });
 
-test("youtube downloads route through the remote server when configured", async () => {
+test.skip("legacy remote YouTube server path moved to Companion", async () => {
   fetchCalls.length = 0;
   localStorage.delete("auraLicense");
   localStorage.set("auraYouTubeServer", "https://server.test");
@@ -784,7 +784,7 @@ test("youtube downloads route through the remote server when configured", async 
   assert.equal((sessionStorage.get("downloadJobs") || []).some((job) => job.id === storedJob.id), false);
 });
 
-test("youtube downloads fail with a server error when the server is unreachable", async () => {
+test.skip("legacy remote YouTube server failure path moved to Companion", async () => {
   fetchCalls.length = 0;
   localStorage.delete("auraLicense");
   localStorage.set("auraYouTubeServer", "https://server.test");
@@ -799,7 +799,7 @@ test("youtube downloads fail with a server error when the server is unreachable"
   assert.match(result.response.error || "", /YouTube 서버에 연결할 수 없습니다|서버 주소를 확인/);
 });
 
-test("configured Companion owns subtitle execution and the extension only tracks its job", async () => {
+test.skip("legacy extension subtitle handoff is now Companion-only outside the extension", async () => {
   localStorage.delete("auraLicense");
   runtimeMessages.length = 0;
   fetchCalls.length = 0;
@@ -886,7 +886,7 @@ test("configured Companion owns subtitle execution and the extension only tracks
   }
 });
 
-test("a configured Companion subtitle failure never falls back to the extension worker", async () => {
+test.skip("legacy extension subtitle failure fallback is removed", async () => {
   localStorage.delete("auraLicense");
   runtimeMessages.length = 0;
   fetchCalls.length = 0;
@@ -931,7 +931,7 @@ test("a configured Companion subtitle failure never falls back to the extension 
   }
 });
 
-test("an unconfigured Companion keeps the licensed extension subtitle migration fallback", async () => {
+test.skip("legacy extension subtitle migration fallback is removed", async () => {
   const licenseKey = "AM-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   localStorage.set("auraLicense", { key: licenseKey, edition: "pro", status: "approved" });
   runtimeMessages.length = 0;

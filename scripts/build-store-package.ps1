@@ -52,62 +52,32 @@ if ($CompanionInstallUrl) {
 }
 
 $runtimeFiles = @(
-  'aes-cbc.js',
   'background.js',
-  'browser-download-monitor.js',
   'companion-client.js',
   'candidate.js',
   'candidate-ranking.js',
   'content.js',
-  'dash.js',
-  'download-checkpoint.js',
   'download-errors.js',
-  'download-job-view.js',
-  'download-jobs.js',
   'download-mode.js',
   'download-policy.js',
-  'downloaders/dash.js',
-  'downloaders/hls.js',
   'downloaders/ids.js',
-  'downloaders/progressive.js',
-  'downloaders/registry.js',
-  'download-scheduler.js',
-  'download-worker.html',
-  'download-worker.js',
   'download.js',
-  'filename-template.js',
-  'hls-download.js',
-  'hls.js',
   'i18n.js',
   'level5-key-error.js',
   'level5-page-bridge.js',
-  'license.js',
   'icons/icon16.png',
   'icons/icon32.png',
   'icons/icon48.png',
   'icons/icon128.png',
-  'media-fetch-lease.js',
   'media-request-context.js',
   'mobile-user-agent.js',
-  'native-file-writer.js',
   'options.html',
   'options.js',
-  'parallel-download.js',
   'page-media-observer.js',
-  'playback-session.js',
-  'player-subtitle.js',
   'player-page-resolver.js',
   'popup.css',
   'popup.html',
   'popup.js',
-  'progressive-redirect.js',
-  'product-plan.js',
-  'qr-code.js',
-  'request-header-store.js',
-  'save-directory.js',
-  'subtitle-folder.js',
-  'subtitle-generation.js',
-  'subtitle-save.js',
   'providers/dood.js',
   'providers/hlsjs.js',
   'providers/ids.js',
@@ -123,12 +93,12 @@ $runtimeFiles = @(
   'sites/missav/profile.js',
   'sites/onlyjerk/profile.js',
   'sites/playmogo/profile.js',
+  'sites/recu/profile.js',
+  'sites/jamak/profile.js',
   'sites/shackledshow/profile.js',
   'sites/profile.js',
   'sites/registry.js',
   'sites/youtube/profile.js',
-  'worker-lifecycle.js',
-  'youtube-server.js',
   'edition.js',
   'manifest.json'
 )
@@ -206,8 +176,8 @@ function Replace-StoreOnlyPrivateBridge([string]$RelativePath) {
 
 function Write-AuditedManifest {
   $requiredPermissions = @(
-    'activeTab', 'alarms', 'contextMenus', 'declarativeNetRequest',
-    'downloads', 'nativeMessaging', 'offscreen', 'scripting', 'storage', 'webRequest'
+    'activeTab', 'contextMenus', 'declarativeNetRequest',
+    'nativeMessaging', 'scripting', 'storage', 'webRequest'
   )
   if ($auditedManifest.manifest_version -ne 3) { throw 'Store manifest must be Manifest V3.' }
   if ([int]$auditedManifest.minimum_chrome_version -lt 111) {
@@ -217,7 +187,7 @@ function Write-AuditedManifest {
   if ($auditedManifest.PSObject.Properties.Name -contains 'declarative_net_request') {
     throw 'Store manifest must not contain a static site-specific redirect rule.'
   }
-  if ($auditedManifest.name -ne 'Aura Media Downloader') { throw 'Store manifest branding is not Aura Media.' }
+  if ($auditedManifest.name -ne 'Segma Player') { throw 'Store manifest branding is not Segma Player.' }
   $manifestPermissions = (@($auditedManifest.permissions) | Sort-Object) -join ','
   $minimumPermissions = ($requiredPermissions | Sort-Object) -join ','
   if ($manifestPermissions -ne $minimumPermissions) {
@@ -281,9 +251,6 @@ export const COMPANION_INSTALL_URL = $companionInstallLiteral;
   }
   Write-Utf8NoBom (Join-Path $StageDirectory 'edition.js') $edition
 
-  $sourcePlan = Join-Path $RepositoryRoot 'product-plan.js'
-  if (-not (Test-Path -LiteralPath $sourcePlan -PathType Leaf)) { throw 'product-plan.js is required for store packaging.' }
-  Copy-Item -LiteralPath $sourcePlan -Destination (Join-Path $StageDirectory 'product-plan.js') -Force
 }
 
 function Get-StageRelativeFiles {
@@ -333,7 +300,9 @@ function Invoke-StoreAudit([string[]]$ExpectedFiles) {
   }
   $auditedBackground = Read-Utf8 (Join-Path $StageDirectory 'background.js')
   $auditedCompanion = Read-Utf8 (Join-Path $StageDirectory 'companion-client.js')
-  if ($auditedBackground -notmatch 'native-file-writer' -or $auditedCompanion -notmatch 'com\.aura\.media_companion') {
+  if ($auditedBackground -notmatch 'startCompanionMediaDownload' -or
+      $auditedCompanion -notmatch 'com\.aura\.media_companion' -or
+      $auditedCompanion -notmatch 'media-download-v1') {
     throw 'Store audit did not find the reviewed Aura Companion bridge.'
   }
   if (@($manifest.permissions) -notcontains 'nativeMessaging') {
@@ -372,7 +341,7 @@ New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 if (Test-Path -LiteralPath $StageDirectory) { Remove-Item -LiteralPath $StageDirectory -Recurse -Force }
 New-Item -ItemType Directory -Path $StageDirectory -Force | Out-Null
 
-foreach ($runtimeFile in ($runtimeFiles | Where-Object { $_ -notin @('manifest.json', 'edition.js', 'product-plan.js') })) {
+foreach ($runtimeFile in ($runtimeFiles | Where-Object { $_ -notin @('manifest.json', 'edition.js') })) {
   Copy-RuntimeFile $runtimeFile
 }
 New-Item -ItemType Directory -Path $StageDirectory -Force | Out-Null

@@ -78,6 +78,9 @@ Companion-first target.
   request-context leases, and source-frame token refresh. `media-request-context.js`
   makes download and playback select the same observed source context and keeps
   bounded diagnostics free of URL queries and header values.
+- The Companion player stores pose-start bookmarks with each library item,
+  paints them on the seek bar, previews their frames on hover, and seeks to the
+  exact saved timestamp when clicked.
 - `download-worker.js` keeps accepted downloads running in an offscreen document
   and `hls-download.js` refreshes short-lived manifests after 401/403 responses.
 - `contextual-hls-loader.js` applies the captured iframe Referer/Origin/Cookie
@@ -147,20 +150,22 @@ extension in the same temporary profile. Auto mode applies each fixture's
 recorded recommendation; the other modes test full blocking, reduced page
 intervention, a per-site exception, or a global-off control. Add
 `--report=<path>` to keep each matrix result separately.
-Add `--autoplay` only for an explicit playback probe; normal monitoring remains
-detection-only. `--allow-blocked` keeps scheduled monitoring green only when
+The thin extension monitor is detection-only; playback belongs to Segma Player.
+Add `--require-companion` to require a live protocol-compatible Companion with
+the `media-download-v1` capability. `--allow-blocked` keeps scheduled monitoring green only when
 all non-passing results are explicitly environment-blocked; the JSON still
 records `rawOk: false`.
+Set `AURA_MONITOR_EXTENSION_ROOT` to verify an exact staging directory instead
+of the repository root.
 
 For Cloudflare or Turnstile cases, `--headed --wait-for-challenge=180` brings
 the temporary browser forward and pauses for one user verification. It never
 automates CAPTCHA interaction; after the challenge disappears, playback,
 detection, and reporting resume automatically.
 
-Load the repository root as an unpacked browser connector for development. In
-the current migration baseline, File System Access/browser fallbacks remain
-available when the Companion is absent. With the Companion installed, YouTube
-and local file writing prefer the native path and save under
+Load the repository root as an unpacked browser connector for development. The
+extension detects media and forwards link/candidate downloads to Segma Player;
+it does not retain browser download or playback fallbacks. Segma Player saves under
 `Downloads\\Aura Media`. `npm run build:dev-staging` refreshes
 the audited Pro directory under `artifacts/chrome-web-store/staging-pro` on any
 Node-supported platform and intentionally creates no ZIP.

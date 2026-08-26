@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import {
   MEDIA_COMPANION_NATIVE_HOST,
   MEDIA_COMPANION_PROTOCOL,
+  MEDIA_DOWNLOAD_CAPABILITY,
+  MEDIA_DOWNLOAD_PROTOCOL,
   SUBTITLE_COMMAND_PROTOCOL,
   companionRequest,
   disconnectCompanion,
   onCompanionEvent,
+  startCompanionMediaDownload,
   startCompanionSubtitleJob,
 } from "./companion-client.js";
 
@@ -50,7 +53,7 @@ class FakePort {
   }
 }
 
-function installFakeChrome(onPost = null) {
+function installFakeChrome(onPost = null, { capabilities = [] } = {}) {
   const ports = [];
   let connectCount = 0;
   globalThis.chrome = {
@@ -61,7 +64,12 @@ function installFakeChrome(onPost = null) {
         assert.equal(host, MEDIA_COMPANION_NATIVE_HOST);
         const port = new FakePort((current, message) => {
           if (message.type === "hello") {
-            current.respond({ ok: true, requestId: message.requestId, protocol: MEDIA_COMPANION_PROTOCOL });
+            current.respond({
+              ok: true,
+              requestId: message.requestId,
+              protocol: MEDIA_COMPANION_PROTOCOL,
+              capabilities,
+            });
             return;
           }
           onPost?.(current, message);
@@ -74,6 +82,17 @@ function installFakeChrome(onPost = null) {
   return {
     ports,
     get connectCount() { return connectCount; },
+  };
+}
+
+function sampleMediaDownloadInput() {
+  return {
+    jobId: "job-123",
+    candidateId: "candidate-123",
+    url: "https://media.example:443/video/master.m3u8#fragment",
+    referrer: "https://page.example:443/watch?id=7#player",
+    title: "Sample video",
+    inputKind: "HLS_MASTER",
   };
 }
 
@@ -106,6 +125,93 @@ function assertCompanionCode(expected) {
 afterEach(() => {
   disconnectCompanion();
   delete globalThis.chrome;
+});
+
+test("media-download v1 sends only the allowlisted canonical handoff payload", async () => {
+  const fake = installFakeChrome((port, message) => {
+    port.respond({ ok: true, requestId: message.requestId, accepted: true, jobId: "job-123" });
+  }, { capabilities: [MEDIA_DOWNLOAD_CAPABILITY] });
+
+  const response = await startCompanionMediaDownload(sampleMediaDownloadInput());
+  assert.equal(response.accepted, true);
+  const [hello, download] = fake.ports[0].messages;
+  assert.deepEqual(hello.capabilities, undefined);
+  assert.deepEqual(download, {
+    protocolVersion: MEDIA_DOWNLOAD_PROTOCOL,
+    jobId: "job-123",
+    candidateId: "candidate-123",
+    url: "https://media.example/video/master.m3u8",
+    referrer: "https://page.example/watch?id=7",
+    title: "Sample video",
+    inputKind: "HLS_MASTER",
+    type: "media-download",
+    requestId: download.requestId,
+  });
+  assert.deepEqual(
+    Object.keys(download).sort(),
+    ["candidateId", "inputKind", "jobId", "protocolVersion", "referrer", "requestId", "title", "type", "url"].sort(),
+  );
+  assert.equal(JSON.stringify(download).match(/cookie|authorization|header|license|bytes|path/gi), null);
+});
+
+test("media-download rejects secrets, bytes, paths, and arbitrary fields before connecting", () => {
+  const fake = installFakeChrome(null, { capabilities: [MEDIA_DOWNLOAD_CAPABILITY] });
+  const forbidden = [
+    { headers: { Referer: "https://page.example" } },
+    { cookies: "session=secret" },
+    { authorization: "Bearer secret" },
+    { mediaBytes: new Uint8Array([1, 2, 3]) },
+    { licenseData: "secret" },
+    { path: "C:\\Downloads\\video.mp4" },
+    { downloadFolder: "C:\\Downloads" },
+  ];
+  for (const extra of forbidden) {
+    assert.throws(
+      () => startCompanionMediaDownload({ ...sampleMediaDownloadInput(), ...extra }),
+      assertCompanionCode("sensitive-media-download-field-rejected"),
+    );
+  }
+  assert.throws(
+    () => startCompanionMediaDownload({ ...sampleMediaDownloadInput(), metadata: { safe: true } }),
+    assertCompanionCode("invalid-media-download-command"),
+  );
+  assert.equal(fake.connectCount, 0);
+});
+
+test("media-download rejects non-public URLs and unsupported input kinds before connecting", () => {
+  const fake = installFakeChrome(null, { capabilities: [MEDIA_DOWNLOAD_CAPABILITY] });
+  for (const input of [
+    { ...sampleMediaDownloadInput(), url: "http://127.0.0.1/video.mp4" },
+    { ...sampleMediaDownloadInput(), referrer: "http://192.168.1.2/watch" },
+    { ...sampleMediaDownloadInput(), url: "https://user:pass@media.example/video.mp4" },
+    { ...sampleMediaDownloadInput(), inputKind: "BLOB" },
+    { ...sampleMediaDownloadInput(), title: "x".repeat(513) },
+  ]) {
+    assert.throws(
+      () => startCompanionMediaDownload(input),
+      assertCompanionCode("invalid-media-download-command"),
+    );
+  }
+  assert.equal(fake.connectCount, 0);
+});
+
+test("media-download requires the advertised v1 capability and never posts a fallback command", async () => {
+  const fake = installFakeChrome(() => assert.fail("media command must not be posted without capability"));
+  await assert.rejects(
+    startCompanionMediaDownload(sampleMediaDownloadInput()),
+    assertCompanionCode("media-companion-update-required"),
+  );
+  assert.deepEqual(fake.ports[0].messages.map((message) => message.type), ["hello"]);
+});
+
+test("media-download requires an accepted reply for the same job", async () => {
+  installFakeChrome((port, message) => {
+    port.respond({ ok: true, requestId: message.requestId, accepted: true, jobId: "different-job" });
+  }, { capabilities: [MEDIA_DOWNLOAD_CAPABILITY] });
+  await assert.rejects(
+    startCompanionMediaDownload(sampleMediaDownloadInput()),
+    assertCompanionCode("media-companion-start-rejected"),
+  );
 });
 
 test("subtitle bridge performs hello then sends the exact allowlisted command", async () => {

@@ -112,7 +112,12 @@ function streamtapeGetVideoResult(value, pageUrl) {
 export function parseStreamtapeNorobotlink(body, pageUrl) {
   const source = String(body || "");
   if (!source || source.length > 5_000_000) return null;
-  const assignment = /getElementById\s*\(\s*(['"])norobotlink\1\s*\)\s*\.\s*innerHTML\s*=/gi;
+  // Streamtape rotates the decoy element name. Older pages used
+  // `norobotlink`; the current player writes several candidates to
+  // `ideoolink`, `botlink`, and `robotlink`. Every parsed expression still has
+  // to resolve to the same-origin `/get_video` endpoint below, so accepting
+  // the known element names does not promote arbitrary script text.
+  const assignment = /getElementById\s*\(\s*(['"])(?:norobotlink|robotlink|botlink|ideoolink|videolink)\1\s*\)\s*\.\s*innerHTML\s*=/gi;
   let match;
   while ((match = assignment.exec(source))) {
     const expression = source.slice(match.index + match[0].length, match.index + match[0].length + MAX_STREAMTAPE_EXPRESSION_BYTES);

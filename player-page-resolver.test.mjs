@@ -48,6 +48,24 @@ test("parses Streamtape norobotlink literals without evaluating page code", () =
   });
 });
 
+test("parses the current Streamtape robotlink rotation without evaluating decoys", () => {
+  const pageUrl = "https://streamtape.com/e/2PXX3pz824FZg6X";
+  const body = `
+    <script>
+      document.getElementById('ideoolink').innerHTML = "/streamtape.com/g" +
+        ('xcdbet_video?id=decoy').substring(1).substring(2);
+      document.getElementById('botlink').innerHTML = '//streamtape.com/' +
+        ('xyzaget_video?id=2PXX3pz824FZg6X&expires=1787658444&ip=bound&token=fresh').substring(4);
+      document.getElementById('robotlink').innerHTML = '//streamtape.com/' +
+        ('xcdget_video?id=older').substring(2).substring(1);
+    </script>
+  `;
+  assert.deepEqual(parseStreamtapeNorobotlink(body, pageUrl), {
+    url: "https://streamtape.com/get_video?id=2PXX3pz824FZg6X&expires=1787658444&ip=bound&token=fresh",
+    referrer: pageUrl,
+  });
+});
+
 test("parses plain and JSON direct-URL responses", () => {
   assert.equal(
     parseDoodResponse("https://srv123.doodcdn.io/getfile/abc/xyz?token=1&expiry=2"),

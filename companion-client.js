@@ -1,8 +1,14 @@
 export const MEDIA_COMPANION_NATIVE_HOST = "com.aura.media_companion";
 export const MEDIA_COMPANION_PROTOCOL = 2;
+export const MEDIA_DOWNLOAD_PROTOCOL = 1;
+export const MEDIA_DOWNLOAD_CAPABILITY = "media-download-v1";
 export const SUBTITLE_COMMAND_PROTOCOL = 1;
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 10_000;
+const MAX_MEDIA_DOWNLOAD_URL_BYTES = 4_096;
+const MAX_MEDIA_DOWNLOAD_TITLE_BYTES = 512;
+const MAX_MEDIA_DOWNLOAD_ID_BYTES = 128;
 const SUBTITLE_TIMEOUT_MS = 10_000;
 const MAX_SUBTITLE_URL_BYTES = 4_096;
 const MAX_SUBTITLE_TITLE_BYTES = 512;
@@ -12,7 +18,11 @@ const SAFE_SUBTITLE_TOKEN = /^[A-Za-z0-9_-]+$/;
 const SUBTITLE_INPUT_KEYS = new Set(["candidateId", "sourceLanguage", "media", "sourceContext"]);
 const SUBTITLE_MEDIA_KEYS = new Set(["type", "title", "pageUrl", "resourceUrl", "audioRenditionUrl"]);
 const SUBTITLE_CONTEXT_KEYS = new Set(["tabId", "frameId", "contextLeaseId"]);
+const MEDIA_DOWNLOAD_INPUT_KEYS = new Set(["jobId", "candidateId", "url", "referrer", "title", "inputKind"]);
+const MEDIA_DOWNLOAD_INPUT_KINDS = new Set(["PROGRESSIVE", "HLS_MASTER", "HLS_MEDIA", "DASH"]);
+const SAFE_MEDIA_DOWNLOAD_ID = /^[A-Za-z0-9_-]+$/;
 let activePort = null;
+let activeCapabilities = new Set();
 let connectPromise = null;
 let requestSequence = 0;
 const pendingRequests = new Map();
@@ -36,6 +46,97 @@ function utf8Length(value) {
 
 function hasControlCharacter(value) {
   return /[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
+
+function containsForbiddenMediaDownloadInput(value, visited = new WeakSet()) {
+  if (!value || typeof value !== "object") return false;
+  if (typeof ArrayBuffer !== "undefined" && (value instanceof ArrayBuffer || ArrayBuffer.isView(value))) return true;
+  if (typeof Blob !== "undefined" && value instanceof Blob) return true;
+  if (visited.has(value)) return false;
+  visited.add(value);
+  for (const [key, child] of Object.entries(value)) {
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (normalized.includes("cookie")
+      || normalized.includes("authorization")
+      || normalized.includes("header")
+      || normalized.includes("license")
+      || normalized.includes("secret")
+      || normalized.includes("apikey")
+      || normalized.includes("accesstoken")
+      || normalized.includes("bearer")
+      || normalized.includes("bytes")
+      || normalized.includes("binary")
+      || normalized.includes("blob")
+      || normalized.includes("filesystem")
+      || normalized === "path"
+      || normalized.includes("filepath")
+      || normalized.includes("filename")
+      || normalized.includes("folder")
+      || normalized.includes("directory")) return true;
+    if (containsForbiddenMediaDownloadInput(child, visited)) return true;
+  }
+  return false;
+}
+
+function canonicalPublicHttpUrl(value, { required = false } = {}) {
+  if (typeof value !== "string") return null;
+  if (!value) return required ? null : "";
+  if (utf8Length(value) > MAX_MEDIA_DOWNLOAD_URL_BYTES || hasControlCharacter(value) || /\s/u.test(value)) return null;
+  try {
+    const parsed = new URL(value);
+    if ((parsed.protocol !== "https:" && parsed.protocol !== "http:")
+      || parsed.username || parsed.password) return null;
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost")
+      || hostname.endsWith(".local") || hostname === "::" || hostname === "::1"
+      || hostname === "0.0.0.0" || hostname.startsWith("127.")
+      || hostname.startsWith("10.") || hostname.startsWith("192.168.")
+      || /^172\.(?:1[6-9]|2\d|3[0-1])\./.test(hostname)
+      || hostname.startsWith("169.254.") || hostname.startsWith("fc")
+      || hostname.startsWith("fd") || hostname.startsWith("fe80:")) return null;
+    parsed.hash = "";
+    const canonical = parsed.href;
+    return utf8Length(canonical) <= MAX_MEDIA_DOWNLOAD_URL_BYTES ? canonical : null;
+  } catch {
+    return null;
+  }
+}
+
+function mediaDownloadPayload(input) {
+  if (!isPlainRecord(input)) {
+    throw companionError("미디어 다운로드 요청 형식이 올바르지 않습니다.", "invalid-media-download-command");
+  }
+  if (containsForbiddenMediaDownloadInput(input)) {
+    throw companionError(
+      "미디어 다운로드 요청에는 비밀값, 헤더, 미디어 바이트 또는 파일 경로를 포함할 수 없습니다.",
+      "sensitive-media-download-field-rejected",
+    );
+  }
+  for (const key of Object.keys(input)) {
+    if (!MEDIA_DOWNLOAD_INPUT_KEYS.has(key)) {
+      throw companionError("미디어 다운로드 요청에 허용되지 않은 필드가 있습니다.", "invalid-media-download-command");
+    }
+  }
+  const validId = (value) => typeof value === "string"
+    && utf8Length(value) <= MAX_MEDIA_DOWNLOAD_ID_BYTES
+    && SAFE_MEDIA_DOWNLOAD_ID.test(value);
+  const url = canonicalPublicHttpUrl(input.url, { required: true });
+  const referrer = canonicalPublicHttpUrl(input.referrer ?? "");
+  if (!validId(input.jobId) || !validId(input.candidateId)
+    || !url || referrer === null
+    || !validBoundedText(input.title, MAX_MEDIA_DOWNLOAD_TITLE_BYTES, { required: true })
+    || !MEDIA_DOWNLOAD_INPUT_KINDS.has(input.inputKind)) {
+    throw companionError("미디어 다운로드 요청 또는 공개 URL이 올바르지 않습니다.", "invalid-media-download-command");
+  }
+  return {
+    protocolVersion: MEDIA_DOWNLOAD_PROTOCOL,
+    jobId: input.jobId,
+    candidateId: input.candidateId,
+    url,
+    ...(referrer ? { referrer } : {}),
+    title: input.title,
+    inputKind: input.inputKind,
+  };
 }
 
 function containsForbiddenSubtitleInput(value, visited = new WeakSet()) {
@@ -210,6 +311,7 @@ function attachPort(port) {
   port.onDisconnect.addListener(() => {
     if (activePort !== port) return;
     activePort = null;
+    activeCapabilities = new Set();
     connectPromise = null;
     const detail = chrome.runtime.lastError?.message || "Aura Companion 연결이 끊겼습니다.";
     rejectPending(companionError(detail, "media-companion-disconnected"));
@@ -254,10 +356,14 @@ export async function ensureCompanion({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
       if (Number(hello.protocol) !== MEDIA_COMPANION_PROTOCOL) {
         throw companionError("Aura Companion 버전이 맞지 않습니다. Companion을 업데이트해 주세요.", "media-companion-protocol-mismatch");
       }
+      activeCapabilities = new Set(Array.isArray(hello.capabilities)
+        ? hello.capabilities.filter((value) => typeof value === "string")
+        : []);
       return port;
     } catch (error) {
       try { port.disconnect(); } catch { /* already disconnected */ }
       activePort = null;
+      activeCapabilities = new Set();
       throw error;
     }
   })();
@@ -276,7 +382,7 @@ export async function companionRequest(type, payload = {}, { timeoutMs = DEFAULT
 export async function companionStatus() {
   try {
     const response = await companionRequest("status", {}, { timeoutMs: 2_500 });
-    return { ok: true, ...response };
+    return { ok: true, capabilities: [...activeCapabilities], ...response };
   } catch (error) {
     return { ok: false, error: error?.message || "media-companion-unavailable", errorCode: error?.code || "media-companion-unavailable" };
   }
@@ -294,6 +400,26 @@ export async function companionYouTubeInfo(url) {
 
 export async function startCompanionYouTubeDownload({ jobId, url, quality }) {
   return companionRequest("youtube-download", { jobId, url, quality }, { timeoutMs: 10_000 });
+}
+
+export function startCompanionMediaDownload(input) {
+  const payload = mediaDownloadPayload(input);
+  return ensureCompanion({ timeoutMs: MEDIA_DOWNLOAD_TIMEOUT_MS }).then(async (port) => {
+    if (!activeCapabilities.has(MEDIA_DOWNLOAD_CAPABILITY)) {
+      throw companionError(
+        "Segma Player가 미디어 다운로드를 지원하지 않습니다. 앱을 업데이트한 뒤 다시 열어 주세요.",
+        "media-companion-update-required",
+      );
+    }
+    const response = await postRequest(port, "media-download", payload, MEDIA_DOWNLOAD_TIMEOUT_MS);
+    if (response?.accepted !== true || response?.jobId !== payload.jobId) {
+      throw companionError(
+        "Segma Player가 다운로드 작업을 수락하지 않았습니다.",
+        "media-companion-start-rejected",
+      );
+    }
+    return response;
+  });
 }
 
 export function startCompanionSubtitleJob(input) {
@@ -345,6 +471,7 @@ export async function openCompanionDownloads() {
 export function disconnectCompanion() {
   const port = activePort;
   activePort = null;
+  activeCapabilities = new Set();
   connectPromise = null;
   if (port) {
     try { port.disconnect(); } catch { /* already disconnected */ }

@@ -1,0 +1,113 @@
+{
+  "generatedAt": "2026-08-25T17:27:25.116Z",
+  "note": "Neutral working assets; no product name is embedded in the artwork.",
+  "listing": {
+    "appTile": "listing/app-tile-300x300.png",
+    "storeLogo": "listing/store-logo-50x50.png",
+    "poster": "listing/poster-720x1080.png",
+    "hero": "listing/hero-1920x1080.png",
+    "screenshots": [
+      "listing/screenshot-01-downloads-1366x768.png",
+      "listing/screenshot-02-library-1366x768.png",
+      "listing/screenshot-03-player-1366x768.png",
+      "listing/screenshot-04-subtitles-1366x768.png",
+      "listing/screenshot-05-settings-1366x768.png"
+    ]
+  },
+  "package": [
+    "package/Square44x44Logo.png",
+    "package/Square71x71Logo.png",
+    "package/Square150x150Logo.png",
+    "package/Square310x310Logo.png",
+    "package/StoreLogo50x50.png",
+    "package/Wide310x150Logo.png",
+    "package/SplashScreen620x300.png"
+  ],
+  "outputs": [
+    {
+      "name": "app-tile-300x300",
+      "width": 300,
+      "height": 300
+    },
+    {
+      "name": "store-logo-50x50",
+      "width": 50,
+      "height": 50
+    },
+    {
+      "name": "logo-mark-1024x1024",
+      "width": 1024,
+      "height": 1024
+    },
+    {
+      "name": "poster-720x1080",
+      "width": 720,
+      "height": 1080
+    },
+    {
+      "name": "hero-1920x1080",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "name": "Square44x44Logo",
+      "width": 44,
+      "height": 44
+    },
+    {
+      "name": "Square71x71Logo",
+      "width": 71,
+      "height": 71
+    },
+    {
+      "name": "Square150x150Logo",
+      "width": 150,
+      "height": 150
+    },
+    {
+      "name": "Square310x310Logo",
+      "width": 310,
+      "height": 310
+    },
+    {
+      "name": "StoreLogo50x50",
+      "width": 50,
+      "height": 50
+    },
+    {
+      "name": "Wide310x150Logo",
+      "width": 310,
+      "height": 150
+    },
+    {
+      "name": "SplashScreen620x300",
+      "width": 620,
+      "height": 300
+    },
+    {
+      "name": "screenshot-01-downloads-1366x768.png",
+      "width": 1366,
+      "height": 768
+    },
+    {
+      "name": "screenshot-02-library-1366x768.png",
+      "width": 1366,
+      "height": 768
+    },
+    {
+      "name": "screenshot-03-player-1366x768.png",
+      "width": 1366,
+      "height": 768
+    },
+    {
+      "name": "screenshot-04-subtitles-1366x768.png",
+      "width": 1366,
+      "height": 768
+    },
+    {
+      "name": "screenshot-05-settings-1366x768.png",
+      "width": 1366,
+      "height": 768
+    }
+  ]
+}

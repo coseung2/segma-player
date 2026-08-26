@@ -9,13 +9,11 @@ document does not define screens, components, or visual behavior.
 The current codebase is still in migration. A statement below describes target
 ownership unless it is explicitly marked as current implementation.
 
-Current backend checkpoint: the versioned subtitle command bridge, Companion
-public-URL subtitle runner, durable local state/output, and Worker/Modal remote
-cancellation path exist locally. The current extension Subtitle command now
-routes to the Companion when it reports a configured license, while retaining
-the extension worker only as an absent/unconfigured migration fallback. This is
-not deployed or real-browser verified. See `MODAL_SUBTITLE_INTEGRATION.md` for
-implemented boundaries and remaining migration work.
+Current backend checkpoint: the Companion owns download jobs, playback, and
+subtitle work. The browser extension migration target is intentionally narrow:
+detect media in the current browser tab and send link/download intent to the
+Companion. Browser playback and subtitle-generation UI and runtime are not part
+of the extension surface.
 
 ## Product model
 
@@ -43,21 +41,19 @@ Companion. It should own only browser-bound capabilities and user intent:
 - current-tab and frame media detection;
 - browser-authenticated request preparation and short-lived request context;
 - the detected-media tab and candidate selection;
-- detection of page-provided subtitle tracks and browser-bound subtitle context;
 - link input for page or media URLs;
-- Download, Play, and Subtitle actions that send bounded commands to the
-  Companion;
+- Download actions that send bounded commands to the Companion;
 - Companion connection and installation status.
 
 The extension must not become a second desktop application. New persistent job
-management, product dashboards, updater behavior, or durable download history
-belong in the Companion.
+management, product dashboards, updater behavior, durable download history,
+media playback, and subtitle workflows belong in the Companion.
 
 In the target product, the extension does not execute or save downloads, play
 media, generate or translate subtitles, or save subtitle files. Any browser-side
 download engine, browser player, subtitle pipeline, queue, file-system UI, or
 browser-download fallback in the current repository is transitional migration
-code.
+code and must not be exposed by the extension UI.
 
 The extension must also remain plan-neutral. It must not decide General versus
 Pro entitlement, enforce paid limits, advertise plan-specific downloader
@@ -103,10 +99,10 @@ them. Local work must not silently become a cloud upload path.
 ```text
 User browsing in Chrome/Whale/Edge
   -> extension detects media or accepts a pasted link
-  -> user clicks Download, Play, or Subtitle in the extension
+  -> user clicks Download in the extension
   -> extension sends a bounded command and browser context
-  -> Companion downloads, opens the player, or processes subtitles
-  -> Companion owns progress, retry, history, media/subtitle folders, and plan policy
+  -> Companion downloads and owns the resulting job
+  -> Companion owns progress, retry, history, playback, subtitle folders, and plan policy
 ```
 
 The Companion can still be opened directly for job, folder, player, and settings

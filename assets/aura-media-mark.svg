@@ -1,16 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
-  <title id="title">Aura Media</title>
-  <defs>
-    <linearGradient id="surface" x1="64" y1="48" x2="448" y2="464" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#243956" />
-      <stop offset="1" stop-color="#101722" />
-    </linearGradient>
-    <linearGradient id="aura" x1="134" y1="106" x2="390" y2="392" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#8FC0FF" />
-      <stop offset="1" stop-color="#4F86E8" />
-    </linearGradient>
-  </defs>
-  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#surface)" />
-  <circle cx="256" cy="238" r="142" fill="none" stroke="url(#aura)" stroke-width="38" />
-  <path d="M256 130v174m-72-62 72 72 72-72M174 374h164" fill="none" stroke="#F4F8FF" stroke-width="46" stroke-linecap="round" stroke-linejoin="round" />
+<svg width="1024" height="1024" viewBox="192 192 640 640" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Store · App icon · 1024×1024" clip-path="url(#clip0_39_392)">
+<g id="Mark / puzzle playback" clip-path="url(#clip1_39_392)">
+<g id="Puzzle / interlocking playback / master">
+<path id="Vector" d="M232 192H512V296C554 296 568 330 568 352C568 374 554 408 512 408V512H408C408 554 374 568 352 568C330 568 296 554 296 512H192V232C192 210 210 192 232 192Z" fill="#17191D"/>
+<path id="Vector_2" d="M512 192H792C814 192 832 210 832 232V512H728C728 554 694 568 672 568C650 568 616 554 616 512H512V408C554 408 568 374 568 352C568 330 554 296 512 296V192Z" fill="#59616D"/>
+<path id="Vector_3" d="M192 512H296C296 554 330 568 352 568C374 568 408 554 408 512H512V616C554 616 568 650 568 672C568 694 554 728 512 728V832H232C210 832 192 814 192 792V512Z" fill="#D6D9DE"/>
+<path id="Vector_4" d="M512 512H616C616 554 650 568 672 568C694 568 728 554 728 512H832V792C832 814 814 832 792 832H512V728C554 728 568 694 568 672C568 650 554 616 512 616V512Z" fill="#FFA31A"/>
+<path id="Vector_5" d="M455 434L589 512L455 590V434Z" fill="white"/>
+</g>
+</g>
+</g>
+<defs>
+<clipPath id="clip0_39_392">
+<rect width="1024" height="1024" fill="white"/>
+</clipPath>
+<clipPath id="clip1_39_392">
+<rect width="1024" height="1024" fill="white"/>
+</clipPath>
+</defs>
 </svg>

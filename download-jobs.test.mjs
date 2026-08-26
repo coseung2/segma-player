@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createDownloadJob,
   persistedDownloadJobs,
+  publicCompanionJobs,
   publicDownloadJobs,
   retryPayloadForJob,
   terminalDownloadJob,
@@ -43,6 +44,43 @@ test("download job list is newest first and contains popup-safe fields", () => {
     statusText: "다운로드 대기 중…", error: "", errorCode: "", folderName: "", createdAt: 2, updatedAt: 2, source: "youtube",
     retryable: false,
   }]);
+});
+
+test("Companion jobs are the authoritative popup-safe job projection", () => {
+  assert.deepEqual(publicCompanionJobs([
+    {
+      jobId: "media-1",
+      jobType: "media-download",
+      candidateId: "candidate-1",
+      inputKind: "HLS_MASTER",
+      title: "Detected video",
+      status: "running",
+      statusText: "42%",
+      createdAt: 10,
+      updatedAt: 20,
+      progress: 42,
+      fileName: "private-name.mp4",
+    },
+    {
+      jobId: "media-2",
+      inputKind: "PROGRESSIVE",
+      status: "failed",
+      error: "network",
+      createdAt: 30,
+      updatedAt: 40,
+    },
+  ]), [
+    {
+      id: "media-2", title: "Segma Player 다운로드", mediaType: "PROGRESSIVE", candidateId: "",
+      status: "failed", statusText: "Segma Player에서 처리 중…", error: "network", errorCode: "",
+      folderName: "", createdAt: 30, updatedAt: 40, source: "companion", retryable: true,
+    },
+    {
+      id: "media-1", title: "Detected video", mediaType: "HLS_MASTER", candidateId: "candidate-1",
+      status: "running", statusText: "42%", error: "", errorCode: "", folderName: "",
+      createdAt: 10, updatedAt: 20, source: "companion", retryable: false,
+    },
+  ]);
 });
 
 test("download jobs preserve Companion ownership without accepting arbitrary sources", () => {
@@ -104,7 +142,7 @@ test("failed jobs expose retry capability without exposing the private payload",
   const [publicJob] = publicDownloadJobs([failed]);
   assert.equal(publicJob.retryable, true);
   assert.equal("retryPayload" in publicJob, false);
-  assert.equal("retryPayload" in persistedDownloadJobs([failed])[0], false);
+  assert.deepEqual(persistedDownloadJobs([failed])[0].retryPayload, retryPayload);
   const completed = updateDownloadJob(queued, { status: "completed" }, 3);
   assert.equal(completed.retryPayload, null);
 

@@ -7,9 +7,12 @@ import { fileURLToPath } from "node:url";
 import { SITE_REGRESSION_FIXTURES } from "../sites/regressions.js";
 
 const repositoryRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const manifestPath = path.join(repositoryRoot, "manifest.json");
+const extensionRoot = path.resolve(String(process.env.AURA_MONITOR_EXTENSION_ROOT || repositoryRoot));
+const manifestPath = path.join(extensionRoot, "manifest.json");
 const extensionManifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const extensionVersion = String(extensionManifest.version || "unknown");
+const extensionName = String(extensionManifest.name || "").trim();
+if (!extensionName) throw new Error("extension-name-missing");
 const reportRunStamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 const commandLineReport = process.argv.find((argument) => argument.startsWith("--report="))?.slice("--report=".length) || "";
 const reportPath = path.resolve(
@@ -27,6 +30,8 @@ const headless = !process.argv.includes("--headed") && process.env.AURA_MONITOR_
 const autoplay = process.argv.includes("--autoplay") || process.env.AURA_MONITOR_AUTOPLAY === "1";
 const allowBlocked = process.argv.includes("--allow-blocked")
   || process.env.AURA_MONITOR_ALLOW_BLOCKED === "1";
+const requireCompanion = process.argv.includes("--require-companion")
+  || process.env.AURA_MONITOR_REQUIRE_COMPANION === "1";
 const disableSandbox = process.env.AURA_MONITOR_NO_SANDBOX === "1";
 const challengeWaitArgument = process.argv.find((argument) => argument === "--wait-for-challenge"
   || argument.startsWith("--wait-for-challenge="));
@@ -535,10 +540,11 @@ async function main() {
   const cachedExecutablePath = browserExecutablePath ? "" : await cachedChromiumExecutable();
   const resolvedExecutablePath = browserExecutablePath || cachedExecutablePath;
   let context = null;
+  let companionStatus = { ok: false, errorCode: "not-checked" };
   const results = [];
   try {
     if (challengeWaitSeconds && headless) throw new Error("challenge-wait-requires-headed");
-    const extensionRoots = activeAdblockMode ? [repositoryRoot, adblockRoot] : [repositoryRoot];
+    const extensionRoots = activeAdblockMode ? [extensionRoot, adblockRoot] : [extensionRoot];
     const extensionArgument = extensionRoots.join(",");
     context = await chromium.launchPersistentContext(profileDirectory, {
       ...(resolvedExecutablePath
@@ -570,19 +576,36 @@ async function main() {
       timeout: 15_000,
     });
     const extensionDefinitions = [
-      { name: "Aura Media Downloader", root: repositoryRoot, page: "popup.html" },
+      { name: extensionName, root: extensionRoot, page: "popup.html" },
       ...(activeAdblockMode
         ? [{ name: "Aura AdBlock", root: adblockRoot, page: "popup.html" }]
         : []),
     ];
     const extensionIds = await extensionIdsByName(context, extensionDefinitions);
-    const extensionId = extensionIds.get("Aura Media Downloader");
+    const extensionId = extensionIds.get(extensionName);
     const controlPage = await context.newPage();
     await controlPage.goto(`chrome-extension://${extensionId}/popup.html`, {
       waitUntil: "domcontentloaded",
       timeout: 15_000,
     });
     controlPage.setDefaultTimeout(10_000);
+    companionStatus = await controlPage.evaluate(async () => {
+      const status = await chrome.runtime.sendMessage({ type: "companion-status" });
+      return {
+        ok: status?.ok === true,
+        protocol: Number(status?.protocol) || null,
+        version: typeof status?.version === "string" ? status.version : "",
+        toolsReady: status?.toolsReady === true,
+        capabilities: Array.isArray(status?.capabilities)
+          ? status.capabilities.filter((value) => typeof value === "string")
+          : [],
+        errorCode: typeof status?.errorCode === "string" ? status.errorCode : "",
+        error: typeof status?.error === "string" ? status.error.slice(0, 160) : "",
+      };
+    }).catch((error) => ({
+      ok: false,
+      errorCode: String(error?.message || "companion-status-failed").slice(0, 160),
+    }));
     let adblockControlPage = null;
     if (activeAdblockMode) {
       const adblockExtensionId = extensionIds.get("Aura AdBlock");
@@ -683,14 +706,6 @@ async function main() {
           if (downloadedPath) {
             navigationDownloadBytes = Number((await stat(downloadedPath)).size);
           }
-        }
-        if (navigationDownloadBytes === null) {
-          navigationDownloadBytes = await completedChromeDownloadBytes(
-            controlPage,
-            navigationResponse?.url() || fixture.liveUrl,
-            startedAt,
-            Math.max(1, progressiveMinimumBytes),
-          );
         }
         const pageState = await page.evaluate(() => {
           const hostOf = (value) => {
@@ -822,26 +837,6 @@ async function main() {
             };
           }
         }
-        let playback = null;
-        if (evaluation.ok && primary) {
-          playback = await verifyCandidatePlayback(controlPage, context, primary);
-          if (!playback.ok) {
-            const successfulMediaResponse = playback.responses?.some((response) => ["media", "xhr"]
-              .includes(response.type) && [200, 206].includes(response.status));
-            const nativeCodecFailure = (playback.mediaErrorCode === 4
-              || playback.diagnostics?.error?.details === "manifestIncompatibleCodecsError")
-              && (pageState.nativePlayback?.frames?.some((frame) => frame.videos?.some(
-                (video) => video.errorCode === 4,
-              )) || successfulMediaResponse);
-            evaluation = nativeCodecFailure
-              ? {
-                ok: false,
-                blocked: true,
-                reason: "browser-codec-unsupported",
-              }
-              : { ok: false, reason: "playback-failed" };
-          }
-        }
         results.push({
           id: fixture.id,
           startedAt,
@@ -851,7 +846,6 @@ async function main() {
           page: pageState,
           ...evaluation,
           progressiveProbe,
-          playback,
           candidateCount: candidates.length,
           candidates: reportedCandidates,
         });
@@ -883,8 +877,12 @@ async function main() {
     await rm(profileDirectory, { recursive: true, force: true });
   }
 
-  const rawOk = results.every((result) => result.ok);
-  const reportOk = results.every((result) => result.ok || (allowBlocked && result.blocked === true));
+  const companionReady = companionStatus.ok === true
+    && companionStatus.toolsReady === true
+    && companionStatus.capabilities?.includes("media-download-v1");
+  const rawOk = results.every((result) => result.ok) && (!requireCompanion || companionReady);
+  const reportOk = results.every((result) => result.ok || (allowBlocked && result.blocked === true))
+    && (!requireCompanion || companionReady);
   const report = {
     generatedAt: new Date().toISOString(),
     extensionVersion,
@@ -897,6 +895,9 @@ async function main() {
     headless,
     autoplay,
     allowBlocked,
+    requireCompanion,
+    companionReady,
+    companionStatus,
     challengeWaitSeconds,
     minimumProgressiveBytes: configuredMinimumProgressiveBytes,
     adblockMode: activeAdblockMode || "not-loaded",

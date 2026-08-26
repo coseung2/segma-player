@@ -3,98 +3,43 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title data-i18n="settings.title">Aura Media settings</title>
+    <title data-i18n="settings.title">Segma Player settings</title>
     <style>
-      :root { color-scheme: dark; font-family: "Segoe UI", "Malgun Gothic", sans-serif; background: #10141c; color: #f4f7fb; }
-      body { width: 100%; margin: 0; padding: 18px; box-sizing: border-box; background: #10141c; }
-      section + section { margin-top: 14px; padding-top: 14px; border-top: 1px solid #2a3444; }
-      .label { margin: 0 0 8px; font-size: 12px; font-weight: 700; }
-      .desc { margin: 0 0 10px; color: #9eacc0; font-size: 11px; line-height: 1.5; }
-      .row { display: flex; gap: 8px; margin-top: 8px; }
-      .row > select { flex: 1 1 auto; min-width: 0; }
-      button { min-height: 32px; padding: 0 14px; border: 0; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700; white-space: nowrap; }
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", sans-serif;
+        background: #F7F8F9;
+        color: #17191D;
+      }
+      body { width: 100%; min-height: 100vh; margin: 0; padding: 20px 16px 24px; background: #F7F8F9; color: #17191D; }
+      body::before { display: block; margin-bottom: 18px; color: #FFA31A; content: "SEGMA PLAYER"; font-size: 11px; font-weight: 800; letter-spacing: .16em; }
+      section { padding: 16px 0; }
+      .label { margin: 0 0 8px; color: #17191D; font-size: 13px; font-weight: 700; }
+      .desc { margin: 0 0 12px; color: #59616D; font-size: 11px; line-height: 1.5; }
+      button { min-height: 40px; padding: 0 14px; border: 0; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700; white-space: nowrap; }
+      button:disabled { cursor: default; opacity: .48; }
       .block { width: 100%; text-align: left; }
-      .primary { background: #4d84e8; color: #fff; }
-      .primary:hover { background: #6195f2; }
-      .ghost { background: #202c3d; color: #dce6f4; }
-      .ghost:hover { background: #2c3d55; }
-      .link-button { flex: 0 0 auto; margin-top: 10px; padding: 0; background: transparent; color: #80b1f5; font-size: 11px; }
-      .link-button:hover { color: #a8caff; }
-      .link-button:focus-visible { outline: 2px solid #73a5ff; outline-offset: 2px; }
-      .status { margin: 8px 0 0; color: #8f9db0; font-size: 11px; line-height: 1.5; }
-      .status:empty { display: none; }
-      .head-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-      .head-row .label, .head-row .status { margin: 0; }
-      .auth-status { flex: 0 0 auto; color: #8f9db0; font-size: 11px; font-weight: 700; }
-      .auth-status.authenticated { color: #78d99a; }
-      .key-field { position: relative; }
-      .key-field input { width: 100%; box-sizing: border-box; min-height: 36px; padding: 8px 40px 8px 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
-      select, input[type="text"] { box-sizing: border-box; width: 100%; min-height: 36px; padding: 0 10px; border: 1px solid #2e3b52; border-radius: 8px; background: #0d1219; color: #f4f7fb; }
-      #purchase-order { margin-top: 10px; padding: 10px; border: 1px solid #2a3444; border-radius: 8px; background: #131a25; }
-      #purchase-order[hidden] { display: none; }
-      .pay-line { margin: 0 0 6px; color: #c3cede; font-size: 11px; line-height: 1.5; word-break: break-all; }
-      .pay-qr-wrap { display: flex; align-items: center; gap: 10px; margin: 8px 0 10px; }
-      .pay-qr { display: grid; place-items: center; padding: 6px; border-radius: 8px; background: #fff; }
-      .pay-qr canvas { display: block; width: 140px; height: 140px; image-rendering: pixelated; }
-      .pay-qr-copy { flex: 1 1 auto; min-width: 0; }
-      .pay-qr-copy .pay-line { margin: 0 0 4px; }
-      .input-icon-button { position: absolute; top: 0; right: 0; width: 36px; height: 36px; flex: none; min-height: 0; padding: 0; border: 0; border-radius: 0 8px 8px 0; background: transparent; color: #8f9db0; cursor: pointer; font-size: 0; }
-      .input-icon-button:hover, .input-icon-button:focus-visible { background: rgba(255, 255, 255, .06); color: #fff; }
-      .input-icon-button:focus-visible { outline: 2px solid #73a5ff; outline-offset: -2px; }
-      .input-icon-button svg { width: 15px; height: 15px; }
+      .primary { background: #FFA31A; color: #17191D; }
+      .primary:hover:not(:disabled) { background: #E89300; }
+      .ghost { border: 1px solid #D2D5DB; background: #FFFFFF; color: #17191D; }
+      .ghost:hover:not(:disabled) { border-color: #FFA31A; background: #FFF4DF; }
+      .link-button { display: flex; min-height: 44px; align-items: center; justify-content: center; margin-top: 12px; padding: 0; border: 1px solid #D6D9DE; border-radius: 8px; background: transparent; color: #7A4B00; font-size: 11px; font-weight: 750; text-decoration: none; }
+      .link-button:hover { background: #FFF4DF; color: #17191D; }
+      .link-button[hidden] { display: none; }
+      :focus-visible { outline: 2px solid #FFA31A; outline-offset: 2px; }
+      .status { margin: 8px 0 0; color: #59616D; font-size: 11px; line-height: 1.5; }
+      .status.is-ready { color: #1F7A4C; }
+      .status.is-error { color: #7A4B00; }
+      @media (max-width: 340px) { body { padding-inline: 12px; } }
     </style>
   </head>
   <body>
-    <section id="license-section">
-      <div class="head-row">
-        <p class="label" data-i18n="settings.license">Pro license</p>
-        <span id="license-auth-status" class="auth-status" role="status" aria-live="polite"></span>
-      </div>
-      <p id="license-device-status" class="status" role="status" aria-live="polite"></p>
-      <div class="key-field">
-        <input id="license-key" type="text" data-i18n-placeholder="settings.keyPlaceholder" placeholder="AM-XXXX…" autocomplete="off" />
-        <button id="license-copy" class="input-icon-button" type="button" data-i18n-label="settings.copyKey" aria-label="Copy key" title="Copy key">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
-        </button>
-      </div>
-      <div class="row">
-        <button id="license-activate" class="primary block" type="button" data-i18n="settings.activateKey">Register key</button>
-      </div>
-      <p id="license-status" class="status" role="status" aria-live="polite" data-i18n="settings.checking">Checking…</p>
-      <button id="purchase-toggle" class="link-button" type="button" aria-expanded="false" aria-controls="purchase-panel" data-i18n="settings.buyPro">Buy Pro</button>
-      <div id="purchase-panel" hidden>
-        <div class="row">
-          <select id="purchase-period" data-i18n-label="settings.period" aria-label="Period">
-            <option value="month" data-i18n="settings.periodMonth">1 month · $5.99 USDT</option>
-            <option value="year" data-i18n="settings.periodYear">1 year · $49 USDT</option>
-          </select>
-          <button id="purchase-create" class="primary" type="button" data-i18n="settings.createOrder">Order</button>
-        </div>
-        <div id="purchase-order" hidden>
-          <div class="pay-qr-wrap">
-            <div class="pay-qr" aria-hidden="true"><canvas id="purchase-qr" width="220" height="220"></canvas></div>
-            <div class="pay-qr-copy">
-              <p id="purchase-address" class="pay-line"></p>
-              <p id="purchase-amount" class="pay-line"></p>
-            </div>
-          </div>
-          <input id="purchase-tx" type="text" data-i18n-placeholder="settings.txPlaceholder" placeholder="Transaction hash (TxID)" autocomplete="off" />
-          <div class="row">
-            <button id="purchase-verify" class="primary block" type="button" data-i18n="settings.verifyPayment">Verify payment</button>
-          </div>
-        </div>
-        <p id="purchase-status" class="status" role="status" aria-live="polite"></p>
-      </div>
-    </section>
-    <section>
-      <p class="label" data-i18n="settings.saveFolder">Save folder</p>
-      <p id="parallel-status" class="status" role="status" aria-live="polite" data-i18n="settings.checking">Checking…</p>
-      <div class="row">
-        <button id="parallel-folder" class="ghost block" type="button" data-i18n="settings.changeFolder">Change save folder</button>
-      </div>
+    <section id="companion-section">
+      <p class="label" data-i18n="settings.companion">Segma Player</p>
+      <p class="desc" data-i18n="settings.companionHelp">Jobs, playback, subtitles, the save folder, and your license live in Segma Player.</p>
+      <p id="companion-status" class="status" role="status" aria-live="polite" data-i18n="companion.checking">Checking Segma Player…</p>
+      <button id="companion-open" class="primary block" type="button" data-i18n="companion.open">Open Segma Player</button>
+      <a id="companion-help" class="link-button" target="_blank" rel="noreferrer" data-i18n="companion.install" hidden>Install Windows Companion</a>
     </section>
     <script type="module" src="options.js"></script>
   </body>

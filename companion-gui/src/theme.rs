@@ -32,6 +32,7 @@ mod primitive {
     pub const GREEN_600: Color32 = hex(0x1F7A4C);
     pub const AMBER_50: Color32 = hex(0xFBF2E3);
     pub const AMBER_600: Color32 = hex(0x9A6206);
+    pub const ORANGE_500: Color32 = hex(0xFFA31A);
     pub const RED_50: Color32 = hex(0xFBECEC);
     pub const RED_600: Color32 = hex(0xB32B32);
 }
@@ -57,6 +58,7 @@ pub mod color {
     pub const TEXT_SUCCESS: Color32 = primitive::GREEN_600;
     pub const TEXT_WARNING: Color32 = primitive::AMBER_600;
     pub const TEXT_DANGER: Color32 = primitive::RED_600;
+    pub const ACCENT: Color32 = primitive::ORANGE_500;
 
     pub const BORDER_SUBTLE: Color32 = primitive::GRAY_200;
     pub const BORDER_DEFAULT: Color32 = primitive::GRAY_300;
@@ -99,6 +101,9 @@ pub mod metric {
     pub const RAIL_WIDTH: f32 = 232.0;
     pub const NAV_ITEM_HEIGHT: f32 = 38.0;
     pub const CONTROL_HEIGHT: f32 = 32.0;
+    /// Icon box inside a control. Lucide is drawn on a 24px grid; 16px keeps
+    /// the stroke optically equal to 12–13px label text.
+    pub const ICON_SM: f32 = 16.0;
     pub const PROGRESS_HEIGHT: f32 = 6.0;
     pub const NAV_DOT_RADIUS: f32 = 3.0;
     pub const WINDOW_MIN: Vec2 = Vec2::new(880.0, 560.0);
@@ -164,6 +169,7 @@ mod tests {
         assert_eq!(color::TEXT_PRIMARY, Color32::from_rgb(0x17, 0x19, 0x1D));
         assert_eq!(color::TEXT_MUTED, Color32::from_rgb(0x78, 0x7D, 0x86));
         assert_eq!(color::BORDER_SUBTLE, Color32::from_rgb(0xE4, 0xE6, 0xEA));
+        assert_eq!(color::ACCENT, Color32::from_rgb(0xFF, 0xA3, 0x1A));
     }
 
     #[test]
@@ -189,6 +195,7 @@ mod tests {
             color::TEXT_PRIMARY,
             color::BORDER_STRONG,
             color::BG_SELECTED,
+            color::ACCENT,
         ] {
             let (r, g, b) = (color.r() as i32, color.g() as i32, color.b() as i32);
             assert!(

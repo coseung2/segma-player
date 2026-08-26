@@ -15,7 +15,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$ToolsArchive,
 
-  [ValidateSet('Chrome', 'Edge', 'Both')]
+  [ValidateSet('Chrome', 'Edge', 'Whale', 'Both')]
   [string]$Browser = 'Both'
 )
 
@@ -109,6 +109,9 @@ if ($Browser -in @('Chrome', 'Both')) {
 }
 if ($Browser -in @('Edge', 'Both')) {
   $registryPaths += "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName"
+}
+if ($Browser -in @('Whale', 'Both')) {
+  $registryPaths += "HKCU:\Software\Naver\Naver Whale\NativeMessagingHosts\$HostName"
 }
 foreach ($registryPath in $registryPaths) {
   New-Item -Path $registryPath -Force | Out-Null

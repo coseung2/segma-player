@@ -123,6 +123,7 @@
 | 0.3.92 | 공식 Cloudflare Companion 설치 안내 URL 기본 연결 | 011, 012 |
 | 0.3.93 | Dood `/pass_md5/` 단서 격리·응답 URL 검증 및 ShadowRoot 오버레이 분리 | 012 |
 | 0.3.94 | Companion 설치 후 store/development origin 자동 감지 및 재연결 | 013 |
+| 0.4.27 | 재생 전 설정·JSON 주소·플레이어 페이지·Shadow/srcdoc 주소 찾기 강화 | 038 |
 
 ### INC-2026-08-17-006 follow-up — 0.3.54 package recheck
 
@@ -576,3 +577,16 @@
 - Regression: focused connector/background/installer tests pass; full `npm test` passes 492/514 with 22 intentional legacy skips and 0 failures. Native host previously passed 37/37, release compilation succeeded, and direct installed-host hello/status return protocol 2, version `0.4.26`, `toolsReady=true`, and `media-download-v1`.
 - Staging/install result: `npm run build:dev-staging` returns `DEV_STAGING_OK`, version `0.4.26`, 49 files. Installed host and manager hashes exactly match their release binaries; Add/Remove Programs reports `0.4.26`; Chrome and Whale HKCU native-host registrations both resolve to the installed manifest. Segma Player was reopened with window title `Segma Player`.
 - Real-browser result: isolated Chromium loaded the exact `staging-pro` path as extension ID `fnnilboncpjgaachejfhednccmfflmkl`. With Aura AdBlock on, live Beeg detection returned 14 candidates including main `video.beeg.com` HLS media, while Companion status returned `0.4.26`, `toolsReady=true`, and `media-download-v1`; evidence is `artifacts/live-media-0.4.26-staging-beeg-pass.json`. The user's already-open Chrome/Whale profiles still require one extension reload and popup/settings retest, so the incident remains `LIVE-UNVERIFIED` for those exact active profiles.
+
+### INC-2026-08-26-038 Pre-playback media URL discovery was too narrow
+
+- Status: `CODE-FIXED / LIVE-UNVERIFIED`
+- Reproduction: adult streaming pages that hide the real media URL until playback, or that embed Filemoon/Mixdrop/Voe/player iframes, JSON `play_url` values without `.m3u8`, Shadow DOM video, or `srcdoc` player config. The extension already saw playing hls.js/Fetch/XHR sources, but pre-playback address finding missed those clues.
+- Browser and affected surface: Chrome/Whale detection (`detect`) for current-tab media URL discovery. Playback, subtitle, and quality selection are out of scope.
+- Confirmed root cause: isolated `content.js` harvested only `video_url`/`video_url_hd` base64; MAIN-world JSON matching required an explicit media extension; `looksLikePlayerPage()` started the player graph only for Streamtape `/v|/e` and generic `/d/` `/e/`; media-element scans did not walk open Shadow roots or `srcdoc` frames.
+- Code action in `0.4.27`: harvest `data-src`/`data-file`, JSON-LD `contentUrl`/`embedUrl`, `og:video`, and bounded inline script media URLs before playback; accept JSON keys such as `play_url`/`videoUrl` and extensionless HLS/DASH-looking URLs; start player-graph resolution for `/embed` `/player` and Filemoon/Mixdrop/Voe pages; scan open Shadow roots and `srcdoc` iframe config. Keep eval/JSON.parse replacement, quality selection, and extra player adapters out of this patch.
+- De-obfuscation action in `0.4.27`: add a deterministic, zero-eval Dean Edwards Packer unpacker and hex-escaped URL decoder across `content.js`, `page-media-observer.js`, and `player-page-resolver.js`. Obfuscated inline player scripts and player-page responses are unpacked and decoded without dynamic code execution (`eval()`), exposing hidden media URLs before playback.
+- De-obfuscation action in `0.4.28`: add static string reversal (`decodeReversedUrls`), percent/double URL encoding decoder (`decodePercentEscapedUrls`), and Base64 JSON config payload decoder (`decodeBase64JsonConfigs`) across `content.js`, `page-media-observer.js`, and `player-page-resolver.js`. Hidden media URLs encoded in reversed strings, %-escaped literals, or Base64 JSON config payloads are extracted statically without dynamic code evaluation.
+- Changed files: `content.js`, `page-media-observer.js`, `player-page-resolver.js`, focused tests, `manifest.json`, this incident record, and `SITE_QA_LOG.md`.
+- Regression: focused detection tests pass 146/146 including site regressions. Live Chrome/Whale detection of obfuscated player pages remains `NOT_RUN`.
+- Staging version: `0.4.28`.

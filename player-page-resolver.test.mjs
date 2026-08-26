@@ -34,6 +34,16 @@ test("recognizes doodstream-style player paths", () => {
   assert.equal(looksLikePlayerPage("https://playmogo.com/blog/post"), false);
 });
 
+test("recognizes embed/player paths and hosted Filemoon Mixdrop Voe pages", () => {
+  assert.equal(looksLikePlayerPage("https://cdn.example/embed/abc123xyz"), true);
+  assert.equal(looksLikePlayerPage("https://cdn.example/player/abc123xyz"), true);
+  assert.equal(looksLikePlayerPage("https://filemoon.sx/e/abc123xyz"), true);
+  assert.equal(looksLikePlayerPage("https://mixdrop.ag/e/abc123xyz"), true);
+  assert.equal(looksLikePlayerPage("https://voe.sx/e/abc123xyz"), true);
+  assert.equal(looksLikePlayerPage("https://cdn.example/watch/news"), false);
+  assert.equal(looksLikePlayerPage("https://cdn.example/blog/post"), false);
+});
+
 test("parses Streamtape norobotlink literals without evaluating page code", () => {
   const pageUrl = "https://streamtape.com/v/abc123/video.mp4";
   const body = `
@@ -391,6 +401,41 @@ test("follows provider-agnostic iframe sources with player-shaped URLs first", a
     "https://media.example/e/root",
     "https://embed.example/player/abc",
   ]);
+});
+
+test("resolves Filemoon Mixdrop and Voe player pages from bounded page text", async () => {
+  const filemoon = harness();
+  filemoon.responses.set("https://filemoon.sx/e/abc123xyz", okResponse(
+    'jwplayer("vplayer").setup({ file: "https://cdn.example/filemoon/master.m3u8?token=1" });',
+  ));
+  assert.deepEqual(await filemoon.resolver.resolve("https://filemoon.sx/e/abc123xyz"), {
+    type: "hls",
+    url: "https://cdn.example/filemoon/master.m3u8?token=1",
+    referrer: "https://filemoon.sx/e/abc123xyz",
+    cached: false,
+  });
+
+  const mixdrop = harness();
+  mixdrop.responses.set("https://mixdrop.ag/e/abc123xyz", okResponse(
+    'MDCore.wurl = "//cdn.example/mixdrop/video.mp4";',
+  ));
+  assert.deepEqual(await mixdrop.resolver.resolve("https://mixdrop.ag/e/abc123xyz"), {
+    type: "progressive",
+    url: "https://cdn.example/mixdrop/video.mp4",
+    referrer: "https://mixdrop.ag/e/abc123xyz",
+    cached: false,
+  });
+
+  const voe = harness();
+  voe.responses.set("https://voe.sx/e/abc123xyz", okResponse(
+    'var sources = { hls: "https://cdn.example/voe/live.m3u8?token=1" };',
+  ));
+  assert.deepEqual(await voe.resolver.resolve("https://voe.sx/e/abc123xyz"), {
+    type: "hls",
+    url: "https://cdn.example/voe/live.m3u8?token=1",
+    referrer: "https://voe.sx/e/abc123xyz",
+    cached: false,
+  });
 });
 
 test("decodes base64 video_url clues and types them by extension", async () => {
@@ -872,4 +917,56 @@ test("resolvePlayerPage returns null for invalid or non-public pages without fet
   assert.equal(await resolvePlayerPage("not a url"), null);
   assert.equal(await resolvePlayerPage("http://127.0.0.1/d/abc"), null);
   assert.equal(await resolvePlayerPage("https://user:pass@media.example/e/abc"), null);
+});
+
+test("unpacks Dean Edwards Packer scripts and decodes hex-escaped URLs without using eval", async () => {
+  const h = harness();
+  const packerScript = "eval(function(p,a,c,k,e,d){return p}('0 1 = \"2://3.4/5.6\";',62,7,'var|file|https|cdn|example|packed|m3u8'.split('|'),0,{}))";
+  h.responses.set("https://media.example/e/packed", okResponse(packerScript));
+  assert.deepEqual(await h.resolver.resolve("https://media.example/e/packed"), {
+    type: "hls",
+    url: "https://cdn.example/packed.m3u8",
+    referrer: "https://media.example/e/packed",
+    cached: false,
+  });
+
+  const hexPage = harness();
+  const hexScript = 'var stream = "\\x68\\x74\\x74\\x70\\x73\\x3a\\x2f\\x2f\\x63\\x64\\x6e\\x2e\\x65\\x78\\x61\\x6d\\x70\\x6c\\x65\\x2f\\x68\\x65\\x78\\x2e\\x6d\\x70\\x34";';
+  hexPage.responses.set("https://media.example/e/hex", okResponse(hexScript));
+  assert.deepEqual(await hexPage.resolver.resolve("https://media.example/e/hex"), {
+    type: "progressive",
+    url: "https://cdn.example/hex.mp4",
+    referrer: "https://media.example/e/hex",
+    cached: false,
+  });
+});
+
+test("decodes reversed, percent-escaped, and base64 JSON media config clues", async () => {
+  const reversedPage = harness();
+  reversedPage.responses.set("https://media.example/e/reversed", okResponse('const url = "8u3m.desaev/evil/ndc.elpmaxe//:sptth";'));
+  assert.deepEqual(await reversedPage.resolver.resolve("https://media.example/e/reversed"), {
+    type: "hls",
+    url: "https://example.cdn/live/veased.m3u8",
+    referrer: "https://media.example/e/reversed",
+    cached: false,
+  });
+
+  const percentPage = harness();
+  percentPage.responses.set("https://media.example/e/percent", okResponse('const file = "%68%74%74%70%73%3a%2f%2f%63%64%6e%2e%65%78%61%6d%70%6c%65%2f%70%65%72%63%65%6e%74%2e%6d%70%34";'));
+  assert.deepEqual(await percentPage.resolver.resolve("https://media.example/e/percent"), {
+    type: "progressive",
+    url: "https://cdn.example/percent.mp4",
+    referrer: "https://media.example/e/percent",
+    cached: false,
+  });
+
+  const b64JsonPage = harness();
+  const payload = Buffer.from(JSON.stringify({ file: "https://cdn.example/b64json/master.m3u8" })).toString("base64");
+  b64JsonPage.responses.set("https://media.example/e/b64json", okResponse(`const cfg = "${payload}";`));
+  assert.deepEqual(await b64JsonPage.resolver.resolve("https://media.example/e/b64json"), {
+    type: "hls",
+    url: "https://cdn.example/b64json/master.m3u8",
+    referrer: "https://media.example/e/b64json",
+    cached: false,
+  });
 });

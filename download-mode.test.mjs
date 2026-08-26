@@ -32,6 +32,11 @@ test("classifies player pages and remote YouTube jobs", () => {
   assert.equal(classifyDownloadMode({ pageUrl: "https://www.youtube.com/watch?v=abc" }), DOWNLOAD_MODES.REMOTE_SERVICE);
 });
 
+test("classifies hosted embed pages as player-graph work", () => {
+  assert.equal(classifyDownloadMode({ resourceUrl: "https://filemoon.sx/e/abc123xyz" }), DOWNLOAD_MODES.PLAYER_PAGE_GRAPH);
+  assert.equal(classifyDownloadMode({ resourceUrl: "https://cdn.example/embed/abc123xyz" }), DOWNLOAD_MODES.PLAYER_PAGE_GRAPH);
+});
+
 test("keeps provider hostname out of the generic transport classifier", () => {
   assert.equal(classifyDownloadMode({ pageUrl: "https://doodstream.com/e/example", mediaType: "PROGRESSIVE" }),
     DOWNLOAD_MODES.DIRECT_PROGRESSIVE);

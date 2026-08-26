@@ -4,6 +4,15 @@ const PLAYER_PATH_RE = /^\/(?:[de])\//i;
 const STREAMTAPE_HOST_RE = /(?:^|\.)streamtape\.com$/i;
 const STREAMTAPE_PLAYER_PATH_RE = /^\/(?:v|e)(?:\/|$)/i;
 const MAX_STREAMTAPE_EXPRESSION_BYTES = 32_768;
+const GENERIC_PLAYER_PATH_RE = /(?:^|\/)(?:embed|e|v|player|watch)(?:[-_/]|$)/i;
+const GENERIC_PLAYER_ID_RE = /(?:^|\/)(?:embed|player)\/[A-Za-z0-9_-]{4,}(?:\/|$)/i;
+const FILEMOON_HOST_RE = /(?:^|\.)(?:filemoon\.(?:sx|to|nl|in|com)|fmoonenc\.com)$/i;
+const MIXDROP_HOST_RE = /(?:^|\.)(?:mixdrop\.(?:co|to|ag|sx|my)|mdy48tn97\.com)$/i;
+const VOE_HOST_RE = /(?:^|\.)(?:voe\.(?:sx|to)|jilliandescribecompany\.com)$/i;
+const FILEMOON_MEDIA_RE = /https?:\/\/[^\s"'<>\\`]+\.(?:m3u8|mp4)(?:\?[^\s"'<>\\`]*)?/i;
+const MIXDROP_MDKEY_RE = /\bMDCore\.wurl\s*=\s*(["'])([^"']+)\1/i;
+const VOE_HLS_RE = /\b(?:hls|source|file)\s*[:=]\s*(["'])(https?:\/\/[^"']+\.m3u8[^"']*)\1/i;
+const VOE_PROMPT_RE = /window\.prompt\s*\(\s*(["'])([^"']+)\1/i;
 
 // Explicit bounds for bounded player-graph traversal, caching, and URL
 // validation. Defaults keep the resolver a cheap, deterministic fallback for
@@ -154,10 +163,43 @@ export function isStreamtapePlayerPage(url) {
 export function looksLikePlayerPage(url) {
   try {
     const parsed = new URL(url);
-    return isStreamtapePlayerPage(parsed.href) || PLAYER_PATH_RE.test(parsed.pathname);
+    return isKnownHostedPlayerPage(parsed.href) || PLAYER_PATH_RE.test(parsed.pathname)
+      || GENERIC_PLAYER_ID_RE.test(parsed.pathname);
   } catch {
     return false;
   }
+}
+
+export function isFilemoonPlayerPage(url) {
+  try {
+    const parsed = new URL(url);
+    return FILEMOON_HOST_RE.test(parsed.hostname) && GENERIC_PLAYER_PATH_RE.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function isMixdropPlayerPage(url) {
+  try {
+    const parsed = new URL(url);
+    return MIXDROP_HOST_RE.test(parsed.hostname) && GENERIC_PLAYER_PATH_RE.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function isVoePlayerPage(url) {
+  try {
+    const parsed = new URL(url);
+    return VOE_HOST_RE.test(parsed.hostname) && GENERIC_PLAYER_PATH_RE.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isKnownHostedPlayerPage(url) {
+  return isStreamtapePlayerPage(url) || isFilemoonPlayerPage(url)
+    || isMixdropPlayerPage(url) || isVoePlayerPage(url);
 }
 
 export function parseDoodResponse(body) {
@@ -518,6 +560,166 @@ function mediaResultForValue(value, pageUrl) {
   return { type, url: canonical.href, referrer: pageUrl };
 }
 
+function decodeRadix62(token, radix) {
+  let val = 0;
+  for (let i = 0; i < token.length; i += 1) {
+    const code = token.charCodeAt(i);
+    let digit = 0;
+    if (code >= 48 && code <= 57) digit = code - 48;
+    else if (code >= 97 && code <= 122) digit = code - 97 + 10;
+    else if (code >= 65 && code <= 90) digit = code - 65 + 36;
+    else return null;
+    if (digit >= radix) return null;
+    val = val * radix + digit;
+  }
+  return val;
+}
+
+export function unpackPackerScripts(text) {
+  if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
+  const pattern = /\be[v]al\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,[^\)]+\)[\s\S]*?\}\s*\(\s*(['"])((?:\\.|[^\\])*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])((?:\\.|[^\\])*?)\5\.split\s*\(\s*['"]\|['"]\s*\)/gi;
+  let match;
+  const results = [];
+  while ((match = pattern.exec(text))) {
+    try {
+      const payload = match[2]
+        .replace(/\\'/g, "'")
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, "\\");
+      const radix = Number.parseInt(match[3], 10);
+      const count = Number.parseInt(match[4], 10);
+      const keywords = match[6].split("|");
+      if (!Number.isInteger(radix) || radix < 2 || radix > 62 || !keywords.length) continue;
+      const unpacked = payload.replace(/\b[0-9a-zA-Z]+\b/g, (token) => {
+        const index = decodeRadix62(token, radix);
+        if (index === null || index >= keywords.length) return token;
+        const word = keywords[index];
+        return word !== "" ? word : token;
+      });
+      results.push(unpacked);
+    } catch {
+      // Ignore malformed packer blocks
+    }
+  }
+  return results.join("\n");
+}
+
+export function decodeHexEscapedScript(text) {
+  if (typeof text !== "string" || !text.includes("\\x")) return "";
+  const hexRe = /(?:\\x[0-9a-fA-F]{2}){6,}/g;
+  let match;
+  const results = [];
+  while ((match = hexRe.exec(text))) {
+    try {
+      const decoded = match[0].replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) =>
+        String.fromCharCode(Number.parseInt(hex, 16))
+      );
+      if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
+        results.push(decoded);
+      }
+    } catch {
+      // Ignore malformed hex blocks
+    }
+  }
+  return results.join("\n");
+}
+
+export function decodeReversedUrls(text) {
+  if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
+  const pattern = /(["'])([A-Za-z0-9_.:~%/-]{12,2048})\1/g;
+  let match;
+  const results = [];
+  while ((match = pattern.exec(text))) {
+    const candidate = match[2];
+    if (candidate.includes("://") || candidate.startsWith("http")) continue;
+    const reversed = candidate.split("").reverse().join("");
+    if (/^https?:\/\/[^\s"'<>\\`]+\.(?:m3u8|mpd|mp4|m4v|webm)(?:\?[^\s"'<>\\`]*)?$/i.test(reversed)
+      || (/^https?:\/\/[^\s"'<>\\`]+/i.test(reversed) && /(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8|dash|mpd)\b/i.test(reversed))) {
+      results.push(reversed);
+    }
+  }
+  return results.join("\n");
+}
+
+export function decodePercentEscapedUrls(text) {
+  if (typeof text !== "string" || !text.includes("%")) return "";
+  const percentRe = /(?:(?:%[0-9a-fA-F]{2}){6,}|(?:%25[0-9a-fA-F]{2}){6,})/g;
+  let match;
+  const results = [];
+  while ((match = percentRe.exec(text))) {
+    try {
+      let decoded = match[0];
+      if (decoded.includes("%25")) {
+        try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
+      }
+      try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
+      if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
+        results.push(decoded);
+      }
+    } catch {
+      // Ignore invalid percent encoding
+    }
+  }
+  return results.join("\n");
+}
+
+export function decodeBase64JsonConfigs(text) {
+  if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
+  const b64Re = /(?:["']|:\s*)(ey[A-Za-z0-9+/]{12,}={0,2})(?:["']|[\s;,}]|$)/g;
+  let match;
+  const results = [];
+  while ((match = b64Re.exec(text))) {
+    try {
+      const rawB64 = match[1];
+      let decoded = "";
+      try {
+        decoded = atob(rawB64).trim();
+      } catch {
+        continue;
+      }
+      if ((decoded.startsWith("{") || decoded.startsWith("[")) && decoded.length <= 250_000) {
+        results.push(decoded);
+      }
+    } catch {
+      // Ignore invalid base64
+    }
+  }
+  return results.join("\n");
+}
+
+export function deobfuscateScriptText(text) {
+  if (typeof text !== "string" || !text) return "";
+  const unpacked = unpackPackerScripts(text);
+  const decodedHex = decodeHexEscapedScript(text);
+  const reversed = decodeReversedUrls(text);
+  const percent = decodePercentEscapedUrls(text);
+  const b64Json = decodeBase64JsonConfigs(text);
+  return [unpacked, decodedHex, reversed, percent, b64Json].filter(Boolean).join("\n");
+}
+
+function hostedPlayerResult(text, pageUrl) {
+  if (isFilemoonPlayerPage(pageUrl)) {
+    const match = String(text || "").match(FILEMOON_MEDIA_RE);
+    if (match) return mediaResultForValue(match[0], pageUrl);
+  }
+  if (isMixdropPlayerPage(pageUrl)) {
+    const match = MIXDROP_MDKEY_RE.exec(String(text || ""));
+    if (match?.[2]) {
+      const raw = match[2].startsWith("//") ? `https:${match[2]}` : match[2];
+      return mediaResultForValue(raw, pageUrl);
+    }
+  }
+  if (isVoePlayerPage(pageUrl)) {
+    const hls = VOE_HLS_RE.exec(String(text || ""));
+    if (hls?.[2]) return mediaResultForValue(hls[2], pageUrl);
+    const prompt = VOE_PROMPT_RE.exec(String(text || ""));
+    if (prompt?.[2] && /\.(?:m3u8|mp4|webm)$/i.test(prompt[2])) {
+      return mediaResultForValue(prompt[2], pageUrl);
+    }
+  }
+  return null;
+}
+
 // Base64 video_url/video_url_hd player-config clues (same shape content.js
 // reads from live player pages), decoded without eval and validated.
 function base64VideoUrlResult(text, pageUrl) {
@@ -585,7 +787,7 @@ async function doodPassResult(text, pageUrl, {
 
 function likelyPlayerFrameUrl(url) {
   return looksLikePlayerPage(url.href)
-    || /(?:^|\/)(?:embed|iframe|player|watch)(?:[-_/]|$)/i.test(url.pathname);
+    || GENERIC_PLAYER_PATH_RE.test(url.pathname);
 }
 
 // Follow actual iframe/embed sources regardless of provider-specific path.
@@ -691,6 +893,9 @@ export function createPlayerGraphResolver({
       throwIfAborted(signal);
 
       visited.add(pageUrl);
+      const deobfuscated = deobfuscateScriptText(text);
+      const fullText = deobfuscated ? `${text}\n${deobfuscated}` : text;
+
       const streamtape = parseStreamtapeNorobotlink(text, pageUrl);
       if (streamtape) {
         const canonical = canonicalPublicHttpUrl(streamtape.url);
@@ -708,13 +913,19 @@ export function createPlayerGraphResolver({
         return pass;
       }
 
-      const direct = directMediaResult(text, pageUrl);
+      const hosted = hostedPlayerResult(fullText, pageUrl);
+      if (hosted) {
+        throwIfAborted(signal);
+        return hosted;
+      }
+
+      const direct = directMediaResult(fullText, pageUrl);
       if (direct) {
         throwIfAborted(signal);
         return direct;
       }
 
-      const videoUrl = base64VideoUrlResult(text, pageUrl);
+      const videoUrl = base64VideoUrlResult(fullText, pageUrl);
       if (videoUrl) {
         throwIfAborted(signal);
         return videoUrl;
@@ -733,7 +944,7 @@ export function createPlayerGraphResolver({
         // Ignore malformed node URLs; nodes were canonical at enqueue time.
       }
 
-      for (const frameUrl of frameClueUrls(text, pageUrl, maxFrameClues)) {
+      for (const frameUrl of frameClueUrls(fullText, pageUrl, maxFrameClues)) {
         if (!visited.has(frameUrl)) {
           visited.add(frameUrl);
           queue.push(frameUrl);

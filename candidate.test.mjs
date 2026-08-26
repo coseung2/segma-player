@@ -200,6 +200,8 @@ test("rejects generic /d/ and /e/ player pages as progressive media", () => {
   for (const resourceUrl of [
     "https://playmogo.com/d/example",
     "https://playmogo.com/e/example",
+    "https://cdn.example/embed/abc123xyz",
+    "https://filemoon.sx/e/abc123xyz",
   ]) {
     assert.equal(mediaTypeForResource(resourceUrl, "video/mp4"), MEDIA_TYPES.UNKNOWN);
     assert.equal(makeCandidate({

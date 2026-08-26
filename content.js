@@ -14,6 +14,20 @@
   const DOOD_PASS_PATH_EXACT_RE = /^\/pass_md5\/[a-z0-9._~%/-]{1,2048}$/i;
   const DOOD_SOURCE_NODE_LIMIT = 256;
   const DOOD_SOURCE_TEXT_LIMIT = 1_000_000;
+  const MEDIA_CONFIG_NODE_LIMIT = 96;
+  const MEDIA_CONFIG_TEXT_LIMIT = 250_000;
+  const SHADOW_HOST_LIMIT = 48;
+  const SHADOW_WALK_LIMIT = 400;
+  const SRCDOC_FRAME_LIMIT = 8;
+  const SRCDOC_TEXT_LIMIT = 120_000;
+  const INLINE_MEDIA_FIELD_RE = /\b(?:video_url(?:_hd)?|streaming_url|streamingUrl|playback_url|playbackUrl|manifest_url|manifestUrl|hls_url|hlsUrl|play_url|playUrl|videoUrl|source_url|sourceUrl|contentUrl|file|src|url|source|playlist)\s*[:=]\s*(["'])((?:\\.|[^\\])*?)\1/g;
+  const INLINE_MEDIA_URL_RE = /https?:\/\/[^\s"'<>\\`]+(?:\.m3u8|\.mpd|\.mp4|\.m4v|\.webm)(?:\?[^\s"'<>\\`]*)?/gi;
+  const INLINE_MEDIA_ATTRS = Object.freeze([
+    "src", "data-src", "data-file", "data-url", "data-video", "data-stream", "data-hls", "href",
+  ]);
+  const INLINE_JSONLD_TYPES = Object.freeze([
+    "videoobject", "movie", "tvepisode", "clip", "mediaobject",
+  ]);
   const PAGE_MEDIA_EVENT_TYPE = "aura-media-observer-event-v1";
   const LEVEL5_MEDIA_DISCOVERY_REQUEST = "aura-level5-media-discovery-request-v1";
   const PAGE_MEDIA_SNAPSHOT_REQUEST_TYPE = "aura-media-observer-snapshot-request-v1";
@@ -190,28 +204,95 @@
 
   function mediaElements() {
     const result = [];
-    for (const element of document.querySelectorAll("video, audio, source")) {
-      const url = element.currentSrc || element.src;
-      if (typeof url !== "string" || url.length === 0) continue;
-      try {
-        if (/\.(?:avif|gif|jpe?g|png|webp)$/i.test(new URL(url, location.href).pathname)) continue;
-      } catch { /* keep browser-owned blob sources */ }
-      const host = element.tagName === "SOURCE" ? element.parentElement : element;
-      const area = visibleArea(host);
-      const playing = Boolean(area > 0 && host && "paused" in host && !host.paused);
-      const durationSeconds = Number(host?.duration);
-      result.push({
-        url,
-        type: element.type || "",
-        area,
-        playing,
-        muted: Boolean(host?.muted),
-        durationMs: Number.isFinite(durationSeconds) && durationSeconds > 0
-          ? Math.min(24 * 60 * 60 * 1000, Math.round(durationSeconds * 1000))
-          : 0,
-      });
-    }
+    collectMediaElementsFromRoot(document, result);
     return result;
+  }
+
+  function collectMediaElementsFromRoot(root, result, remaining = 32) {
+    if (!root || remaining <= 0) return remaining;
+    let leftover = remaining;
+    let elements = [];
+    try {
+      elements = [...(root.querySelectorAll?.("video, audio, source") || [])];
+    } catch {
+      return leftover;
+    }
+    for (const element of elements) {
+      leftover = pushMediaElement(element, result, leftover);
+      if (leftover <= 0) return leftover;
+    }
+    leftover = collectShadowMediaElements(root, result, leftover);
+    leftover = collectSrcdocMediaElements(root, result, leftover);
+    return leftover;
+  }
+
+  function pushMediaElement(element, result, remaining) {
+    if (!element || remaining <= 0) return remaining;
+    const url = element.currentSrc || element.src || element.getAttribute?.("src")
+      || element.getAttribute?.("data-src") || "";
+    if (typeof url !== "string" || url.length === 0) return remaining;
+    try {
+      if (/\.(?:avif|gif|jpe?g|png|webp)$/i.test(new URL(url, location.href).pathname)) return remaining;
+    } catch { /* keep browser-owned blob sources */ }
+    const host = String(element.tagName || "").toUpperCase() === "SOURCE" ? element.parentElement : element;
+    const area = visibleArea(host);
+    const playing = Boolean(area > 0 && host && "paused" in host && !host.paused);
+    const durationSeconds = Number(host?.duration);
+    result.push({
+      url,
+      type: element.type || element.getAttribute?.("type") || "",
+      area,
+      playing,
+      muted: Boolean(host?.muted),
+      durationMs: Number.isFinite(durationSeconds) && durationSeconds > 0
+        ? Math.min(24 * 60 * 60 * 1000, Math.round(durationSeconds * 1000))
+        : 0,
+    });
+    return remaining - 1;
+  }
+
+  function collectShadowMediaElements(root, result, remaining) {
+    if (!root || remaining <= 0) return remaining;
+    let leftover = remaining;
+    let seen = 0;
+    try {
+      const hosts = root.querySelectorAll?.("*") || [];
+      let walked = 0;
+      for (const host of hosts) {
+        walked += 1;
+        if (walked > SHADOW_WALK_LIMIT) break;
+        const shadow = host.shadowRoot;
+        if (!shadow) continue;
+        leftover = collectMediaElementsFromRoot(shadow, result, leftover);
+        seen += 1;
+        if (seen >= SHADOW_HOST_LIMIT || leftover <= 0) return leftover;
+      }
+    } catch {
+      return leftover;
+    }
+    return leftover;
+  }
+
+  function collectSrcdocMediaElements(root, result, remaining) {
+    if (!root || remaining <= 0) return remaining;
+    let leftover = remaining;
+    let frames = [];
+    try {
+      frames = [...(root.querySelectorAll?.("iframe[srcdoc], iframe[src^='about:blank']") || [])]
+        .slice(0, SRCDOC_FRAME_LIMIT);
+    } catch {
+      return leftover;
+    }
+    for (const frame of frames) {
+      try {
+        const nested = frame.contentDocument;
+        if (nested) leftover = collectMediaElementsFromRoot(nested, result, leftover);
+      } catch {
+        // Cross-origin about:blank clones stay closed to the parent detector.
+      }
+      if (leftover <= 0) return leftover;
+    }
+    return leftover;
   }
 
   function viewportArea() {
@@ -258,23 +339,288 @@
   function embeddedPlayerUrls() {
     if (!scriptsDirty && cachedEmbeddedUrls !== null) return cachedEmbeddedUrls;
     const urls = [];
-    const pattern = /\bvideo_url(?:_hd)?\s*:\s*(["'])([A-Za-z0-9+/]{8,}={0,2})\1/g;
-    for (const script of document.querySelectorAll("script")) {
-      const source = script.textContent || "";
-      if (!source.includes("video_url")) continue;
-      for (const match of source.matchAll(pattern)) {
-        try {
-          const decoded = atob(match[2]).trim();
-          const url = new URL(decoded, location.href);
-          if (/^https?:$/.test(url.protocol) && url.href.length <= MAX_URL_BYTES) urls.push(url.href);
-        } catch {
-          // Ignore unrelated or malformed player configuration values.
-        }
-      }
-    }
+    collectEmbeddedPlayerUrlsFromRoot(document, urls);
     cachedEmbeddedUrls = [...new Set(urls)];
     scriptsDirty = false;
     return cachedEmbeddedUrls;
+  }
+
+  function collectEmbeddedPlayerUrlsFromRoot(root, urls) {
+    if (!root) return;
+    collectAttributeMediaUrls(root, urls);
+    collectMetaMediaUrls(root, urls);
+    collectJsonLdMediaUrls(root, urls);
+    collectInlineScriptMediaUrls(root, urls);
+    collectSrcdocConfigUrls(root, urls);
+  }
+
+  function rememberEmbeddedUrl(urls, raw) {
+    const url = canonicalInlineMediaUrl(raw);
+    if (url) urls.push(url);
+  }
+
+  function canonicalInlineMediaUrl(value) {
+    if (typeof value !== "string") return "";
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > MAX_URL_BYTES) return "";
+    try {
+      const decoded = /^[A-Za-z0-9+/]{8,}={0,2}$/.test(trimmed) && !/^https?:/i.test(trimmed)
+        ? atob(trimmed).trim()
+        : trimmed.replace(/^["']|["']$/g, "");
+      const url = new URL(decoded, location.href);
+      if (!/^https?:$/.test(url.protocol) || url.href.length > MAX_URL_BYTES) return "";
+      const pathname = url.pathname.toLowerCase();
+      const search = url.search.toLowerCase();
+      if (/\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i.test(pathname)) return "";
+      if (/\.(?:m3u8|mpd|mp4|m4v|webm)$/i.test(pathname)) return url.href;
+      if (/(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8|dash|mpd)\b/.test(search)) return url.href;
+      if (/(?:^|\/)(?:hls|playlist|manifest|get_file|getfile)(?:\/|$)/.test(pathname)) return url.href;
+      return "";
+    } catch {
+      return "";
+    }
+  }
+
+  function collectAttributeMediaUrls(root, urls) {
+    let nodes = [];
+    try {
+      nodes = [...(root.querySelectorAll?.("video, audio, source, [data-src], [data-file], [data-url], [data-video], [data-stream], [data-hls]") || [])]
+        .slice(0, MEDIA_CONFIG_NODE_LIMIT);
+    } catch {
+      return;
+    }
+    for (const node of nodes) {
+      for (const name of INLINE_MEDIA_ATTRS) {
+        rememberEmbeddedUrl(urls, node.getAttribute?.(name));
+      }
+    }
+  }
+
+  function collectMetaMediaUrls(root, urls) {
+    let nodes = [];
+    try {
+      nodes = [...(root.querySelectorAll?.('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"]') || [])]
+        .slice(0, 16);
+    } catch {
+      return;
+    }
+    for (const node of nodes) rememberEmbeddedUrl(urls, node.getAttribute?.("content"));
+  }
+
+  function collectJsonLdMediaUrls(root, urls) {
+    let scripts = [];
+    try {
+      scripts = [...(root.querySelectorAll?.('script[type="application/ld+json"]') || [])]
+        .slice(0, 8);
+    } catch {
+      return;
+    }
+    for (const script of scripts) {
+      const source = String(script.textContent || "").slice(0, MEDIA_CONFIG_TEXT_LIMIT);
+      if (!source) continue;
+      rememberJsonLdMediaUrls(source, urls);
+    }
+  }
+
+  function rememberJsonLdMediaUrls(source, urls) {
+    const typeMatch = /"@type"\s*:\s*"([^"]+)"/i.exec(source);
+    const type = String(typeMatch?.[1] || "").toLowerCase();
+    if (type && !INLINE_JSONLD_TYPES.includes(type)) return;
+    const pattern = /"(?:contentUrl|embedUrl)"\s*:\s*"((?:\\.|[^"\\])*)"/g;
+    let match;
+    while ((match = pattern.exec(source))) {
+      rememberEmbeddedUrl(urls, match[1].replace(/\\\//g, "/"));
+    }
+  }
+
+  function collectInlineScriptMediaUrls(root, urls) {
+    let scripts = [];
+    try {
+      scripts = [...(root.querySelectorAll?.("script") || [])].slice(0, MEDIA_CONFIG_NODE_LIMIT);
+    } catch {
+      return;
+    }
+    for (const script of scripts) {
+      const source = String(script.textContent || "");
+      if (!source) continue;
+      rememberInlineScriptMediaUrls(source.slice(0, MEDIA_CONFIG_TEXT_LIMIT), urls);
+    }
+  }
+
+  function decodeRadix62(token, radix) {
+    let val = 0;
+    for (let i = 0; i < token.length; i += 1) {
+      const code = token.charCodeAt(i);
+      let digit = 0;
+      if (code >= 48 && code <= 57) digit = code - 48;
+      else if (code >= 97 && code <= 122) digit = code - 97 + 10;
+      else if (code >= 65 && code <= 90) digit = code - 65 + 36;
+      else return null;
+      if (digit >= radix) return null;
+      val = val * radix + digit;
+    }
+    return val;
+  }
+
+  function unpackPackerScripts(text) {
+    if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
+    const pattern = /\be[v]al\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,[^\)]+\)[\s\S]*?\}\s*\(\s*(['"])((?:\\.|[^\\])*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])((?:\\.|[^\\])*?)\5\.split\s*\(\s*['"]\|['"]\s*\)/gi;
+    let match;
+    const results = [];
+    while ((match = pattern.exec(text))) {
+      try {
+        const payload = match[2]
+          .replace(/\\'/g, "'")
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, "\\");
+        const radix = Number.parseInt(match[3], 10);
+        const count = Number.parseInt(match[4], 10);
+        const keywords = match[6].split("|");
+        if (!Number.isInteger(radix) || radix < 2 || radix > 62 || !keywords.length) continue;
+        const unpacked = payload.replace(/\b[0-9a-zA-Z]+\b/g, (token) => {
+          const index = decodeRadix62(token, radix);
+          if (index === null || index >= keywords.length) return token;
+          const word = keywords[index];
+          return word !== "" ? word : token;
+        });
+        results.push(unpacked);
+      } catch {
+        // Ignore malformed packer blocks
+      }
+    }
+    return results.join("\n");
+  }
+
+  function decodeHexEscapedScript(text) {
+    if (typeof text !== "string" || !text.includes("\\x")) return "";
+    const hexRe = /(?:\\x[0-9a-fA-F]{2}){6,}/g;
+    let match;
+    const results = [];
+    while ((match = hexRe.exec(text))) {
+      try {
+        const decoded = match[0].replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) =>
+          String.fromCharCode(Number.parseInt(hex, 16))
+        );
+        if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
+          results.push(decoded);
+        }
+      } catch {
+        // Ignore malformed hex blocks
+      }
+    }
+    return results.join("\n");
+  }
+
+  function decodeReversedUrls(text) {
+    if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
+    const pattern = /(["'])([A-Za-z0-9_.:~%/-]{12,2048})\1/g;
+    let match;
+    const results = [];
+    while ((match = pattern.exec(text))) {
+      const candidate = match[2];
+      if (candidate.includes("://") || candidate.startsWith("http")) continue;
+      const reversed = candidate.split("").reverse().join("");
+      if (/^https?:\/\/[^\s"'<>\\`]+\.(?:m3u8|mpd|mp4|m4v|webm)(?:\?[^\s"'<>\\`]*)?$/i.test(reversed)
+        || (/^https?:\/\/[^\s"'<>\\`]+/i.test(reversed) && /(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8|dash|mpd)\b/i.test(reversed))) {
+        results.push(reversed);
+      }
+    }
+    return results.join("\n");
+  }
+
+  function decodePercentEscapedUrls(text) {
+    if (typeof text !== "string" || !text.includes("%")) return "";
+    const percentRe = /(?:(?:%[0-9a-fA-F]{2}){6,}|(?:%25[0-9a-fA-F]{2}){6,})/g;
+    let match;
+    const results = [];
+    while ((match = percentRe.exec(text))) {
+      try {
+        let decoded = match[0];
+        if (decoded.includes("%25")) {
+          try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
+        }
+        try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
+        if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
+          results.push(decoded);
+        }
+      } catch {
+        // Ignore invalid percent encoding
+      }
+    }
+    return results.join("\n");
+  }
+
+  function decodeBase64JsonConfigs(text) {
+    if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
+    const b64Re = /(?:["']|:\s*)(ey[A-Za-z0-9+/]{12,}={0,2})(?:["']|[\s;,}]|$)/g;
+    let match;
+    const results = [];
+    while ((match = b64Re.exec(text))) {
+      try {
+        const rawB64 = match[1];
+        let decoded = "";
+        try {
+          decoded = atob(rawB64).trim();
+        } catch {
+          continue;
+        }
+        if ((decoded.startsWith("{") || decoded.startsWith("[")) && decoded.length <= 250_000) {
+          results.push(decoded);
+        }
+      } catch {
+        // Ignore invalid base64
+      }
+    }
+    return results.join("\n");
+  }
+
+  function deobfuscateScriptText(text) {
+    if (typeof text !== "string" || !text) return "";
+    const unpacked = unpackPackerScripts(text);
+    const decodedHex = decodeHexEscapedScript(text);
+    const reversed = decodeReversedUrls(text);
+    const percent = decodePercentEscapedUrls(text);
+    const b64Json = decodeBase64JsonConfigs(text);
+    return [unpacked, decodedHex, reversed, percent, b64Json].filter(Boolean).join("\n");
+  }
+
+  function rememberInlineScriptMediaUrls(source, urls) {
+    const deobfuscated = deobfuscateScriptText(source);
+    const targetSource = deobfuscated ? `${source}\n${deobfuscated}` : source;
+    const videoUrlRe = /\bvideo_url(?:_hd)?\s*:\s*(["'])([A-Za-z0-9+/]{8,}={0,2})\1/g;
+    let match;
+    while ((match = videoUrlRe.exec(targetSource))) {
+      try {
+        rememberEmbeddedUrl(urls, atob(match[2]).trim());
+      } catch {
+        // Ignore malformed player configuration values.
+      }
+    }
+    INLINE_MEDIA_FIELD_RE.lastIndex = 0;
+    while ((match = INLINE_MEDIA_FIELD_RE.exec(targetSource))) {
+      rememberEmbeddedUrl(urls, match[2].replace(/\\\//g, "/"));
+    }
+    INLINE_MEDIA_URL_RE.lastIndex = 0;
+    while ((match = INLINE_MEDIA_URL_RE.exec(targetSource))) rememberEmbeddedUrl(urls, match[0]);
+  }
+
+  function collectSrcdocConfigUrls(root, urls) {
+    let frames = [];
+    try {
+      frames = [...(root.querySelectorAll?.("iframe[srcdoc]") || [])].slice(0, SRCDOC_FRAME_LIMIT);
+    } catch {
+      return;
+    }
+    for (const frame of frames) {
+      const srcdoc = String(frame.getAttribute?.("srcdoc") || "").slice(0, SRCDOC_TEXT_LIMIT);
+      if (srcdoc) rememberInlineScriptMediaUrls(srcdoc, urls);
+      try {
+        const nested = frame.contentDocument;
+        if (nested) collectEmbeddedPlayerUrlsFromRoot(nested, urls);
+      } catch {
+        // Closed srcdoc documents still expose their attribute text above.
+      }
+    }
   }
 
   function reportMainFrames() {
@@ -283,7 +629,9 @@
     const viewport = viewportArea();
     let order = 0;
     for (const iframe of document.querySelectorAll("iframe")) {
-      const src = iframe.src && !iframe.src.startsWith("about:") ? iframe.src : (iframe.dataset?.src || "");
+      const src = iframe.src && !iframe.src.startsWith("about:")
+        ? iframe.src
+        : (iframe.dataset?.src || iframe.getAttribute?.("data-src") || "");
       if (!/^https?:\/\//i.test(src)) continue;
       const area = visibleArea(iframe);
       if (area <= 0) continue;
@@ -942,8 +1290,11 @@
         || (includeDescendants && Boolean(node?.querySelector?.("iframe, embed")));
       const containsPassLink = (tag === "A" && String(node?.href || node?.getAttribute?.("href") || "").includes("/pass_md5/"))
         || (includeDescendants && Boolean(node?.querySelector?.('[href*="/pass_md5/"]')));
+      const containsMediaHost = tag === "VIDEO" || tag === "AUDIO" || tag === "SOURCE"
+        || (includeDescendants && Boolean(node?.querySelector?.("video, audio, source")));
       if (containsScript) scriptsDirty = true;
-      if (containsScript || containsFrame || containsPassLink) doodDirty = true;
+      if (containsScript || containsFrame || containsPassLink || containsMediaHost) doodDirty = true;
+      if (containsFrame || containsMediaHost) scriptsDirty = true;
     };
     for (const record of records || []) {
       if (record.type === "attributes") {
@@ -951,7 +1302,9 @@
         if (tag === "SCRIPT") {
           scriptsDirty = true;
           doodDirty = true;
-        } else if (tag === "IFRAME" || tag === "EMBED" || (tag === "A" && record.attributeName === "href")) {
+        } else if (tag === "IFRAME" || tag === "EMBED" || tag === "VIDEO" || tag === "AUDIO"
+          || tag === "SOURCE" || (tag === "A" && record.attributeName === "href")) {
+          scriptsDirty = true;
           doodDirty = true;
         }
         continue;
@@ -1017,7 +1370,7 @@
     subtree: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ["src", "data-src", "href"],
+    attributeFilter: ["src", "data-src", "data-file", "data-url", "data-video", "data-stream", "data-hls", "href", "srcdoc"],
   });
   for (const eventName of ["play", "playing", "loadstart", "loadedmetadata"]) {
     document.addEventListener(eventName, () => scheduleScan(), true);

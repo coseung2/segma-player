@@ -22,11 +22,28 @@ function mediaElement({ url, type = "video/mp4", paused = false, rect = { width:
   });
 }
 
-function iframeElement(src) {
+function iframeElement(src, extras = {}) {
   return Object.assign(new (globalThis.Element)(), {
     src,
     getBoundingClientRect: () => ({ width: 800, height: 450 }),
+    ...extras,
   });
+}
+
+function mediaNode(tagName, attributes = {}) {
+  const node = Object.assign(new (globalThis.Element)(tagName), {
+    currentSrc: attributes.currentSrc || '',
+    src: attributes.src || '',
+    type: attributes.type || '',
+    paused: attributes.paused ?? true,
+    muted: Boolean(attributes.muted),
+    duration: attributes.duration || 0,
+    getBoundingClientRect: () => attributes.rect || { width: 640, height: 360 },
+  });
+  for (const [name, value] of Object.entries(attributes.attrs || {})) {
+    node.setAttribute(name, value);
+  }
+  return node;
 }
 
 function baseEnvironment({
@@ -41,6 +58,9 @@ function baseEnvironment({
   const videos = [];
   const scripts = [];
   const iframes = [];
+  const jsonLdScripts = [];
+  const metas = [];
+  const attrMediaNodes = [];
   const eventHandlers = {};
   const windowEventHandlers = {};
   const mutationObservers = [];
@@ -181,6 +201,15 @@ function baseEnvironment({
       if (selector === "video, audio, source") return [...videos];
       if (selector === "iframe") return [...iframes];
       if (selector === "script") return [...scripts];
+      if (selector === 'script[type="application/ld+json"]') return [...jsonLdScripts];
+      if (selector === 'meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"]') return [...metas];
+      if (selector === "video, audio, source, [data-src], [data-file], [data-url], [data-video], [data-stream], [data-hls]") {
+        return [...videos, ...attrMediaNodes];
+      }
+      if (selector === "iframe[srcdoc], iframe[src^='about:blank']" || selector === "iframe[srcdoc]") {
+        return iframes.filter((frame) => frame.getAttribute?.("srcdoc") || String(frame.src || "").startsWith("about:blank"));
+      }
+      if (selector === "*") return [...videos, ...iframes, ...attrMediaNodes];
       if (selector === 'script, a[href*="/pass_md5/"]') return doodSourceNodes();
       return [];
     },
@@ -227,6 +256,9 @@ function baseEnvironment({
     videos,
     scripts,
     iframes,
+    jsonLdScripts,
+    metas,
+    attrMediaNodes,
     eventHandlers,
     windowEventHandlers,
     mutationObservers,
@@ -355,6 +387,63 @@ test("nested script insertion and script text changes invalidate cached player c
   }]);
   await delay(180);
   assert.equal(countResource(env.sent, "https://cdn.example/second.mp4"), 1);
+});
+
+test("harvests pre-playback config from data attributes, JSON-LD, and og:video", async () => {
+  const env = baseEnvironment();
+  env.attrMediaNodes.push(mediaNode("DIV", {
+    attrs: { "data-src": "https://cdn.example/preplay/master.m3u8?token=1" },
+  }));
+  env.jsonLdScripts.push({
+    textContent: JSON.stringify({
+      "@type": "VideoObject",
+      contentUrl: "https://cdn.example/jsonld/clip.mp4",
+    }),
+  });
+  env.metas.push({
+    getAttribute: (name) => name === "content" ? "https://cdn.example/og/stream.m3u8" : null,
+  });
+  env.scripts.push({
+    textContent: 'player.setup({ play_url: "https://cdn.example/script/playlist.m3u8?type=hls" });',
+  });
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+  assert.equal(countResource(env.sent, "https://cdn.example/preplay/master.m3u8?token=1"), 1);
+  assert.equal(countResource(env.sent, "https://cdn.example/jsonld/clip.mp4"), 1);
+  assert.equal(countResource(env.sent, "https://cdn.example/og/stream.m3u8"), 1);
+  assert.equal(countResource(env.sent, "https://cdn.example/script/playlist.m3u8?type=hls"), 1);
+});
+
+test("scans shadow-root media and srcdoc iframe config", async () => {
+  const env = baseEnvironment();
+  const shadowVideo = mediaElement({ url: "https://cdn.example/shadow/main.mp4", paused: false });
+  const host = Object.assign(new (globalThis.Element)("DIV"), {
+    shadowRoot: {
+      querySelectorAll(selector) {
+        if (selector === "video, audio, source") return [shadowVideo];
+        if (selector === "*") return [];
+        if (selector === "iframe[srcdoc], iframe[src^='about:blank']") return [];
+        if (selector === "iframe[srcdoc]") return [];
+        if (selector === "script") return [];
+        if (selector === 'script[type="application/ld+json"]') return [];
+        if (selector.startsWith("meta[")) return [];
+        if (selector.includes("[data-src]")) return [];
+        return [];
+      },
+    },
+  });
+  env.attrMediaNodes.push(host);
+  env.iframes.push(iframeElement("about:blank", {
+    srcdoc: '<script>const src = "https://cdn.example/srcdoc/live.m3u8";</script>',
+    getAttribute(name) {
+      if (name === "srcdoc") return this.srcdoc;
+      return null;
+    },
+  }));
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+  assert.equal(countResource(env.sent, "https://cdn.example/shadow/main.mp4"), 1);
+  assert.equal(countResource(env.sent, "https://cdn.example/srcdoc/live.m3u8"), 1);
 });
 
 test("dynamically inserted media and iframe sources are detected", async () => {

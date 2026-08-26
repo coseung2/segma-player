@@ -677,3 +677,15 @@ The av19 result is a confirmed current live detection regression and remains the
 - Progressive-probe / extension-download / subtitle / overlay: `NOT_RUN`
 - Evidence: `artifacts/live-media-0.4.26-staging-beeg-pass.json`; `ok=true`, `rawOk=true`, `companionReady=true`
 - Scope limit: the user's existing Chrome/Whale service workers still require an extension reload before their popup and settings surfaces can adopt the corrected background code
+
+### 2026-08-26 — Pre-playback URL discovery expansion and static de-obfuscation (0.4.28)
+
+- Browser/channel: source-only detection patch; no live Chrome/Whale profile was reloaded for this version
+- Extension version: `0.4.28`
+- Site URL / ID: generic adult streaming URL discovery (`detect` only)
+- AdBlock/VPN mode: `NOT_RUN`
+- Detect: `CODE-FIXED / LIVE-UNVERIFIED` — deterministic tests cover data-src/JSON-LD/og:video harvest, JSON `play_url` without `.m3u8`, Filemoon/Mixdrop/Voe player pages, and Shadow/`srcdoc` media
+- Playback / progressive-probe / extension-download / subtitle / overlay: `NOT_RUN`
+- Evidence: focused detection/site regressions 146/146; `npm run build:dev-staging` = `DEV_STAGING_OK` version `0.4.28`
+- De-obfuscation evidence: deterministic tests cover Dean Edwards Packer script unpacking, hex-escaped URL decoding, string reversal, percent decoding, and Base64 JSON config extraction without `eval()` (146/146 focused pass)
+- Remaining live gap: reload staging `0.4.28` on a page that previously needed playback before an address appeared, plus one Filemoon/Mixdrop/Voe embed

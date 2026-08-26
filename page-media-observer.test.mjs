@@ -273,6 +273,25 @@ test("JSON player APIs expose embedded stream URLs as refreshable player sources
   assert.equal(sources[0].confidence, 98);
 });
 
+test("JSON player APIs accept extensionless HLS and extra stream keys", async () => {
+  const streamUrl = "https://cdn.example/play/abc?type=hls&token=short-lived";
+  const env = createEnvironment({
+    manifestText: JSON.stringify({
+      play_url: streamUrl,
+      poster: "https://cdn.example/poster.jpg",
+    }),
+    contentType: "application/json",
+    responseUrl: "https://player.example/api/play",
+  });
+  await env.windowObject.fetch("https://player.example/api/play");
+  await flush();
+  const sources = eventMessages(env, env.protocol.events.playerSource);
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].url, streamUrl);
+  assert.equal(sources[0].contentType, "application/vnd.apple.mpegurl");
+  assert.equal(sources[0].player, "api-json");
+});
+
 test("manifest URLs are reported when the player hides the response type and body", async () => {
   const env = createEnvironment({ manifestText: "", contentType: "" });
   env.windowObject.fetch("https://surrit.example/stream/playlist.m3u8?token=short-lived");

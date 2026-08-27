@@ -16,6 +16,7 @@
   const DOOD_SOURCE_TEXT_LIMIT = 1_000_000;
   const MEDIA_CONFIG_NODE_LIMIT = 96;
   const MEDIA_CONFIG_TEXT_LIMIT = 250_000;
+  const MEDIA_CONFIG_TOTAL_TEXT_LIMIT = 1_000_000;
   const SHADOW_HOST_LIMIT = 48;
   const SHADOW_WALK_LIMIT = 400;
   const SRCDOC_FRAME_LIMIT = 8;
@@ -381,6 +382,25 @@
     }
   }
 
+  function inferredInlineContentType(value) {
+    try {
+      const url = new URL(value, location.href);
+      const pathname = url.pathname.toLowerCase();
+      const search = url.search.toLowerCase();
+      if (pathname.endsWith(".mpd") || /(?:^|[?&])(?:type|format|kind)=(?:dash|mpd)\b/.test(search)) {
+        return "application/dash+xml";
+      }
+      if (pathname.endsWith(".m3u8") || /(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8)\b/.test(search)
+        || /(?:^|\/)(?:hls|playlist|manifest)(?:\/|$)/.test(pathname)) {
+        return "application/vnd.apple.mpegurl";
+      }
+      if (pathname.endsWith(".webm")) return "video/webm";
+      return "video/mp4";
+    } catch {
+      return "video/mp4";
+    }
+  }
+
   function collectAttributeMediaUrls(root, urls) {
     let nodes = [];
     try {
@@ -440,10 +460,14 @@
     } catch {
       return;
     }
+    let remainingText = MEDIA_CONFIG_TOTAL_TEXT_LIMIT;
     for (const script of scripts) {
+      if (remainingText <= 0) break;
       const source = String(script.textContent || "");
       if (!source) continue;
-      rememberInlineScriptMediaUrls(source.slice(0, MEDIA_CONFIG_TEXT_LIMIT), urls);
+      const bounded = source.slice(0, Math.min(MEDIA_CONFIG_TEXT_LIMIT, remainingText));
+      remainingText -= bounded.length;
+      rememberInlineScriptMediaUrls(bounded, urls);
     }
   }
 
@@ -513,7 +537,7 @@
 
   function decodeReversedUrls(text) {
     if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-    const pattern = /(["'])([A-Za-z0-9_.:~%/-]{12,2048})\1/g;
+    const pattern = /(["'])([A-Za-z0-9_.:~%/?&=+\-]{12,2048})\1/g;
     let match;
     const results = [];
     while ((match = pattern.exec(text))) {
@@ -530,16 +554,21 @@
 
   function decodePercentEscapedUrls(text) {
     if (typeof text !== "string" || !text.includes("%")) return "";
-    const percentRe = /(?:(?:%[0-9a-fA-F]{2}){6,}|(?:%25[0-9a-fA-F]{2}){6,})/g;
+    const percentRe = /(?:https?|%[0-9a-fA-F]{2})(?:[A-Za-z0-9._~:/?@!$&()*+,;=%\-]|%[0-9a-fA-F]{2}){5,4090}/g;
     let match;
     const results = [];
     while ((match = percentRe.exec(text))) {
       try {
         let decoded = match[0];
-        if (decoded.includes("%25")) {
-          try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
+        for (let pass = 0; pass < 2 && decoded.includes("%"); pass += 1) {
+          try {
+            const next = decodeURIComponent(decoded);
+            if (next === decoded) break;
+            decoded = next;
+          } catch {
+            break;
+          }
         }
-        try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
         if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
           results.push(decoded);
         }
@@ -552,15 +581,19 @@
 
   function decodeBase64JsonConfigs(text) {
     if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-    const b64Re = /(?:["']|:\s*)(ey[A-Za-z0-9+/]{12,}={0,2})(?:["']|[\s;,}]|$)/g;
+    const b64Re = /(?:["']|:\s*)([A-Za-z0-9+/_-]{16,}={0,2})(?:["']|[\s;,}\]]|$)/g;
     let match;
     const results = [];
     while ((match = b64Re.exec(text))) {
       try {
         const rawB64 = match[1];
+        if (rawB64.length > 333_336) continue;
         let decoded = "";
         try {
-          decoded = atob(rawB64).trim();
+          const normalized = rawB64.replace(/-/g, "+").replace(/_/g, "/");
+          if (normalized.length % 4 === 1) continue;
+          const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+          decoded = atob(padded).trim();
         } catch {
           continue;
         }
@@ -1257,7 +1290,7 @@
       detectionSource: "media-element",
       confidence: item.playing ? 96 : 80,
     });
-    for (const url of embeddedPlayerUrls()) report(url, "video/mp4", true, true, {
+    for (const url of embeddedPlayerUrls()) report(url, inferredInlineContentType(url), true, true, {
       detectionSource: "inline-config",
       confidence: 82,
     });
@@ -1292,9 +1325,14 @@
         || (includeDescendants && Boolean(node?.querySelector?.('[href*="/pass_md5/"]')));
       const containsMediaHost = tag === "VIDEO" || tag === "AUDIO" || tag === "SOURCE"
         || (includeDescendants && Boolean(node?.querySelector?.("video, audio, source")));
-      if (containsScript) scriptsDirty = true;
+      const containsInlineConfig = ["data-src", "data-file", "data-url", "data-video", "data-stream", "data-hls"]
+        .some((name) => Boolean(node?.getAttribute?.(name)))
+        || tag === "META"
+        || (includeDescendants && Boolean(node?.querySelector?.(
+          "[data-src], [data-file], [data-url], [data-video], [data-stream], [data-hls], meta[property='og:video'], meta[property='og:video:url'], meta[property='og:video:secure_url'], meta[name='twitter:player:stream']",
+        )));
+      if (containsScript || containsFrame || containsMediaHost || containsInlineConfig) scriptsDirty = true;
       if (containsScript || containsFrame || containsPassLink || containsMediaHost) doodDirty = true;
-      if (containsFrame || containsMediaHost) scriptsDirty = true;
     };
     for (const record of records || []) {
       if (record.type === "attributes") {
@@ -1302,6 +1340,10 @@
         if (tag === "SCRIPT") {
           scriptsDirty = true;
           doodDirty = true;
+        } else if (["data-src", "data-file", "data-url", "data-video", "data-stream", "data-hls", "srcdoc"].includes(record.attributeName)
+          || (tag === "META" && record.attributeName === "content")) {
+          scriptsDirty = true;
+          if (tag === "IFRAME" || tag === "EMBED") doodDirty = true;
         } else if (tag === "IFRAME" || tag === "EMBED" || tag === "VIDEO" || tag === "AUDIO"
           || tag === "SOURCE" || (tag === "A" && record.attributeName === "href")) {
           scriptsDirty = true;
@@ -1370,7 +1412,7 @@
     subtree: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ["src", "data-src", "data-file", "data-url", "data-video", "data-stream", "data-hls", "href", "srcdoc"],
+    attributeFilter: ["src", "data-src", "data-file", "data-url", "data-video", "data-stream", "data-hls", "href", "srcdoc", "content"],
   });
   for (const eventName of ["play", "playing", "loadstart", "loadedmetadata"]) {
     document.addEventListener(eventName, () => scheduleScan(), true);

@@ -392,7 +392,10 @@ test("nested script insertion and script text changes invalidate cached player c
 test("harvests pre-playback config from data attributes, JSON-LD, and og:video", async () => {
   const env = baseEnvironment();
   env.attrMediaNodes.push(mediaNode("DIV", {
-    attrs: { "data-src": "https://cdn.example/preplay/master.m3u8?token=1" },
+    attrs: { "data-src": "https://cdn.example/preplay/stream?type=hls&token=1" },
+  }));
+  env.attrMediaNodes.push(mediaNode("DIV", {
+    attrs: { "data-url": "https://cdn.example/preplay/manifest?type=dash&token=2" },
   }));
   env.jsonLdScripts.push({
     textContent: JSON.stringify({
@@ -408,10 +411,65 @@ test("harvests pre-playback config from data attributes, JSON-LD, and og:video",
   });
   await import(`./content.js?test=${++moduleCounter}`);
   await delay(180);
-  assert.equal(countResource(env.sent, "https://cdn.example/preplay/master.m3u8?token=1"), 1);
+  const inlineHls = env.sent.find((message) => message.resourceUrl
+    === "https://cdn.example/preplay/stream?type=hls&token=1");
+  const inlineDash = env.sent.find((message) => message.resourceUrl
+    === "https://cdn.example/preplay/manifest?type=dash&token=2");
+  assert.equal(inlineHls?.contentType, "application/vnd.apple.mpegurl");
+  assert.equal(inlineDash?.contentType, "application/dash+xml");
   assert.equal(countResource(env.sent, "https://cdn.example/jsonld/clip.mp4"), 1);
   assert.equal(countResource(env.sent, "https://cdn.example/og/stream.m3u8"), 1);
   assert.equal(countResource(env.sent, "https://cdn.example/script/playlist.m3u8?type=hls"), 1);
+});
+
+test("dynamic inline config insertions and attribute changes invalidate the pre-playback cache", async () => {
+  const env = baseEnvironment();
+  await import(`./content.js?test=${++moduleCounter}`);
+  await delay(180);
+
+  const node = mediaNode("DIV", {
+    attrs: { "data-src": "https://cdn.example/dynamic/first.m3u8" },
+  });
+  env.attrMediaNodes.push(node);
+  env.mutationObservers[0].callback([{
+    type: "childList",
+    target: { tagName: "DIV" },
+    addedNodes: [node],
+    removedNodes: [],
+  }]);
+  await delay(180);
+  assert.equal(countResource(env.sent, "https://cdn.example/dynamic/first.m3u8"), 1);
+
+  node.setAttribute("data-src", "https://cdn.example/dynamic/second.m3u8");
+  env.mutationObservers[0].callback([{
+    type: "attributes",
+    target: node,
+    attributeName: "data-src",
+  }]);
+  await delay(180);
+  assert.equal(countResource(env.sent, "https://cdn.example/dynamic/second.m3u8"), 1);
+
+  const meta = mediaNode("META", {
+    attrs: { "content": "https://cdn.example/meta/first.mp4" },
+  });
+  env.metas.push(meta);
+  env.mutationObservers[0].callback([{
+    type: "childList",
+    target: { tagName: "HEAD" },
+    addedNodes: [meta],
+    removedNodes: [],
+  }]);
+  await delay(180);
+  assert.equal(countResource(env.sent, "https://cdn.example/meta/first.mp4"), 1);
+
+  meta.setAttribute("content", "https://cdn.example/meta/second.mp4");
+  env.mutationObservers[0].callback([{
+    type: "attributes",
+    target: meta,
+    attributeName: "content",
+  }]);
+  await delay(180);
+  assert.equal(countResource(env.sent, "https://cdn.example/meta/second.mp4"), 1);
 });
 
 test("scans shadow-root media and srcdoc iframe config", async () => {

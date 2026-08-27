@@ -335,12 +335,12 @@
       const parsed = new URL(url);
       const pathname = parsed.pathname.toLowerCase();
       const search = parsed.search.toLowerCase();
+      if (pathname.endsWith(".mpd") || /(?:^|[?&])(?:type|format|kind)=(?:dash|mpd)\b/.test(search)) {
+        return "application/dash+xml";
+      }
       if (pathname.endsWith(".m3u8") || /(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8)\b/.test(search)
         || /(?:^|\/)(?:hls|playlist|manifest)(?:\/|$)/.test(pathname)) {
         return "application/vnd.apple.mpegurl";
-      }
-      if (pathname.endsWith(".mpd") || /(?:^|[?&])(?:type|format|kind)=(?:dash|mpd)\b/.test(search)) {
-        return "application/dash+xml";
       }
       if (pathname.endsWith(".webm")) return "video/webm";
       if (pathname.endsWith(".mp4") || pathname.endsWith(".m4v")) return "video/mp4";
@@ -417,7 +417,7 @@
 
   function decodeReversedUrls(text) {
     if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-    const pattern = /(["'])([A-Za-z0-9_.:~%/-]{12,2048})\1/g;
+    const pattern = /(["'])([A-Za-z0-9_.:~%/?&=+\-]{12,2048})\1/g;
     let match;
     const results = [];
     while ((match = pattern.exec(text))) {
@@ -434,16 +434,21 @@
 
   function decodePercentEscapedUrls(text) {
     if (typeof text !== "string" || !text.includes("%")) return "";
-    const percentRe = /(?:(?:%[0-9a-fA-F]{2}){6,}|(?:%25[0-9a-fA-F]{2}){6,})/g;
+    const percentRe = /(?:https?|%[0-9a-fA-F]{2})(?:[A-Za-z0-9._~:/?@!$&()*+,;=%\-]|%[0-9a-fA-F]{2}){5,4090}/g;
     let match;
     const results = [];
     while ((match = percentRe.exec(text))) {
       try {
         let decoded = match[0];
-        if (decoded.includes("%25")) {
-          try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
+        for (let pass = 0; pass < 2 && decoded.includes("%"); pass += 1) {
+          try {
+            const next = decodeURIComponent(decoded);
+            if (next === decoded) break;
+            decoded = next;
+          } catch {
+            break;
+          }
         }
-        try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
         if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
           results.push(decoded);
         }
@@ -456,15 +461,19 @@
 
   function decodeBase64JsonConfigs(text) {
     if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-    const b64Re = /(?:["']|:\s*)(ey[A-Za-z0-9+/]{12,}={0,2})(?:["']|[\s;,}]|$)/g;
+    const b64Re = /(?:["']|:\s*)([A-Za-z0-9+/_-]{16,}={0,2})(?:["']|[\s;,}\]]|$)/g;
     let match;
     const results = [];
     while ((match = b64Re.exec(text))) {
       try {
         const rawB64 = match[1];
+        if (rawB64.length > 333_336) continue;
         let decoded = "";
         try {
-          decoded = atob(rawB64).trim();
+          const normalized = rawB64.replace(/-/g, "+").replace(/_/g, "/");
+          if (normalized.length % 4 === 1) continue;
+          const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+          decoded = atob(padded).trim();
         } catch {
           continue;
         }
@@ -492,22 +501,47 @@
     if (typeof text !== "string") return;
     const trimmed = text.trim();
     const deobfuscated = deobfuscateScriptText(text);
-    const targetText = deobfuscated ? `${text}\n${deobfuscated}` : text;
-    const targetTrimmed = targetText.trim();
-    if (!targetTrimmed) return;
+    const sourceTexts = [];
+    if (trimmed[0] === "{" || trimmed[0] === "[") {
+      sourceTexts.push({ text: trimmed, player: "api-json", confidence: 98 });
+    }
+    if (deobfuscated) {
+      sourceTexts.push({ text: deobfuscated, player: "static-config", confidence: 94 });
+    }
+    if (!sourceTexts.length) return;
     const pattern = /"(?:streaming_url|streamingUrl|playback_url|playbackUrl|manifest_url|manifestUrl|hls_url|hlsUrl|play_url|playUrl|video_url|videoUrl|source_url|sourceUrl|playlist|file|src|url|source)"\s*:\s*"((?:\\.|[^"\\])*)"/g;
     let reported = 0;
-    for (const match of targetTrimmed.matchAll(pattern)) {
-      const url = decodedStructuredUrl(match[1]);
+    const reportedUrls = new Set();
+    for (const source of sourceTexts) {
+      pattern.lastIndex = 0;
+      for (const match of source.text.matchAll(pattern)) {
+        const url = decodedStructuredUrl(match[1]);
+        const contentType = inferredStructuredContentType(url);
+        if (!url || !contentType || reportedUrls.has(url)) continue;
+        reportPlayerSource(url, {
+          player: source.player,
+          contentType,
+          confidence: source.confidence,
+        });
+        reportedUrls.add(url);
+        reported += 1;
+        if (reported >= LIMITS.maxPlayerSourcesPerPass) return;
+      }
+    }
+    if (!deobfuscated) return;
+    const directRe = /https?:\/\/[^\s"'<>\\`]+/gi;
+    for (const match of deobfuscated.matchAll(directRe)) {
+      const url = boundedUrl(match[0]);
       const contentType = inferredStructuredContentType(url);
-      if (!url || !contentType) continue;
+      if (!url || !contentType || reportedUrls.has(url)) continue;
       reportPlayerSource(url, {
-        player: "api-json",
+        player: "static-config",
         contentType,
-        confidence: 98,
+        confidence: 94,
       });
+      reportedUrls.add(url);
       reported += 1;
-      if (reported >= LIMITS.maxPlayerSourcesPerPass) break;
+      if (reported >= LIMITS.maxPlayerSourcesPerPass) return;
     }
   }
 

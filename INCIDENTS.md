@@ -124,6 +124,7 @@
 | 0.3.93 | Dood `/pass_md5/` 단서 격리·응답 URL 검증 및 ShadowRoot 오버레이 분리 | 012 |
 | 0.3.94 | Companion 설치 후 store/development origin 자동 감지 및 재연결 | 013 |
 | 0.4.27 | 재생 전 설정·JSON 주소·플레이어 페이지·Shadow/srcdoc 주소 찾기 강화 | 038 |
+| 0.4.29 | 난독화 탐색 MIME·디코딩·동적 캐시 무효화 회귀 보정 | 038 |
 
 ### INC-2026-08-17-006 follow-up — 0.3.54 package recheck
 
@@ -587,6 +588,7 @@
 - Code action in `0.4.27`: harvest `data-src`/`data-file`, JSON-LD `contentUrl`/`embedUrl`, `og:video`, and bounded inline script media URLs before playback; accept JSON keys such as `play_url`/`videoUrl` and extensionless HLS/DASH-looking URLs; start player-graph resolution for `/embed` `/player` and Filemoon/Mixdrop/Voe pages; scan open Shadow roots and `srcdoc` iframe config. Keep eval/JSON.parse replacement, quality selection, and extra player adapters out of this patch.
 - De-obfuscation action in `0.4.27`: add a deterministic, zero-eval Dean Edwards Packer unpacker and hex-escaped URL decoder across `content.js`, `page-media-observer.js`, and `player-page-resolver.js`. Obfuscated inline player scripts and player-page responses are unpacked and decoded without dynamic code execution (`eval()`), exposing hidden media URLs before playback.
 - De-obfuscation action in `0.4.28`: add static string reversal (`decodeReversedUrls`), percent/double URL encoding decoder (`decodePercentEscapedUrls`), and Base64 JSON config payload decoder (`decodeBase64JsonConfigs`) across `content.js`, `page-media-observer.js`, and `player-page-resolver.js`. Hidden media URLs encoded in reversed strings, %-escaped literals, or Base64 JSON config payloads are extracted statically without dynamic code evaluation.
+- Follow-up in `0.4.29`: preserve inferred HLS/DASH MIME for pre-playback inline config instead of forcing every discovered address to `video/mp4`; keep ordinary non-JSON Fetch/XHR text from being promoted as high-confidence `api-json`; accept tokenized reversed URLs, normal `encodeURIComponent()` URL strings, Base64URL JSON objects/arrays, and invalidate cached pre-playback clues when `data-*`, `srcdoc`, or media meta content changes. Inline script harvesting now also has a 1 MB aggregate text budget per scan in addition to the per-script bound.
 - Changed files: `content.js`, `page-media-observer.js`, `player-page-resolver.js`, focused tests, `manifest.json`, this incident record, and `SITE_QA_LOG.md`.
-- Regression: focused detection tests pass 146/146 including site regressions. Live Chrome/Whale detection of obfuscated player pages remains `NOT_RUN`.
-- Staging version: `0.4.28`.
+- Regression: `0.4.29` focused candidate/content/MAIN-observer/player-resolver/download-mode tests pass 128/128, including new reproductions for extensionless HLS/DASH routing, non-JSON false positives, dynamic config cache invalidation, tokenized reversed URLs, standard percent encoding, and Base64URL JSON arrays. Live Chrome/Whale detection of obfuscated player pages remains `NOT_RUN`.
+- Staging version: `0.4.29`.

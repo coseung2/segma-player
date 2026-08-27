@@ -943,25 +943,33 @@ test("unpacks Dean Edwards Packer scripts and decodes hex-escaped URLs without u
 
 test("decodes reversed, percent-escaped, and base64 JSON media config clues", async () => {
   const reversedPage = harness();
-  reversedPage.responses.set("https://media.example/e/reversed", okResponse('const url = "8u3m.desaev/evil/ndc.elpmaxe//:sptth";'));
+  const reversedUrl = "https://cdn.example/live/master.m3u8?token=abc&type=hls";
+  reversedPage.responses.set("https://media.example/e/reversed", okResponse(
+    `const url = "${[...reversedUrl].reverse().join("")}";`,
+  ));
   assert.deepEqual(await reversedPage.resolver.resolve("https://media.example/e/reversed"), {
     type: "hls",
-    url: "https://example.cdn/live/veased.m3u8",
+    url: reversedUrl,
     referrer: "https://media.example/e/reversed",
     cached: false,
   });
 
   const percentPage = harness();
-  percentPage.responses.set("https://media.example/e/percent", okResponse('const file = "%68%74%74%70%73%3a%2f%2f%63%64%6e%2e%65%78%61%6d%70%6c%65%2f%70%65%72%63%65%6e%74%2e%6d%70%34";'));
+  const percentUrl = "https://cdn.example/percent.mp4?token=abc";
+  percentPage.responses.set("https://media.example/e/percent", okResponse(
+    `const file = "${encodeURIComponent(percentUrl)}";`,
+  ));
   assert.deepEqual(await percentPage.resolver.resolve("https://media.example/e/percent"), {
     type: "progressive",
-    url: "https://cdn.example/percent.mp4",
+    url: percentUrl,
     referrer: "https://media.example/e/percent",
     cached: false,
   });
 
   const b64JsonPage = harness();
-  const payload = Buffer.from(JSON.stringify({ file: "https://cdn.example/b64json/master.m3u8" })).toString("base64");
+  const payload = Buffer.from(JSON.stringify([
+    { file: "https://cdn.example/b64json/master.m3u8" },
+  ])).toString("base64url");
   b64JsonPage.responses.set("https://media.example/e/b64json", okResponse(`const cfg = "${payload}";`));
   assert.deepEqual(await b64JsonPage.resolver.resolve("https://media.example/e/b64json"), {
     type: "hls",

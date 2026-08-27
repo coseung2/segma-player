@@ -150,6 +150,7 @@ function createEnvironment({
   windowObject.ArrayBuffer.isView = ArrayBuffer.isView;
   windowObject.Uint8Array = Uint8Array;
   windowObject.TextDecoder = TextDecoder;
+  windowObject.atob = atob;
   windowObject.Promise = Promise;
   windowObject.Number = Number;
   windowObject.Object = Object;
@@ -177,6 +178,7 @@ function createEnvironment({
     ArrayBuffer,
     Uint8Array,
     TextDecoder,
+    atob,
     Promise,
     Number,
     Object,
@@ -290,6 +292,43 @@ test("JSON player APIs accept extensionless HLS and extra stream keys", async ()
   assert.equal(sources[0].url, streamUrl);
   assert.equal(sources[0].contentType, "application/vnd.apple.mpegurl");
   assert.equal(sources[0].player, "api-json");
+});
+
+test("non-JSON text responses do not promote incidental media-looking config fields", async () => {
+  const env = createEnvironment({
+    manifestText: '<script>const ad = {"url":"https://ads.example/preroll.mp4"};</script>',
+    contentType: "text/html",
+    responseUrl: "https://page.example/widget",
+  });
+  await env.windowObject.fetch("https://page.example/widget");
+  await flush();
+  assert.equal(eventMessages(env, env.protocol.events.playerSource).length, 0);
+});
+
+test("static de-obfuscation accepts reversed query URLs, ordinary percent encoding, and base64url JSON arrays", async () => {
+  const target = "https://cdn.example/live/master.m3u8?token=abc&type=hls";
+  const reversed = [...target].reverse().join("");
+  const percent = encodeURIComponent("https://cdn.example/video.mp4?token=abc");
+  const payload = Buffer.from(JSON.stringify([
+    { file: "https://cdn.example/dash/manifest?type=dash&token=xyz" },
+  ])).toString("base64url");
+  const env = createEnvironment({
+    manifestText: `const a = "${reversed}"; const b = "${percent}"; const c = "${payload}";`,
+    contentType: "text/javascript",
+    responseUrl: "https://player.example/config.js",
+  });
+  await env.windowObject.fetch("https://player.example/config.js");
+  await flush();
+  const sources = eventMessages(env, env.protocol.events.playerSource);
+  assert.ok(sources.some((message) => message.url === target
+    && message.contentType === "application/vnd.apple.mpegurl"
+    && message.player === "static-config"));
+  assert.ok(sources.some((message) => message.url === "https://cdn.example/video.mp4?token=abc"
+    && message.contentType === "video/mp4"
+    && message.player === "static-config"));
+  assert.ok(sources.some((message) => message.url === "https://cdn.example/dash/manifest?type=dash&token=xyz"
+    && message.contentType === "application/dash+xml"
+    && message.player === "static-config"));
 });
 
 test("manifest URLs are reported when the player hides the response type and body", async () => {

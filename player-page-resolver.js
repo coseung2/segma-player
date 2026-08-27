@@ -626,7 +626,7 @@ export function decodeHexEscapedScript(text) {
 
 export function decodeReversedUrls(text) {
   if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-  const pattern = /(["'])([A-Za-z0-9_.:~%/-]{12,2048})\1/g;
+  const pattern = /(["'])([A-Za-z0-9_.:~%/?&=+\-]{12,2048})\1/g;
   let match;
   const results = [];
   while ((match = pattern.exec(text))) {
@@ -643,16 +643,21 @@ export function decodeReversedUrls(text) {
 
 export function decodePercentEscapedUrls(text) {
   if (typeof text !== "string" || !text.includes("%")) return "";
-  const percentRe = /(?:(?:%[0-9a-fA-F]{2}){6,}|(?:%25[0-9a-fA-F]{2}){6,})/g;
+  const percentRe = /(?:https?|%[0-9a-fA-F]{2})(?:[A-Za-z0-9._~:/?@!$&()*+,;=%\-]|%[0-9a-fA-F]{2}){5,4090}/g;
   let match;
   const results = [];
   while ((match = percentRe.exec(text))) {
     try {
       let decoded = match[0];
-      if (decoded.includes("%25")) {
-        try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
+      for (let pass = 0; pass < 2 && decoded.includes("%"); pass += 1) {
+        try {
+          const next = decodeURIComponent(decoded);
+          if (next === decoded) break;
+          decoded = next;
+        } catch {
+          break;
+        }
       }
-      try { decoded = decodeURIComponent(decoded); } catch { /* best effort */ }
       if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
         results.push(decoded);
       }
@@ -665,15 +670,19 @@ export function decodePercentEscapedUrls(text) {
 
 export function decodeBase64JsonConfigs(text) {
   if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-  const b64Re = /(?:["']|:\s*)(ey[A-Za-z0-9+/]{12,}={0,2})(?:["']|[\s;,}]|$)/g;
+  const b64Re = /(?:["']|:\s*)([A-Za-z0-9+/_-]{16,}={0,2})(?:["']|[\s;,}\]]|$)/g;
   let match;
   const results = [];
   while ((match = b64Re.exec(text))) {
     try {
       const rawB64 = match[1];
+      if (rawB64.length > 333_336) continue;
       let decoded = "";
       try {
-        decoded = atob(rawB64).trim();
+        const normalized = rawB64.replace(/-/g, "+").replace(/_/g, "/");
+        if (normalized.length % 4 === 1) continue;
+        const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+        decoded = atob(padded).trim();
       } catch {
         continue;
       }

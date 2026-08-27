@@ -592,3 +592,12 @@
 - Changed files: `content.js`, `page-media-observer.js`, `player-page-resolver.js`, focused tests, `manifest.json`, this incident record, and `SITE_QA_LOG.md`.
 - Regression: `0.4.29` focused candidate/content/MAIN-observer/player-resolver/download-mode tests pass 128/128, including new reproductions for extensionless HLS/DASH routing, non-JSON false positives, dynamic config cache invalidation, tokenized reversed URLs, standard percent encoding, and Base64URL JSON arrays. Live Chrome/Whale detection of obfuscated player pages remains `NOT_RUN`.
 - Staging version: `0.4.29`.
+
+### INC-2026-08-27-039 Clean GitHub Actions checkout could not run the taskbar ICO regression
+
+- Status: `CODE-FIXED / CI-PENDING`
+- Reproduction: run `npm test` from a clean GitHub Actions checkout where the ignored `artifacts/` directory does not already exist. `scripts/segma-taskbar-ico.test.mjs` calls `writeSegmaIco()` with `artifacts/segma-player-taskbar-test.ico`, and `writeFile()` fails with `ENOENT` before the icon assertions run.
+- Root cause: the taskbar regression test depended on a local build artifact directory as implicit fixture setup. Existing development checkouts normally already had that ignored directory, masking the clean-checkout failure.
+- Code action in `0.4.30`: make the test create its output directory recursively before writing the temporary ICO and remove the temporary ICO in `finally`, so it is hermetic on fresh runners and leaves no generated test file behind.
+- GitHub Actions context: the repository was changed from private to public on `2026-08-27`; this restored hosted-runner allocation. The first allocated Ubuntu runner passed `npm ci` and all 35 media-site regressions, then exposed this single full-suite failure (`499` pass, `1` fail, `25` skipped).
+- Staging version: `0.4.30`.

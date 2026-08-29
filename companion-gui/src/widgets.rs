@@ -24,6 +24,92 @@ const HOVER_MOTION_TIME: f32 = 0.12;
 const PRESS_MOTION_TIME: f32 = 0.10;
 const CLICK_PULSE_TIME: f64 = 0.14;
 
+/// Library drag-to-folder motion. Feedback is painted outside the widget rect
+/// so a hovered drop target never reflows the chip row.
+pub const DROP_TARGET_MOTION_TIME: f32 = 0.12;
+pub const DRAG_LIFT_MOTION_TIME: f32 = 0.10;
+/// Post-drop settle length. Long enough to read as "landed here", short enough
+/// that it can never be mistaken for selection state.
+pub const DROP_SETTLE_TIME: f64 = 0.42;
+/// Faked scale-up, in points, for a hovered drop target.
+const DROP_TARGET_MAX_GROWTH: f32 = 3.0;
+/// How far the settle ring travels outward before it fades out.
+const DROP_SETTLE_MAX_SPREAD: f32 = 7.0;
+
+/// Remaining settle progress: `1.0` at the moment of the drop, `0.0` once the
+/// animation window has passed. Pure so the lifecycle is testable.
+pub fn drop_settle_progress(now: f64, until: f64, duration: f64) -> f32 {
+    if duration <= 0.0 || now >= until {
+        return 0.0;
+    }
+    let remaining = (until - now).min(duration);
+    (remaining / duration).clamp(0.0, 1.0) as f32
+}
+
+/// Outward growth used to read as a scale-up without allocating extra space.
+pub fn drop_target_growth(progress: f32) -> f32 {
+    DROP_TARGET_MAX_GROWTH * progress.clamp(0.0, 1.0)
+}
+
+/// Accent halo on the folder chip currently under a dragged library file.
+pub fn paint_drop_target_emphasis(ui: &Ui, rect: egui::Rect, progress: f32) {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress <= 0.0 {
+        return;
+    }
+    let grown = rect.expand(drop_target_growth(progress));
+    ui.painter().rect_filled(
+        grown,
+        corner(radius::MD),
+        color::ACCENT.gamma_multiply(progress * 0.12),
+    );
+    ui.painter().rect_stroke(
+        grown,
+        corner(radius::MD),
+        egui::Stroke::new(1.0 + progress, color::ACCENT.gamma_multiply(progress)),
+        egui::StrokeKind::Outside,
+    );
+}
+
+/// Lifts the card being dragged so the pointer clearly carries one file.
+pub fn paint_drag_lift(ui: &Ui, rect: egui::Rect, progress: f32) {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress <= 0.0 {
+        return;
+    }
+    ui.painter().rect_filled(
+        rect,
+        corner(radius::LG),
+        color::BG_INVERSE.gamma_multiply(progress * 0.08),
+    );
+    ui.painter().rect_stroke(
+        rect.expand(progress * 2.0),
+        corner(radius::LG),
+        egui::Stroke::new(1.0 + progress, color::ACCENT.gamma_multiply(progress * 0.9)),
+        egui::StrokeKind::Outside,
+    );
+}
+
+/// One-shot completion ring on the folder that just received a file.
+pub fn paint_drop_settle(ui: &Ui, rect: egui::Rect, progress: f32) {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress <= 0.0 {
+        return;
+    }
+    let spread = DROP_SETTLE_MAX_SPREAD * (1.0 - progress);
+    ui.painter().rect_filled(
+        rect,
+        corner(radius::MD),
+        color::ACCENT.gamma_multiply(progress * 0.14),
+    );
+    ui.painter().rect_stroke(
+        rect.expand(spread),
+        corner(radius::MD),
+        egui::Stroke::new(1.5, color::ACCENT.gamma_multiply(progress)),
+        egui::StrokeKind::Outside,
+    );
+}
+
 /// Returns animated hover/press progress. A short post-click pulse keeps a
 /// fast pointer click perceptible instead of relying on one-frame state.
 pub(crate) fn interaction_state(ui: &Ui, response: &Response) -> (f32, f32) {
@@ -231,20 +317,30 @@ pub fn chip(ui: &mut Ui, label: &str, tone: Tone, mono: bool) -> Response {
 
 /// ProgressBar. `percent` is `None` while the host has not reported enough to
 /// know, and the track is drawn alone rather than guessing a position.
-pub fn progress(ui: &mut Ui, percent: Option<u8>, indeterminate: bool) {
+pub fn progress(ui: &mut Ui, id_source: &str, percent: Option<u8>, indeterminate: bool) {
     let width = ui.available_width();
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(width, metric::PROGRESS_HEIGHT), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, corner(radius::FULL), color::BG_TRACK);
     if let Some(value) = percent {
-        let ratio = f32::from(value.min(100)) / 100.0;
+        let target = f32::from(value.min(100)) / 100.0;
+        let ratio = ui.ctx().animate_value_with_time(
+            ui.id().with(("job-progress", id_source)),
+            target,
+            // Download state is persisted about every 750ms and subtitle state
+            // is polled every 1.2s. Interpolate through that interval instead
+            // of racing to each sample and visibly pausing between updates.
+            1.25,
+        );
         if ratio > 0.0 {
             let mut filled = rect;
             filled.set_width(rect.width() * ratio);
             painter.rect_filled(filled, corner(radius::FULL), color::ACCENT);
         }
     } else if indeterminate {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
         let phase = (ui.ctx().input(|input| input.time) * 0.55).fract() as f32;
         let segment = rect.width() * 0.28;
         let travel = rect.width() + segment;
@@ -358,7 +454,12 @@ pub fn job_row(ui: &mut Ui, view: &JobView) -> Option<RowEvent> {
             }
 
             if view.percent.is_some() || view.active || view.paused {
-                progress(ui, view.percent, view.active && view.percent.is_none());
+                progress(
+                    ui,
+                    &view.id,
+                    view.percent,
+                    view.active && view.percent.is_none(),
+                );
             }
 
             ui.horizontal(|ui| {
@@ -423,10 +524,10 @@ pub fn media_thumbnail(
             egui::Image::new(texture)
                 .fit_to_exact_size(size)
                 .corner_radius(corner(radius::LG))
-                .sense(Sense::click()),
+                .sense(Sense::click_and_drag()),
         );
     }
-    let response = ui.allocate_response(size, Sense::click());
+    let response = ui.allocate_response(size, Sense::click_and_drag());
     ui.painter()
         .rect_filled(response.rect, corner(radius::LG), color::BG_SUBTLE);
     ui.painter().text(
@@ -521,6 +622,38 @@ mod tests {
         assert_eq!(popup_menu_width(40.0), 40.0 + metric::ICON_SM + 32.0);
         assert_eq!(popup_menu_width(90.0) - popup_menu_width(40.0), 50.0);
         assert!(popup_menu_width(40.0) < 150.0);
+    }
+
+    #[test]
+    fn drop_settle_fades_out_and_then_stops_costing_anything() {
+        let until = 10.0 + DROP_SETTLE_TIME;
+        let start = drop_settle_progress(10.0, until, DROP_SETTLE_TIME);
+        let middle = drop_settle_progress(10.0 + DROP_SETTLE_TIME / 2.0, until, DROP_SETTLE_TIME);
+        assert!((start - 1.0).abs() < 1e-6);
+        assert!(middle < start && middle > 0.0);
+        assert_eq!(drop_settle_progress(until, until, DROP_SETTLE_TIME), 0.0);
+        assert_eq!(
+            drop_settle_progress(until + 5.0, until, DROP_SETTLE_TIME),
+            0.0
+        );
+        // A clock that jumped backwards must not exceed a full-strength frame.
+        assert!(drop_settle_progress(0.0, until, DROP_SETTLE_TIME) <= 1.0);
+    }
+
+    #[test]
+    fn drop_target_growth_is_bounded_and_never_negative() {
+        assert_eq!(drop_target_growth(0.0), 0.0);
+        assert_eq!(drop_target_growth(-1.0), 0.0);
+        assert_eq!(drop_target_growth(1.0), DROP_TARGET_MAX_GROWTH);
+        assert_eq!(drop_target_growth(4.0), DROP_TARGET_MAX_GROWTH);
+        assert!(drop_target_growth(1.0) < metric::CONTROL_HEIGHT / 4.0);
+    }
+
+    #[test]
+    fn drag_motion_stays_short_enough_to_feel_immediate() {
+        assert!(DRAG_LIFT_MOTION_TIME <= HOVER_MOTION_TIME);
+        assert!(DROP_TARGET_MOTION_TIME <= HOVER_MOTION_TIME);
+        assert!(DROP_SETTLE_TIME < 1.0);
     }
 }
 

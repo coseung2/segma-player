@@ -4,9 +4,11 @@ import { avseeSite } from "./avsee/profile.js";
 import { beegSite } from "./beeg/profile.js";
 import { doodSite } from "./dood/profile.js";
 import { jamakSite } from "./jamak/profile.js";
+import { lulustreamSite } from "./lulustream/profile.js";
 import { missavSite } from "./missav/profile.js";
 import { onlyjerkSite } from "./onlyjerk/profile.js";
 import { playmogoSite } from "./playmogo/profile.js";
+import { pimpbunnySite } from "./pimpbunny/profile.js";
 import { recuSite } from "./recu/profile.js";
 import { shackledshowSite } from "./shackledshow/profile.js";
 import { youtubeSite } from "./youtube/profile.js";
@@ -20,7 +22,9 @@ export const SITE_PROFILES = Object.freeze([
   beegSite,
   doodSite,
   jamakSite,
+  lulustreamSite,
   playmogoSite,
+  pimpbunnySite,
   recuSite,
   shackledshowSite,
   youtubeSite,

@@ -8,7 +8,7 @@
 //! ignored on purpose: a newer host must not break an older manager window.
 
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::env;
 use std::fs;
 use std::io;
@@ -584,6 +584,85 @@ pub struct MediaFile {
     pub modified_at: u64,
 }
 
+/// One media item addressed relative to the configured library root.
+///
+/// Keeping the folder and file name as separate validated components prevents
+/// callers from smuggling an absolute path or traversal into a batch action.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LibraryFileRef {
+    pub folder: Option<String>,
+    pub file_name: String,
+}
+
+impl LibraryFileRef {
+    pub fn new(folder: Option<String>, file_name: impl Into<String>) -> Self {
+        Self {
+            folder,
+            file_name: file_name.into(),
+        }
+    }
+}
+
+/// Copyable details suitable for presenting one failed item without losing the
+/// successful results from the rest of a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryOperationFailure {
+    pub kind: io::ErrorKind,
+    pub message: String,
+}
+
+impl LibraryOperationFailure {
+    fn from_error(error: &io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            message: error.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryOperationOutcome {
+    Succeeded { path: PathBuf },
+    Failed(LibraryOperationFailure),
+}
+
+impl LibraryOperationOutcome {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Succeeded { .. })
+    }
+
+    pub fn failure(&self) -> Option<&LibraryOperationFailure> {
+        match self {
+            Self::Succeeded { .. } => None,
+            Self::Failed(failure) => Some(failure),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchRecycleItemResult {
+    pub item: LibraryFileRef,
+    pub outcome: LibraryOperationOutcome,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchRecycleReport {
+    pub items: Vec<BatchRecycleItemResult>,
+}
+
+impl BatchRecycleReport {
+    pub fn succeeded_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.outcome.is_success())
+            .count()
+    }
+
+    pub fn failed_count(&self) -> usize {
+        self.items.len().saturating_sub(self.succeeded_count())
+    }
+}
+
 /// Extensions the library treats as playable media. Subtitle sidecars and
 /// partial transfers are deliberately excluded: a `.part` file is not a result,
 /// and a `.vtt` belongs to the Subtitles view.
@@ -672,7 +751,92 @@ pub fn valid_folder_name(value: &str) -> Option<String> {
     if trimmed == "." || trimmed == ".." || trimmed.eq_ignore_ascii_case(SUBTITLE_FOLDER) {
         return None;
     }
+    if is_windows_reserved_component(trimmed) {
+        return None;
+    }
     Some(trimmed.to_string())
+}
+
+fn is_windows_reserved_component(value: &str) -> bool {
+    let base = value.split('.').next().unwrap_or_default();
+    let upper = base.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || upper
+            .strip_prefix("COM")
+            .or_else(|| upper.strip_prefix("LPT"))
+            .is_some_and(|number| {
+                matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            })
+}
+
+fn validate_library_root_syntax(root: &Path) -> io::Result<()> {
+    let rendered = root.to_str().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "library root is not Unicode")
+    })?;
+    if valid_download_folder(rendered).as_deref() != Some(root) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid library root",
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the canonical root only after proving it is the configured kind of
+/// absolute, traversal-free directory.
+fn validated_library_root(root: &Path) -> io::Result<PathBuf> {
+    validate_library_root_syntax(root)?;
+    let metadata = fs::metadata(root)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "library root is not a directory",
+        ));
+    }
+    fs::canonicalize(root)
+}
+
+/// Resolves either the root or one direct, non-link collection directory.
+/// Existing junctions and symlinks are rejected if their canonical target is
+/// not a direct child of the canonical library root.
+fn validated_library_dir_in(
+    root: &Path,
+    folder: Option<&str>,
+    create: bool,
+) -> io::Result<PathBuf> {
+    let root = validated_library_root(root)?;
+    let Some(folder) = folder else {
+        return Ok(root);
+    };
+    let folder = valid_folder_name(folder)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid folder name"))?;
+    let candidate = root.join(folder);
+    let mut created = false;
+    if create {
+        match fs::create_dir(&candidate) {
+            Ok(()) => created = true,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let link_metadata = fs::symlink_metadata(&candidate)?;
+    if !link_metadata.is_dir() || link_metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "library folder is not a direct directory",
+        ));
+    }
+    let canonical = fs::canonicalize(&candidate)?;
+    if canonical.parent() != Some(root.as_path()) {
+        if created {
+            let _ = fs::remove_dir(&canonical);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "library folder escapes the library root",
+        ));
+    }
+    Ok(canonical)
 }
 
 /// Resolves the folder a view is showing. `None` is the download folder root.
@@ -783,28 +947,524 @@ pub fn move_media_file(
     from: Option<&str>,
     to: Option<&str>,
 ) -> io::Result<PathBuf> {
-    let name = library_target(file_name)?;
-    let source = library_dir(from)?.join(&name);
-    if !source.is_file() {
+    move_library_file_in(&downloads_dir()?, from, file_name, to, file_name)
+}
+
+/// Moves and optionally collision-renames one file inside a validated library
+/// root. The destination is claimed without replacing an existing entry.
+pub fn move_library_file_in(
+    root: &Path,
+    from: Option<&str>,
+    source_file_name: &str,
+    to: Option<&str>,
+    destination_file_name: &str,
+) -> io::Result<PathBuf> {
+    let source_name = library_target(source_file_name)?;
+    let destination_name = library_target(destination_file_name)?;
+    if source_name
+        .extension()
+        .and_then(|value| value.to_str())
+        .zip(
+            destination_name
+                .extension()
+                .and_then(|value| value.to_str()),
+        )
+        .is_none_or(|(source, destination)| !source.eq_ignore_ascii_case(destination))
+    {
         return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "파일을 찾지 못했습니다. 이동했거나 삭제된 것 같습니다.",
+            io::ErrorKind::InvalidInput,
+            "a library move cannot change the media extension",
         ));
     }
-    let destination_dir = library_dir(to)?;
-    fs::create_dir_all(&destination_dir)?;
-    let destination = destination_dir.join(&name);
+
+    let source_dir = validated_library_dir_in(root, from, false)?;
+    let source = validated_media_path_in_dir(&source_dir, &source_name)?;
+    let destination_dir = validated_library_dir_in(root, to, false)?;
+    let destination = destination_dir.join(destination_name);
     if destination == source {
         return Ok(destination);
     }
-    if destination.exists() {
+    move_file_no_replace(&source, &destination)?;
+    Ok(destination)
+}
+
+fn move_file_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the destination already exists",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows rename fails if a destination appeared after the check, so
+        // this remains no-replace even across that race.
+        fs::rename(source, destination)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Both paths are below one root and therefore on one filesystem. A
+        // hard-link claim is atomic and never replaces an existing name.
+        fs::hard_link(source, destination)?;
+        if let Err(error) = fs::remove_file(source) {
+            let _ = fs::remove_file(destination);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+/// A current on-disk media record plus its direct library collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryMediaRecord {
+    pub folder: Option<String>,
+    pub media: MediaFile,
+}
+
+/// Conservative organization rules based only on the already-supported media
+/// extension. Titles, timestamps, and opaque metadata never affect a category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LibraryOrganizationRule {
+    VideoExtension,
+    AudioExtension,
+}
+
+impl LibraryOrganizationRule {
+    pub fn destination_folder(self) -> &'static str {
+        match self {
+            Self::VideoExtension => "Videos",
+            Self::AudioExtension => "Audio",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryOrganizationPlanItem {
+    pub source: LibraryFileRef,
+    pub destination: LibraryFileRef,
+    pub media: MediaFile,
+    pub rule: LibraryOrganizationRule,
+}
+
+/// Immutable-by-construction preview consumed by the apply operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryOrganizationPlan {
+    root: PathBuf,
+    items: Vec<LibraryOrganizationPlanItem>,
+}
+
+impl LibraryOrganizationPlan {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn items(&self) -> &[LibraryOrganizationPlanItem] {
+        &self.items
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryMoveJournalEntry {
+    pub from: LibraryFileRef,
+    pub to: LibraryFileRef,
+    pub media: MediaFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryMoveJournal {
+    root: PathBuf,
+    entries: Vec<LibraryMoveJournalEntry>,
+}
+
+impl LibraryMoveJournal {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn entries(&self) -> &[LibraryMoveJournalEntry] {
+        &self.entries
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryOrganizationApplyItemResult {
+    pub item: LibraryOrganizationPlanItem,
+    pub outcome: LibraryOperationOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryOrganizationApplyReport {
+    pub items: Vec<LibraryOrganizationApplyItemResult>,
+    pub journal: LibraryMoveJournal,
+}
+
+impl LibraryOrganizationApplyReport {
+    pub fn succeeded_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.outcome.is_success())
+            .count()
+    }
+
+    pub fn failed_count(&self) -> usize {
+        self.items.len().saturating_sub(self.succeeded_count())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryOrganizationReverseItemResult {
+    pub entry: LibraryMoveJournalEntry,
+    pub outcome: LibraryOperationOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryOrganizationReverseReport {
+    pub items: Vec<LibraryOrganizationReverseItemResult>,
+    /// Only entries that still need reversal, in original application order.
+    pub remaining: LibraryMoveJournal,
+}
+
+impl LibraryOrganizationReverseReport {
+    pub fn succeeded_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.outcome.is_success())
+            .count()
+    }
+
+    pub fn failed_count(&self) -> usize {
+        self.items.len().saturating_sub(self.succeeded_count())
+    }
+}
+
+fn library_record_order(
+    left: &LibraryMediaRecord,
+    right: &LibraryMediaRecord,
+) -> std::cmp::Ordering {
+    let left_folder = left.folder.as_deref().unwrap_or_default();
+    let right_folder = right.folder.as_deref().unwrap_or_default();
+    left_folder
+        .to_lowercase()
+        .cmp(&right_folder.to_lowercase())
+        .then_with(|| left_folder.cmp(right_folder))
+        .then_with(|| {
+            left.media
+                .file_name
+                .to_lowercase()
+                .cmp(&right.media.file_name.to_lowercase())
+        })
+        .then_with(|| left.media.file_name.cmp(&right.media.file_name))
+}
+
+/// Captures the current root and direct collection files as `MediaFile`
+/// records. A missing root is an empty library and does not get created.
+pub fn read_library_media_records_in(root: &Path) -> io::Result<Vec<LibraryMediaRecord>> {
+    validate_library_root_syntax(root)?;
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let root = validated_library_root(root)?;
+    let mut records = read_media_files_in(&root)?
+        .into_iter()
+        .map(|media| LibraryMediaRecord {
+            folder: None,
+            media,
+        })
+        .collect::<Vec<_>>();
+    for folder in read_library_folders_in(&root)? {
+        let directory = validated_library_dir_in(&root, Some(&folder.name), false)?;
+        records.extend(read_media_files_in(&directory)?.into_iter().map(|media| {
+            LibraryMediaRecord {
+                folder: Some(folder.name.clone()),
+                media,
+            }
+        }));
+    }
+    records.sort_by(library_record_order);
+    Ok(records)
+}
+
+fn organization_rule(file_name: &str) -> Option<LibraryOrganizationRule> {
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "mp4" | "mkv" | "webm" | "m4v" | "mov" | "ts" | "m2ts" => {
+            Some(LibraryOrganizationRule::VideoExtension)
+        }
+        "mp3" | "m4a" | "flac" => Some(LibraryOrganizationRule::AudioExtension),
+        _ => None,
+    }
+}
+
+fn current_media_file(path: &Path, file_name: &str) -> io::Result<MediaFile> {
+    let metadata = fs::metadata(path)?;
+    Ok(MediaFile {
+        file_name: file_name.to_string(),
+        size: metadata.len(),
+        modified_at: modified_millis(&metadata),
+    })
+}
+
+fn require_matching_media_record(path: &Path, expected: &MediaFile) -> io::Result<()> {
+    if current_media_file(path, &expected.file_name)? != *expected {
         return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "그 폴더에 같은 이름의 파일이 있습니다.",
+            io::ErrorKind::InvalidData,
+            "media file changed after the organization preview",
         ));
     }
-    fs::rename(&source, &destination)?;
-    Ok(destination)
+    Ok(())
+}
+
+fn occupied_names_in(root: &Path, folder: &str) -> io::Result<BTreeSet<String>> {
+    let root = validated_library_root(root)?;
+    let path = root.join(folder);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    let directory = validated_library_dir_in(&root, Some(folder), false)?;
+    let mut names = BTreeSet::new();
+    for entry in fs::read_dir(directory)? {
+        let Ok(entry) = entry else { continue };
+        if let Some(name) = entry.file_name().to_str() {
+            names.insert(name.to_lowercase());
+        }
+    }
+    Ok(names)
+}
+
+fn truncate_utf16(value: &str, maximum_units: usize) -> String {
+    let mut used = 0;
+    value
+        .chars()
+        .take_while(|character| {
+            let units = character.len_utf16();
+            if used + units > maximum_units {
+                return false;
+            }
+            used += units;
+            true
+        })
+        .collect()
+}
+
+fn collision_name(original: &str, occupied: &mut BTreeSet<String>) -> io::Result<String> {
+    if occupied.insert(original.to_lowercase()) {
+        return Ok(original.to_string());
+    }
+    let (stem, extension) = original.rsplit_once('.').ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "media file has no extension")
+    })?;
+    let mut index = 2_u32;
+    loop {
+        let suffix = format!(" ({index})");
+        let fixed_units = suffix.encode_utf16().count() + 1 + extension.encode_utf16().count();
+        let stem = truncate_utf16(stem, 255_usize.saturating_sub(fixed_units));
+        if stem.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "media file name cannot be collision-renamed",
+            ));
+        }
+        let candidate = format!("{stem}{suffix}.{extension}");
+        if library_target(&candidate).is_ok() && occupied.insert(candidate.to_lowercase()) {
+            return Ok(candidate);
+        }
+        index = index.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::AlreadyExists, "no collision-free file name")
+        })?;
+    }
+}
+
+/// Builds a deterministic, write-free preview from a media snapshot. Only
+/// root-level files are organized; files in user collections are preserved.
+pub fn plan_library_organization_in(
+    root: &Path,
+    records: &[LibraryMediaRecord],
+) -> io::Result<LibraryOrganizationPlan> {
+    let root = validated_library_root(root)?;
+    let mut records = records.to_vec();
+    records.sort_by(library_record_order);
+    let mut seen = HashSet::new();
+    let mut video_names = occupied_names_in(&root, "Videos")?;
+    let mut audio_names = occupied_names_in(&root, "Audio")?;
+    let mut items = Vec::new();
+
+    for record in records {
+        let source = LibraryFileRef::new(record.folder.clone(), record.media.file_name.clone());
+        let source_path = media_path_in(&root, source.folder.as_deref(), &source.file_name)?;
+        require_matching_media_record(&source_path, &record.media)?;
+        let source_key = format!(
+            "{}\0{}",
+            source.folder.as_deref().unwrap_or_default().to_lowercase(),
+            source.file_name.to_lowercase()
+        );
+        if !seen.insert(source_key) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "duplicate media record",
+            ));
+        }
+        if source.folder.is_some() {
+            continue;
+        }
+        let rule = organization_rule(&source.file_name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "unsupported media record")
+        })?;
+        debug_assert!(source_path.is_file());
+        let occupied = match rule {
+            LibraryOrganizationRule::VideoExtension => &mut video_names,
+            LibraryOrganizationRule::AudioExtension => &mut audio_names,
+        };
+        let destination_file_name = collision_name(&source.file_name, occupied)?;
+        items.push(LibraryOrganizationPlanItem {
+            source,
+            destination: LibraryFileRef::new(
+                Some(rule.destination_folder().to_string()),
+                destination_file_name,
+            ),
+            media: record.media,
+            rule,
+        });
+    }
+
+    Ok(LibraryOrganizationPlan { root, items })
+}
+
+/// Scans current records and returns a preview without creating category
+/// folders or moving files.
+pub fn preview_library_organization_in(root: &Path) -> io::Result<LibraryOrganizationPlan> {
+    let records = read_library_media_records_in(root)?;
+    if records.is_empty() && !root.exists() {
+        return Ok(LibraryOrganizationPlan {
+            root: root.to_path_buf(),
+            items: Vec::new(),
+        });
+    }
+    plan_library_organization_in(root, &records)
+}
+
+pub fn preview_library_organization() -> io::Result<LibraryOrganizationPlan> {
+    preview_library_organization_in(&downloads_dir()?)
+}
+
+fn apply_organization_item(root: &Path, item: &LibraryOrganizationPlanItem) -> io::Result<PathBuf> {
+    if item.source.folder.is_some()
+        || item.source.file_name != item.media.file_name
+        || organization_rule(&item.source.file_name) != Some(item.rule)
+        || item.destination.folder.as_deref() != Some(item.rule.destination_folder())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "organization plan item does not match its rule",
+        ));
+    }
+    let source = media_path_in(root, item.source.folder.as_deref(), &item.source.file_name)?;
+    require_matching_media_record(&source, &item.media)?;
+    validated_library_dir_in(root, item.destination.folder.as_deref(), true)?;
+    move_library_file_in(
+        root,
+        item.source.folder.as_deref(),
+        &item.source.file_name,
+        item.destination.folder.as_deref(),
+        &item.destination.file_name,
+    )
+}
+
+/// Applies exactly the destinations shown in a preview. A destination that
+/// became occupied is reported as failed rather than silently replanned.
+pub fn apply_library_organization(
+    plan: &LibraryOrganizationPlan,
+) -> LibraryOrganizationApplyReport {
+    let mut results = Vec::with_capacity(plan.items.len());
+    let mut entries = Vec::new();
+    for item in &plan.items {
+        let outcome = match apply_organization_item(&plan.root, item) {
+            Ok(path) => {
+                entries.push(LibraryMoveJournalEntry {
+                    from: item.source.clone(),
+                    to: item.destination.clone(),
+                    media: item.media.clone(),
+                });
+                LibraryOperationOutcome::Succeeded { path }
+            }
+            Err(error) => {
+                LibraryOperationOutcome::Failed(LibraryOperationFailure::from_error(&error))
+            }
+        };
+        results.push(LibraryOrganizationApplyItemResult {
+            item: item.clone(),
+            outcome,
+        });
+    }
+    LibraryOrganizationApplyReport {
+        items: results,
+        journal: LibraryMoveJournal {
+            root: plan.root.clone(),
+            entries,
+        },
+    }
+}
+
+/// Replays successful moves backward. Failures remain journaled so callers can
+/// resolve a collision and retry without repeating reversals that succeeded.
+pub fn reverse_library_organization(
+    journal: &LibraryMoveJournal,
+) -> LibraryOrganizationReverseReport {
+    let mut results = Vec::with_capacity(journal.entries.len());
+    let mut remaining = Vec::new();
+    for entry in journal.entries.iter().rev() {
+        let outcome = match (|| {
+            let current = media_path_in(
+                &journal.root,
+                entry.to.folder.as_deref(),
+                &entry.to.file_name,
+            )?;
+            require_matching_media_record(&current, &entry.media)?;
+            move_library_file_in(
+                &journal.root,
+                entry.to.folder.as_deref(),
+                &entry.to.file_name,
+                entry.from.folder.as_deref(),
+                &entry.from.file_name,
+            )
+        })() {
+            Ok(path) => LibraryOperationOutcome::Succeeded { path },
+            Err(error) => {
+                remaining.push(entry.clone());
+                LibraryOperationOutcome::Failed(LibraryOperationFailure::from_error(&error))
+            }
+        };
+        results.push(LibraryOrganizationReverseItemResult {
+            entry: entry.clone(),
+            outcome,
+        });
+    }
+    remaining.reverse();
+    LibraryOrganizationReverseReport {
+        items: results,
+        remaining: LibraryMoveJournal {
+            root: journal.root.clone(),
+            entries: remaining,
+        },
+    }
 }
 
 /// Resume or retry a job: prepare, mark queued, then run the host's runner.
@@ -953,37 +1613,93 @@ pub fn open_library_folder(_folder: Option<&str>) -> io::Result<()> {
 /// Only the trailing file name is accepted, and only for media extensions, so
 /// neither a state file nor an arbitrary path can ever become a delete target.
 fn library_target(file_name: &str) -> io::Result<PathBuf> {
-    let name = Path::new(file_name)
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"))?;
-    let name = name.to_string_lossy().into_owned();
-    if !is_media_file_name(&name) {
+    if file_name.is_empty()
+        || file_name.encode_utf16().count() > 255
+        || file_name.chars().any(char::is_control)
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "not a media file",
+            "invalid file name",
         ));
     }
-    Ok(PathBuf::from(name))
+    let path = Path::new(file_name);
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(name)) = components.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid file name",
+        ));
+    };
+    if components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid file name",
+        ));
+    }
+    let name = name
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"))?;
+    if name != file_name
+        || name.ends_with('.')
+        || name.ends_with(' ')
+        || name
+            .chars()
+            .any(|character| r#"\/:*?"<>|"#.contains(character))
+        || is_windows_reserved_component(name)
+        || !is_media_file_name(name)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid media file name",
+        ));
+    }
+    Ok(PathBuf::from(file_name))
+}
+
+fn validated_media_path_in_dir(directory: &Path, name: &Path) -> io::Result<PathBuf> {
+    let path = directory.join(name);
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "파일을 찾지 못했습니다. 이동했거나 삭제된 것 같습니다.",
+            )
+        } else {
+            error
+        }
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "library target is not a regular media file",
+        ));
+    }
+    Ok(path)
+}
+
+/// Resolves one media target under an explicit testable library root.
+pub fn media_path_in(root: &Path, folder: Option<&str>, file_name: &str) -> io::Result<PathBuf> {
+    let name = library_target(file_name)?;
+    let directory = validated_library_dir_in(root, folder, false)?;
+    validated_media_path_in_dir(&directory, &name)
 }
 
 /// Resolves one playable library file inside the configured download folder.
 /// Callers never receive a path outside that folder, even when given a path-like
 /// string instead of a plain file name.
 pub fn media_path(folder: Option<&str>, file_name: &str) -> io::Result<PathBuf> {
-    let path = library_dir(folder)?.join(library_target(file_name)?);
-    if !path.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "파일을 찾지 못했습니다. 이동했거나 삭제된 것 같습니다.",
-        ));
-    }
-    Ok(path)
+    media_path_in(&downloads_dir()?, folder, file_name)
 }
 
 /// Moves a library file to the Windows Recycle Bin instead of deleting it
 /// permanently, so a mistaken tap stays recoverable.
 #[cfg(target_os = "windows")]
 pub fn delete_media_file(folder: Option<&str>, file_name: &str) -> io::Result<PathBuf> {
+    delete_media_file_in(&downloads_dir()?, folder, file_name)
+}
+
+#[cfg(target_os = "windows")]
+fn recycle_validated_media_path(path: &Path) -> io::Result<PathBuf> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows::core::{BOOL, PCWSTR};
@@ -993,10 +1709,20 @@ pub fn delete_media_file(folder: Option<&str>, file_name: &str) -> io::Result<Pa
         SHFILEOPSTRUCTW,
     };
 
-    let path = media_path(folder, file_name)?;
+    // `canonicalize` adds Windows' verbatim prefix, while the legacy shell API
+    // expects an ordinary drive or UNC path. Validation still used the
+    // canonical path; only the representation passed to the shell changes.
+    let rendered = path.as_os_str().to_string_lossy();
+    let shell_path = if let Some(unc) = rendered.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(ordinary) = rendered.strip_prefix(r"\\?\") {
+        PathBuf::from(ordinary)
+    } else {
+        path.to_path_buf()
+    };
 
     // SHFileOperationW expects a double-null-terminated source path list.
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let mut wide: Vec<u16> = shell_path.as_os_str().encode_wide().collect();
     wide.push(0);
     wide.push(0);
 
@@ -1025,14 +1751,96 @@ pub fn delete_media_file(folder: Option<&str>, file_name: &str) -> io::Result<Pa
             "파일을 휴지통으로 보내지 못했습니다. 파일이 사용 중인지 확인해 주세요.",
         ));
     }
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn delete_media_file(folder: Option<&str>, file_name: &str) -> io::Result<PathBuf> {
-    let path = media_path(folder, file_name)?;
-    fs::remove_file(&path)?;
-    Ok(path)
+pub fn delete_media_file(_folder: Option<&str>, _file_name: &str) -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Recycle Bin deletion is Windows only",
+    ))
+}
+
+/// Validates an explicit root/folder/file tuple before invoking the operating
+/// system's recoverable Recycle Bin operation.
+#[cfg(target_os = "windows")]
+pub fn delete_media_file_in(
+    root: &Path,
+    folder: Option<&str>,
+    file_name: &str,
+) -> io::Result<PathBuf> {
+    recycle_validated_media_path(&media_path_in(root, folder, file_name)?)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn delete_media_file_in(
+    _root: &Path,
+    _folder: Option<&str>,
+    _file_name: &str,
+) -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Recycle Bin deletion is Windows only",
+    ))
+}
+
+fn batch_recycle_media_files_with<F>(
+    root: &Path,
+    items: &[LibraryFileRef],
+    mut recycle: F,
+) -> BatchRecycleReport
+where
+    F: FnMut(&Path) -> io::Result<PathBuf>,
+{
+    let mut results = Vec::with_capacity(items.len());
+    let mut seen = HashSet::new();
+    for item in items {
+        let outcome = match (|| {
+            let path = media_path_in(root, item.folder.as_deref(), &item.file_name)?;
+            let key = path.to_string_lossy().to_lowercase();
+            if !seen.insert(key) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate batch recycle target",
+                ));
+            }
+            recycle(&path)
+        })() {
+            Ok(path) => LibraryOperationOutcome::Succeeded { path },
+            Err(error) => {
+                LibraryOperationOutcome::Failed(LibraryOperationFailure::from_error(&error))
+            }
+        };
+        results.push(BatchRecycleItemResult {
+            item: item.clone(),
+            outcome,
+        });
+    }
+    BatchRecycleReport { items: results }
+}
+
+/// Sends every independently validated media target to the Windows Recycle
+/// Bin and retains an exact result for every requested item.
+pub fn batch_recycle_media_files_in(root: &Path, items: &[LibraryFileRef]) -> BatchRecycleReport {
+    #[cfg(target_os = "windows")]
+    {
+        batch_recycle_media_files_with(root, items, recycle_validated_media_path)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        batch_recycle_media_files_with(root, items, |_| {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Recycle Bin deletion is Windows only",
+            ))
+        })
+    }
+}
+
+pub fn batch_recycle_media_files(items: &[LibraryFileRef]) -> io::Result<BatchRecycleReport> {
+    Ok(batch_recycle_media_files_in(&downloads_dir()?, items))
 }
 
 /// Reveals a library file in Explorer with it selected.
@@ -1076,6 +1884,16 @@ mod tests {
         ));
         fs::create_dir_all(&directory).expect("temp directory creates");
         directory
+    }
+
+    #[cfg(target_os = "windows")]
+    fn directory_link(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    #[cfg(unix)]
+    fn directory_link(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
     }
 
     fn write_state(directory: &Path, job_id: &str, body: &str) {
@@ -1507,7 +2325,18 @@ mod tests {
         }
         // Subtitles, partial transfers, and stray files belong to other
         // surfaces and must never be deletable from the library.
-        for bad in ["clip.ko.vtt", "notes.txt", "state.json", "noextension", ""] {
+        for bad in [
+            "clip.ko.vtt",
+            "notes.txt",
+            "state.json",
+            "noextension",
+            "",
+            "../outside.mp4",
+            "folder/inside.mp4",
+            "folder\\inside.mp4",
+            "C:\\Windows\\inside.mp4",
+            "NUL.mp4",
+        ] {
             assert!(library_target(bad).is_err(), "{bad:?} must be rejected");
         }
     }
@@ -1591,6 +2420,275 @@ mod tests {
             assert!(rename_library_folder_in(&directory, "After", invalid).is_err());
         }
         fs::remove_dir_all(directory).expect("temp directory removes");
+    }
+
+    #[test]
+    fn explicit_library_paths_reject_traversal_and_non_media_targets() {
+        let root = temp_dir("library-path-validation");
+        fs::write(root.join("inside.mp4"), b"media").expect("media writes");
+        fs::create_dir(root.join("Collection")).expect("collection creates");
+        fs::write(root.join("Collection").join("nested.mkv"), b"nested")
+            .expect("nested media writes");
+
+        assert!(media_path_in(&root, None, "inside.mp4").is_ok());
+        assert!(media_path_in(&root, Some("Collection"), "nested.mkv").is_ok());
+        for (folder, file) in [
+            (None, "../inside.mp4"),
+            (None, "C:\\Windows\\inside.mp4"),
+            (Some(".."), "inside.mp4"),
+            (Some("Collection/.."), "inside.mp4"),
+            (None, "notes.txt"),
+        ] {
+            assert!(
+                media_path_in(&root, folder, file).is_err(),
+                "folder={folder:?} file={file:?} must be rejected"
+            );
+        }
+
+        fs::remove_dir_all(root).expect("temp directory removes");
+    }
+
+    #[test]
+    fn explicit_library_paths_reject_collection_links_outside_the_root() {
+        let root = temp_dir("library-link-root");
+        let outside = temp_dir("library-link-outside");
+        fs::write(outside.join("outside.mp4"), b"outside").expect("outside media writes");
+        let link = root.join("Linked");
+        match directory_link(&outside, &link) {
+            Ok(()) => {
+                assert!(media_path_in(&root, Some("Linked"), "outside.mp4").is_err());
+                assert!(outside.join("outside.mp4").is_file());
+                fs::remove_dir(&link).expect("directory link removes");
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+                ) || error.raw_os_error() == Some(1314) => {}
+            Err(error) => panic!("unexpected directory link error: {error}"),
+        }
+
+        fs::remove_dir_all(root).expect("root temp directory removes");
+        fs::remove_dir_all(outside).expect("outside temp directory removes");
+    }
+
+    #[test]
+    fn batch_recycle_reports_every_item_and_continues_after_failures() {
+        let root = temp_dir("batch-recycle");
+        for name in ["first.mp4", "second.mkv"] {
+            fs::write(root.join(name), name.as_bytes()).expect("media writes");
+        }
+        let items = vec![
+            LibraryFileRef::new(None, "first.mp4"),
+            LibraryFileRef::new(None, "../outside.mp4"),
+            LibraryFileRef::new(None, "second.mkv"),
+            LibraryFileRef::new(None, "second.mkv"),
+        ];
+        let mut attempted = Vec::new();
+        let report = batch_recycle_media_files_with(&root, &items, |path| {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("media path has a file name")
+                .to_string();
+            attempted.push(name.clone());
+            if name == "second.mkv" {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated recycle failure",
+                ));
+            }
+            Ok(path.to_path_buf())
+        });
+
+        assert_eq!(attempted, ["first.mp4", "second.mkv"]);
+        assert_eq!(report.items.len(), 4);
+        assert_eq!(report.succeeded_count(), 1);
+        assert_eq!(report.failed_count(), 3);
+        assert_eq!(
+            report.items[1]
+                .outcome
+                .failure()
+                .expect("traversal fails")
+                .kind,
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            report.items[2]
+                .outcome
+                .failure()
+                .expect("recycle failure retained")
+                .kind,
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            report.items[3]
+                .outcome
+                .failure()
+                .expect("duplicate fails")
+                .kind,
+            io::ErrorKind::InvalidInput
+        );
+        assert!(root.join("first.mp4").is_file());
+        assert!(root.join("second.mkv").is_file());
+
+        fs::remove_dir_all(root).expect("temp directory removes");
+    }
+
+    #[test]
+    fn organization_preview_is_stable_collision_safe_and_write_free() {
+        let root = temp_dir("organization-preview");
+        for (name, body) in [
+            ("clip.mp4", b"root-video".as_slice()),
+            ("song.mp3", b"root-audio".as_slice()),
+            ("zeta.mkv", b"root-zeta".as_slice()),
+        ] {
+            fs::write(root.join(name), body).expect("media writes");
+        }
+        fs::create_dir(root.join("Videos")).expect("video folder creates");
+        fs::write(root.join("Videos").join("clip.mp4"), b"occupied").expect("collision writes");
+        fs::write(root.join("Videos").join("clip (2).mp4"), b"occupied")
+            .expect("second collision writes");
+
+        let records = read_library_media_records_in(&root).expect("records read");
+        let first = plan_library_organization_in(&root, &records).expect("plan builds");
+        let mut reversed = records.clone();
+        reversed.reverse();
+        let second = plan_library_organization_in(&root, &reversed).expect("plan is stable");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .items()
+                .iter()
+                .map(|item| (
+                    item.source.file_name.as_str(),
+                    item.destination.folder.as_deref(),
+                    item.destination.file_name.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("clip.mp4", Some("Videos"), "clip (3).mp4"),
+                ("song.mp3", Some("Audio"), "song.mp3"),
+                ("zeta.mkv", Some("Videos"), "zeta.mkv"),
+            ]
+        );
+        assert!(
+            !root.join("Audio").exists(),
+            "preview must not create folders"
+        );
+        assert!(
+            root.join("clip.mp4").is_file(),
+            "preview must not move files"
+        );
+
+        fs::remove_dir_all(root).expect("temp directory removes");
+    }
+
+    #[test]
+    fn organization_apply_never_overwrites_and_reports_partial_failures() {
+        let root = temp_dir("organization-apply-partial");
+        fs::write(root.join("alpha.mp4"), b"alpha").expect("video writes");
+        fs::write(root.join("beta.mp3"), b"beta").expect("audio writes");
+        let plan = preview_library_organization_in(&root).expect("preview builds");
+        let beta = plan
+            .items()
+            .iter()
+            .find(|item| item.source.file_name == "beta.mp3")
+            .expect("audio plan exists")
+            .destination
+            .clone();
+        fs::create_dir(root.join("Audio")).expect("audio folder creates");
+        fs::write(
+            root.join(beta.folder.as_deref().expect("folder"))
+                .join(&beta.file_name),
+            b"do-not-overwrite",
+        )
+        .expect("late collision writes");
+
+        let report = apply_library_organization(&plan);
+        assert_eq!(report.succeeded_count(), 1);
+        assert_eq!(report.failed_count(), 1);
+        assert_eq!(report.journal.entries().len(), 1);
+        assert!(root.join("Videos").join("alpha.mp4").is_file());
+        assert!(!root.join("alpha.mp4").exists());
+        assert!(root.join("beta.mp3").is_file());
+        assert_eq!(
+            fs::read(root.join("Audio").join("beta.mp3")).expect("collision reads"),
+            b"do-not-overwrite"
+        );
+        assert_eq!(
+            report
+                .items
+                .iter()
+                .find(|item| item.item.source.file_name == "beta.mp3")
+                .and_then(|item| item.outcome.failure())
+                .expect("audio move fails")
+                .kind,
+            io::ErrorKind::AlreadyExists
+        );
+
+        fs::remove_dir_all(root).expect("temp directory removes");
+    }
+
+    #[test]
+    fn organization_journal_reverses_successes_and_retains_retryable_failures() {
+        let root = temp_dir("organization-reverse");
+        fs::write(root.join("alpha.mp4"), b"alpha").expect("video writes");
+        fs::write(root.join("beta.mp3"), b"beta").expect("audio writes");
+        let plan = preview_library_organization_in(&root).expect("preview builds");
+        let applied = apply_library_organization(&plan);
+        assert_eq!(applied.succeeded_count(), 2);
+        assert_eq!(applied.journal.entries().len(), 2);
+
+        fs::write(root.join("beta.mp3"), b"new occupant").expect("reverse collision writes");
+        let first_reverse = reverse_library_organization(&applied.journal);
+        assert_eq!(first_reverse.succeeded_count(), 1);
+        assert_eq!(first_reverse.failed_count(), 1);
+        assert_eq!(first_reverse.remaining.entries().len(), 1);
+        assert!(root.join("alpha.mp4").is_file());
+        assert!(root.join("Audio").join("beta.mp3").is_file());
+        assert_eq!(
+            fs::read(root.join("beta.mp3")).expect("occupant reads"),
+            b"new occupant"
+        );
+
+        fs::remove_file(root.join("beta.mp3")).expect("collision removes");
+        let retry = reverse_library_organization(&first_reverse.remaining);
+        assert_eq!(retry.succeeded_count(), 1);
+        assert_eq!(retry.failed_count(), 0);
+        assert!(retry.remaining.is_empty());
+        assert_eq!(
+            fs::read(root.join("beta.mp3")).expect("restored audio reads"),
+            b"beta"
+        );
+
+        fs::remove_dir_all(root).expect("temp directory removes");
+    }
+
+    #[test]
+    fn organization_apply_rejects_files_changed_after_preview() {
+        let root = temp_dir("organization-stale-preview");
+        fs::write(root.join("clip.mp4"), b"before").expect("video writes");
+        let plan = preview_library_organization_in(&root).expect("preview builds");
+        fs::write(root.join("clip.mp4"), b"different-length").expect("video changes");
+
+        let report = apply_library_organization(&plan);
+        assert_eq!(report.succeeded_count(), 0);
+        assert_eq!(report.failed_count(), 1);
+        assert!(report.journal.is_empty());
+        assert!(root.join("clip.mp4").is_file());
+        assert!(!root.join("Videos").join("clip.mp4").exists());
+        assert_eq!(
+            report.items[0]
+                .outcome
+                .failure()
+                .expect("stale preview fails")
+                .kind,
+            io::ErrorKind::InvalidData
+        );
+
+        fs::remove_dir_all(root).expect("temp directory removes");
     }
 
     /// Sets a file's modified time so ordering assertions are deterministic.

@@ -12,6 +12,9 @@ output/
 .playwright-cli/
 scripts/laptop-package/*-report.txt
 
+# Local one-off patch and inspection helpers
+/_*.py
+
 # wrangler files
 .wrangler
 .dev.vars*

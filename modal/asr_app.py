@@ -21,6 +21,7 @@ ENGLISH_ASR_MODEL_ID = "openai/whisper-large-v3-turbo"
 ENGLISH_ASR_MODEL_DIR = "/models/whisper-large-v3-turbo"
 TRANSLATION_MODEL_ID = "google/translategemma-12b-it"
 TRANSLATION_MODEL_DIR = "/models/translategemma-12b-it"
+DIARIZATION_MODEL_ID = "pyannote/speaker-diarization-community-1"
 MAX_MEDIA_URL_LENGTH = 4096
 MAX_TITLE_LENGTH = 240
 MAX_DURATION_SECONDS = 60 * 60
@@ -65,6 +66,7 @@ image = ingest_image.pip_install(
     "bitsandbytes",
     "huggingface_hub",
     "Pillow",
+    "pyannote.audio>=4,<5",
     "soundfile",
     "torch",
     "torchvision",
@@ -476,6 +478,28 @@ def normalize_uploaded_audio(input_path, audio_path):
     )
 
 
+def audio_upload_header_error(headers):
+    content_type = headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
+    if content_type not in ALLOWED_AUDIO_UPLOAD_CONTENT_TYPES:
+        return "invalid-audio-content-type", 415
+    claimed_bytes = headers.get("x-aura-audio-bytes", "")
+    if not claimed_bytes.isdigit() or int(claimed_bytes) <= 0:
+        return "invalid-audio-upload", 400
+    claimed_bytes = int(claimed_bytes)
+    if claimed_bytes > MAX_AUDIO_UPLOAD_BYTES:
+        return "subtitle-audio-too-large", 413
+    content_length = headers.get("content-length", "")
+    if content_length:
+        if not content_length.isdigit() or int(content_length) <= 0:
+            return "invalid-audio-upload", 400
+        content_length = int(content_length)
+        if content_length > MAX_AUDIO_UPLOAD_BYTES:
+            return "subtitle-audio-too-large", 413
+        if content_length != claimed_bytes:
+            return "audio-size-mismatch", 400
+    return None
+
+
 def extract_remote_audio(request, audio_path):
     media_url = request["mediaUrl"]
     source_url = request["sourceUrl"]
@@ -533,6 +557,10 @@ def chunks_to_vtt(chunks):
         if start is None or end is None or end <= start or not text:
             continue
         text = html.escape(text.replace("-->", "→"), quote=False)
+        speaker = str(chunk.get("speaker", "")).strip() if isinstance(chunk, dict) else ""
+        if speaker:
+            speaker = html.escape(speaker.replace("-->", "→"), quote=True)
+            text = f"<v {speaker}>{text}"
         cues.append((start, end, text))
     cues.sort(key=lambda cue: cue[0])
     lines = ["WEBVTT", ""]
@@ -542,6 +570,64 @@ def chunks_to_vtt(chunks):
     if len(output.encode("utf-8")) > MAX_VTT_BYTES:
         raise ValueError("subtitle-too-large")
     return output
+
+
+def diarization_turns(output):
+    """Return exclusive, non-overlapping speaker turns from pyannote output."""
+    annotation = getattr(output, "exclusive_speaker_diarization", None)
+    if annotation is None:
+        annotation = getattr(output, "speaker_diarization", output)
+    turns = []
+    if hasattr(annotation, "itertracks"):
+        iterator = ((turn, speaker) for turn, _, speaker in annotation.itertracks(yield_label=True))
+    else:
+        iterator = iter(annotation or [])
+    for turn, speaker in iterator:
+        start = timestamp_seconds(getattr(turn, "start", None))
+        end = timestamp_seconds(getattr(turn, "end", None))
+        if start is None or end is None or end <= start:
+            continue
+        turns.append({"start": start, "end": end, "speaker": str(speaker)})
+    turns.sort(key=lambda turn: (turn["start"], turn["end"]))
+    return turns
+
+
+def assign_speakers(chunks, turns):
+    """Attach stable Korean speaker labels using maximum timestamp overlap."""
+    speaker_labels = {}
+    assigned = []
+    for chunk in chunks or []:
+        next_chunk = dict(chunk) if isinstance(chunk, dict) else {}
+        timestamps = next_chunk.get("timestamp")
+        if not isinstance(timestamps, (list, tuple)) or len(timestamps) < 2:
+            assigned.append(next_chunk)
+            continue
+        start = timestamp_seconds(timestamps[0])
+        end = timestamp_seconds(timestamps[1])
+        if start is None or end is None or end <= start:
+            assigned.append(next_chunk)
+            continue
+        overlaps = []
+        for turn in turns or []:
+            overlap = max(0.0, min(end, turn["end"]) - max(start, turn["start"]))
+            if overlap > 0:
+                overlaps.append((overlap, turn["speaker"]))
+        if overlaps:
+            raw_speaker = max(overlaps, key=lambda item: item[0])[1]
+        elif turns:
+            midpoint = (start + end) / 2
+            raw_speaker = min(
+                turns,
+                key=lambda turn: abs(midpoint - ((turn["start"] + turn["end"]) / 2)),
+            )["speaker"]
+        else:
+            raw_speaker = ""
+        if raw_speaker:
+            if raw_speaker not in speaker_labels:
+                speaker_labels[raw_speaker] = f"화자 {len(speaker_labels) + 1}"
+            next_chunk["speaker"] = speaker_labels[raw_speaker]
+        assigned.append(next_chunk)
+    return assigned, list(speaker_labels.values())
 
 
 @app.cls(
@@ -599,6 +685,14 @@ class AnimeWhisperWorker:
             torch_dtype=torch.float16,
         )
         self.english_pipeline = None
+        from pyannote.audio import Pipeline as DiarizationPipeline
+
+        self.diarization_pipeline = DiarizationPipeline.from_pretrained(
+            DIARIZATION_MODEL_ID,
+            token=huggingface_token,
+            cache_dir="/models/huggingface",
+        )
+        self.diarization_pipeline.to(torch.device("cuda"))
         translation_quantization = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -672,7 +766,7 @@ class AnimeWhisperWorker:
             next_chunk = dict(chunk)
             next_chunk["text"] = self.translate_text(next_chunk.get("text", ""), source_language)
             translated.append(next_chunk)
-            set_job_progress(progress_key, "translating", 60 + int((index / max(1, total)) * 38), index, total)
+            set_job_progress(progress_key, "translating", 65 + int((index / max(1, total)) * 33), index, total)
         return translated
 
     @modal.method()
@@ -702,15 +796,23 @@ class AnimeWhisperWorker:
                 "no_repeat_ngram_size": 5,
             },
         )
-        set_job_progress(progress_key, "translating", 60)
-        vtt = chunks_to_vtt(self.translate_chunks(result.get("chunks", []), source_language, progress_key))
+        set_job_progress(progress_key, "diarizing", 58)
+        diarization = self.diarization_pipeline(audio_path)
+        speaker_chunks, speakers = assign_speakers(
+            result.get("chunks", []),
+            diarization_turns(diarization),
+        )
+        set_job_progress(progress_key, "translating", 65)
+        vtt = chunks_to_vtt(self.translate_chunks(speaker_chunks, source_language, progress_key))
         set_job_progress(progress_key, "finalizing", 99)
         return {
             "ok": True,
             "vtt": vtt,
             "title": request["title"],
-            "model": f"{asr_model_id}+{TRANSLATION_MODEL_ID}",
+            "model": f"{asr_model_id}+{DIARIZATION_MODEL_ID}+{TRANSLATION_MODEL_ID}",
             "sourceLanguage": source_language,
+            "speakers": speakers,
+            "speakerCount": len(speakers),
         }
 
 
@@ -820,21 +922,11 @@ def web():
         if not authorized(request):
             return response({"ok": False, "error": "unauthorized"}, 401)
         content_type = request.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
-        if content_type not in ALLOWED_AUDIO_UPLOAD_CONTENT_TYPES:
-            return response({"ok": False, "error": "invalid-audio-content-type"}, 415)
-        claimed_bytes = request.headers.get("x-aura-audio-bytes", "")
-        if not claimed_bytes.isdigit() or int(claimed_bytes) <= 0:
-            return response({"ok": False, "error": "invalid-audio-upload"}, 400)
-        claimed_bytes = int(claimed_bytes)
-        if claimed_bytes > MAX_AUDIO_UPLOAD_BYTES:
-            return response({"ok": False, "error": "subtitle-audio-too-large"}, 413)
-        content_length = request.headers.get("content-length", "")
-        if content_length.isdigit():
-            content_length = int(content_length)
-            if content_length > MAX_AUDIO_UPLOAD_BYTES:
-                return response({"ok": False, "error": "subtitle-audio-too-large"}, 413)
-            if content_length != claimed_bytes:
-                return response({"ok": False, "error": "audio-size-mismatch"}, 400)
+        header_error = audio_upload_header_error(request.headers)
+        if header_error:
+            error, status = header_error
+            return response({"ok": False, "error": error}, status)
+        claimed_bytes = int(request.headers["x-aura-audio-bytes"])
         source_language = request.headers.get("x-aura-source-language", "ja").strip().lower()
         if source_language not in {"ja", "en"}:
             return response({"ok": False, "error": "invalid-source-language"}, 400)

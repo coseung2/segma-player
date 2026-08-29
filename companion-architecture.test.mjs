@@ -54,6 +54,24 @@ test("Companion owns persistent recovery and cancellation outside the extension 
   assert.doesNotMatch(background, /playback-session\.js|createPlaybackSession|resolvePlaybackSession/);
 });
 
+test("the extension stays free while the installed app owns General and Pro", async () => {
+  const [background, manager, license, nativeHost, runtimeFiles] = await Promise.all([
+    read("./background.js"),
+    read("./companion-gui/src/app.rs"),
+    read("./companion-gui/src/license.rs"),
+    read("./native-host/src/main.rs"),
+    import("./scripts/build-dev-staging.mjs").then((module) => module.STORE_RUNTIME_FILES),
+  ]);
+  assert.doesNotMatch(background, /auraLicense|activateLicense|resolveEdition|resolvePlan/);
+  assert.equal(runtimeFiles.includes("license.js"), false);
+  assert.match(manager, /AI 자막 생성은 앱 Pro 기능입니다/);
+  assert.match(manager, /self\.view = View::Settings/);
+  assert.match(license, /LICENSE_API_URL/);
+  assert.match(license, /licenseKey/);
+  assert.match(nativeHost, /"entitlementOwner": "companion"/);
+  assert.match(nativeHost, /license_edition\.as_deref\(\) == Some\("pro"\)/);
+});
+
 test("candidate and link downloads hand off to Companion without a local execution fallback", async () => {
   const background = await read("./background.js");
   const queueStart = background.indexOf("async function queueMediaDownload(candidate)");

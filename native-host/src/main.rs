@@ -34,6 +34,8 @@ const MAX_MEDIA_DOWNLOAD_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_MEDIA_DOWNLOAD_URL_BYTES: usize = 4096;
 const MAX_MEDIA_DOWNLOAD_TITLE_BYTES: usize = 512;
 const MAX_MEDIA_DOWNLOAD_ID_BYTES: usize = 128;
+const MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES: usize = 512;
+const MAX_MEDIA_DOWNLOAD_ACCEPT_LANGUAGE_BYTES: usize = 256;
 const SUBTITLE_COMMAND_VERSION: u32 = 1;
 const MAX_SUBTITLE_MESSAGE_BYTES: usize = 32 * 1024;
 const MAX_SUBTITLE_URL_BYTES: usize = 4096;
@@ -44,10 +46,13 @@ const MAX_SUBTITLE_RESULT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SUBTITLE_REMOTE_RESPONSE_BYTES: usize = MAX_SUBTITLE_RESULT_BYTES + 64 * 1024;
 const MAX_SUBTITLE_PHASE_BYTES: usize = 128;
 const SUBTITLE_WORKER_URL: &str = "https://aura.mdownloader.workers.dev/api/subtitles";
-const SUBTITLE_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const SUBTITLE_POLL_INTERVAL: Duration = Duration::from_millis(1_200);
 const SUBTITLE_MAX_RUNTIME: Duration = Duration::from_secs(30 * 60);
 const SUBTITLE_ACTIVE_MAX_AGE_MS: u64 = 2 * 60 * 60 * 1000;
 const MAX_SUBTITLE_AUDIO_BYTES: u64 = 80 * 1024 * 1024;
+const MAX_SUBTITLE_DURATION_SECONDS: u64 = 60 * 60;
+const MEDIA_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36";
 static NEXT_SUBTITLE_JOB_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -80,6 +85,10 @@ struct Request {
     referrer: Option<String>,
     #[serde(rename = "inputKind", default)]
     input_kind: String,
+    #[serde(rename = "userAgent", default)]
+    user_agent: String,
+    #[serde(rename = "acceptLanguage", default)]
+    accept_language: String,
     #[serde(default)]
     total: Option<u64>,
     #[serde(rename = "showUi", default)]
@@ -110,6 +119,8 @@ struct MediaDownloadCommand {
     kind: String,
     #[serde(rename = "protocolVersion")]
     protocol_version: u32,
+    #[serde(rename = "requestId", default)]
+    request_id: String,
     #[serde(rename = "jobId")]
     job_id: String,
     #[serde(rename = "candidateId")]
@@ -120,6 +131,18 @@ struct MediaDownloadCommand {
     title: String,
     #[serde(rename = "inputKind")]
     input_kind: String,
+    #[serde(
+        rename = "userAgent",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    user_agent: String,
+    #[serde(
+        rename = "acceptLanguage",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    accept_language: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +185,11 @@ struct SubtitleMedia {
     resource_url: String,
     #[serde(rename = "audioRenditionUrl", default)]
     audio_rendition_url: String,
-    #[serde(rename = "localFilePath", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "localFilePath",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     local_file_path: Option<String>,
 }
 
@@ -192,6 +219,12 @@ struct SubtitleRequestEnvelope {
 struct CompanionSettings {
     #[serde(rename = "licenseKey", default)]
     license_key: Option<String>,
+    #[serde(rename = "licenseEdition", default)]
+    license_edition: Option<String>,
+    #[serde(rename = "licenseStatus", default)]
+    license_status: Option<String>,
+    #[serde(rename = "licenseExpiresAt", default)]
+    license_expires_at: Option<u64>,
     /// Absolute folder the companion saves media into.
     ///
     /// `None` means the default `%USERPROFILE%\Downloads\Aura Media`. This is
@@ -365,13 +398,30 @@ fn bounded_text(value: &str, maximum: usize) -> bool {
     value.len() <= maximum && !value.chars().any(|character| character.is_control())
 }
 
+fn valid_user_agent(value: &str) -> bool {
+    value.len() <= MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+}
+
+fn valid_accept_language(value: &str) -> bool {
+    value.len() <= MAX_MEDIA_DOWNLOAD_ACCEPT_LANGUAGE_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b',' | b'.' | b';' | b'=' | b'-' | b' ')
+        })
+}
+
 fn media_download_error(code: &'static str, message: &'static str) -> MediaDownloadValidationError {
     MediaDownloadValidationError { code, message }
 }
 
-
 fn valid_local_subtitle_path(value: &Option<String>) -> bool {
-    let Some(path) = value.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(path) = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return false;
     };
     if path.chars().any(char::is_control) || path.len() > 32_767 {
@@ -400,6 +450,25 @@ fn ffmpeg_executable() -> Result<PathBuf, SubtitleRunError> {
     }
 }
 
+fn configure_local_subtitle_audio_command(command: &mut Command, source: &Path, output: &Path) {
+    command
+        .arg("-y")
+        .arg("-i")
+        .arg(source)
+        .arg("-vn")
+        .arg("-ac")
+        .arg("1")
+        .arg("-ar")
+        .arg("16000")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("64k")
+        .arg("-t")
+        .arg(MAX_SUBTITLE_DURATION_SECONDS.to_string())
+        .arg(output);
+}
+
 fn prepare_local_subtitle_audio(
     envelope: &SubtitleRequestEnvelope,
 ) -> Result<Option<PathBuf>, SubtitleRunError> {
@@ -423,25 +492,18 @@ fn prepare_local_subtitle_audio(
     let output = env::temp_dir().join(format!("{}.m4a", envelope.job_id));
     let mut command = Command::new(ffmpeg);
     apply_hidden_process(&mut command);
+    configure_local_subtitle_audio_command(&mut command, &source, &output);
     let status = command
-        .arg("-y")
-        .arg("-i")
-        .arg(&source)
-        .arg("-vn")
-        .arg("-ac")
-        .arg("1")
-        .arg("-ar")
-        .arg("16000")
-        .arg("-c:a")
-        .arg("aac")
-        .arg("-b:a")
-        .arg("64k")
-        .arg(&output)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map_err(|_| run_error("subtitle-audio-extract-failed", "audio could not be extracted"))?;
+        .map_err(|_| {
+            run_error(
+                "subtitle-audio-extract-failed",
+                "audio could not be extracted",
+            )
+        })?;
     if !status.success() || !output.is_file() {
         let _ = fs::remove_file(&output);
         return Err(run_error(
@@ -484,7 +546,10 @@ fn submit_local_audio(
     let response = transport
         .client
         .post(SUBTITLE_WORKER_URL)
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {license_key}"))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {license_key}"),
+        )
         .header(reqwest::header::CONTENT_TYPE, "audio/mp4")
         .header("x-aura-audio-upload", "1")
         .header("x-aura-audio-bytes", bytes.len().to_string())
@@ -653,6 +718,14 @@ fn validate_media_download_fields(
             "media input kind is unsupported",
         ));
     }
+    if (!command.user_agent.is_empty() && !valid_user_agent(&command.user_agent))
+        || (!command.accept_language.is_empty() && !valid_accept_language(&command.accept_language))
+    {
+        return Err(media_download_error(
+            "invalid-media-download-browser-context",
+            "browser request metadata is invalid or oversized",
+        ));
+    }
     Ok(())
 }
 
@@ -705,12 +778,15 @@ fn media_download_command_from_request(request: &Request) -> MediaDownloadComman
     MediaDownloadCommand {
         kind: request.kind.clone(),
         protocol_version: request.protocol_version,
+        request_id: request.request_id.clone(),
         job_id: request.job_id.clone(),
         candidate_id: request.candidate_id.clone(),
         url: request.url.clone(),
         referrer: request.referrer.clone(),
         title: request.title.clone(),
         input_kind: request.input_kind.clone(),
+        user_agent: request.user_agent.clone(),
+        accept_language: request.accept_language.clone(),
     }
 }
 
@@ -1054,7 +1130,121 @@ fn bounded_remote_model(value: Option<&Value>) -> Option<String> {
     bounded_text(model, MAX_SUBTITLE_METADATA_BYTES).then(|| model.to_string())
 }
 
-fn response_error(status: StatusCode) -> SubtitleRunError {
+fn known_remote_error(error: &str) -> Option<SubtitleRunError> {
+    match error {
+        "subtitle-audio-too-large" => Some(run_error(
+            "subtitle-audio-too-large",
+            "extracted audio exceeds the subtitle upload limit",
+        )),
+        "audio-size-mismatch" => Some(run_error(
+            "audio-size-mismatch",
+            "subtitle audio upload size did not match",
+        )),
+        "invalid-audio-upload" => Some(run_error(
+            "invalid-audio-upload",
+            "subtitle audio upload was invalid",
+        )),
+        "invalid-audio-content-type" => Some(run_error(
+            "invalid-audio-content-type",
+            "subtitle audio type was rejected",
+        )),
+        "invalid-source-language" => Some(run_error(
+            "invalid-source-language",
+            "subtitle source language was rejected",
+        )),
+        "invalid-title" => Some(run_error(
+            "invalid-title",
+            "subtitle title metadata was rejected",
+        )),
+        "pro-license-required" => Some(run_error(
+            "pro-license-required",
+            "a valid Companion Pro license is required",
+        )),
+        "unauthorized" => Some(run_error(
+            "unauthorized",
+            "subtitle service authorization was rejected",
+        )),
+        "rate-limited" => Some(run_error(
+            "rate-limited",
+            "subtitle service rate limit reached",
+        )),
+        "asr-not-configured" => Some(run_error(
+            "asr-not-configured",
+            "subtitle service is not configured",
+        )),
+        "asr-upstream-unreachable" => Some(run_error(
+            "asr-upstream-unreachable",
+            "subtitle service upstream is unreachable",
+        )),
+        "invalid-media-url" => Some(run_error(
+            "invalid-media-url",
+            "subtitle media URL was rejected",
+        )),
+        "invalid-modal-response" => Some(run_error(
+            "invalid-modal-response",
+            "subtitle service returned an invalid response",
+        )),
+        "modal-request-failed" => Some(run_error(
+            "modal-request-failed",
+            "subtitle service request failed",
+        )),
+        "asr-job-owner-unavailable" => Some(run_error(
+            "asr-job-owner-unavailable",
+            "subtitle job ownership could not be recorded",
+        )),
+        "subtitle-job-not-owned" => Some(run_error(
+            "subtitle-job-not-owned",
+            "subtitle job is not owned by this license",
+        )),
+        "invalid-job-id" => Some(run_error(
+            "invalid-job-id",
+            "subtitle job identifier was rejected",
+        )),
+        "job-cancellation-failed" => Some(run_error(
+            "job-cancellation-failed",
+            "subtitle job cancellation failed",
+        )),
+        "job-failed" => Some(run_error("job-failed", "subtitle service job failed")),
+        "invalid-request" => Some(run_error(
+            "invalid-request",
+            "subtitle service request was invalid",
+        )),
+        "invalid-progress-key" => Some(run_error(
+            "invalid-progress-key",
+            "subtitle progress identifier was invalid",
+        )),
+        "invalid-audio-path" => Some(run_error(
+            "invalid-audio-path",
+            "subtitle audio path was invalid",
+        )),
+        "audio-input-missing" => Some(run_error(
+            "audio-input-missing",
+            "subtitle audio input was missing",
+        )),
+        "media-source-access-denied" => Some(run_error(
+            "media-source-access-denied",
+            "subtitle media source denied access",
+        )),
+        "media-source-unavailable" => Some(run_error(
+            "media-source-unavailable",
+            "subtitle media source was unavailable",
+        )),
+        "subtitle-too-large" => Some(run_error(
+            "subtitle-too-large",
+            "subtitle result exceeded the service limit",
+        )),
+        _ => None,
+    }
+}
+
+fn response_error(status: StatusCode, body: &Value) -> SubtitleRunError {
+    if let Some(error) = body
+        .get("error")
+        .and_then(Value::as_str)
+        .and_then(known_remote_error)
+    {
+        return error;
+    }
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         run_error(
             "pro-license-required",
@@ -1112,7 +1302,7 @@ fn read_http_json(
 
 fn remote_body_error(status: StatusCode, body: &Value) -> Result<(), SubtitleRunError> {
     if !status.is_success() || body.get("ok").and_then(Value::as_bool) == Some(false) {
-        Err(response_error(status))
+        Err(response_error(status, body))
     } else {
         Ok(())
     }
@@ -1170,18 +1360,27 @@ fn parse_poll_response(
             "subtitle service response was invalid",
         ));
     }
-    let result = body
-        .get("result")
-        .and_then(Value::as_object)
-        .and_then(|result| {
-            result
-                .get("vtt")
-                .and_then(Value::as_str)
-                .map(|vtt| SubtitleResult {
-                    vtt: vtt.to_string(),
-                    model: bounded_remote_model(result.get("model")),
-                })
-        });
+    let result_body = body.get("result").and_then(Value::as_object);
+    if let Some(error) = result_body
+        .and_then(|result| result.get("error"))
+        .and_then(Value::as_str)
+    {
+        return Err(known_remote_error(error).unwrap_or_else(|| {
+            run_error(
+                "subtitle-remote-failed",
+                "subtitle service failed to process the job",
+            )
+        }));
+    }
+    let result = result_body.and_then(|result| {
+        result
+            .get("vtt")
+            .and_then(Value::as_str)
+            .map(|vtt| SubtitleResult {
+                vtt: vtt.to_string(),
+                model: bounded_remote_model(result.get("model")),
+            })
+    });
     Ok(SubtitlePollResult {
         status,
         phase: bounded_remote_phase(body.get("phase")),
@@ -2001,7 +2200,12 @@ fn read_companion_license_key(root: &Path) -> Result<String, SubtitleRunError> {
             message: "a valid Companion Pro license is required",
         })?;
     let key = settings.license_key.unwrap_or_default();
-    if valid_license_key(key.trim()) {
+    let approved = settings.license_edition.as_deref() == Some("pro")
+        && settings.license_status.as_deref() == Some("approved")
+        && !settings
+            .license_expires_at
+            .is_some_and(|expires| expires > 0 && now_millis() > expires);
+    if approved && valid_license_key(key.trim()) {
         Ok(key.trim().to_string())
     } else {
         Err(SubtitleRunError {
@@ -2969,6 +3173,22 @@ fn should_restart_youtube_download(error: &str, attempt: u8) -> bool {
     attempt < 2 && error.to_ascii_lowercase().contains("http error 403")
 }
 
+fn should_retry_media_download_with_impersonation(
+    request: &Request,
+    outcome: &DownloadAttemptResult,
+) -> bool {
+    if !matches!(
+        request.input_kind.as_str(),
+        "HLS_MASTER" | "HLS_MEDIA" | "DASH"
+    ) {
+        return false;
+    }
+    matches!(outcome, DownloadAttemptResult::Failed(error) if {
+        let error = error.to_ascii_lowercase();
+        error.contains("http error 403") && error.contains("cloudflare")
+    })
+}
+
 enum DownloadAttemptResult {
     Completed,
     Failed(String),
@@ -2976,6 +3196,42 @@ enum DownloadAttemptResult {
     StatusError(String),
     Cancelled,
     Paused,
+}
+
+fn apply_download_outcome(state: &mut JobState, outcome: DownloadAttemptResult) {
+    match outcome {
+        DownloadAttemptResult::Completed => {
+            state.status = "completed".into();
+            state.status_text = "Companion 다운로드 폴더에 저장했습니다.".into();
+            state.progress = Some(100);
+            state.error = None;
+        }
+        DownloadAttemptResult::Failed(error) => {
+            state.status = "failed".into();
+            state.status_text = "미디어 다운로드에 실패했습니다.".into();
+            state.error = Some(error);
+        }
+        DownloadAttemptResult::SpawnError(error) => {
+            state.status = "failed".into();
+            state.status_text = "미디어 도구를 실행하지 못했습니다.".into();
+            state.error = Some(error);
+        }
+        DownloadAttemptResult::StatusError(error) => {
+            state.status = "failed".into();
+            state.status_text = "미디어 도구 종료 상태를 확인하지 못했습니다.".into();
+            state.error = Some(error);
+        }
+        DownloadAttemptResult::Cancelled => {
+            state.status = "cancelled".into();
+            state.status_text = "다운로드를 취소했습니다.".into();
+            state.error = None;
+        }
+        DownloadAttemptResult::Paused => {
+            state.status = "paused".into();
+            state.status_text = "일시정지했습니다. 이어받기를 누르면 계속합니다.".into();
+            state.error = None;
+        }
+    }
 }
 
 fn media_output_template(request: &Request) -> String {
@@ -2994,12 +3250,253 @@ fn media_output_template(request: &Request) -> String {
     format!("{base} [{candidate}].%(ext)s")
 }
 
+fn progressive_extension_hint(url: &str) -> &'static str {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return "mp4";
+    };
+    for segment in parsed.path_segments().into_iter().flatten().rev() {
+        let extension = Path::new(segment)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match extension.as_str() {
+            "mp4" | "m4v" => return "mp4",
+            "webm" => return "webm",
+            "mp3" => return "mp3",
+            "m4a" => return "m4a",
+            _ => {}
+        }
+    }
+    "mp4"
+}
+
+fn progressive_output_filename(request: &Request) -> String {
+    let requested = request.title.trim();
+    let requested = if requested.is_empty() {
+        "Segma media"
+    } else {
+        requested
+    };
+    let base = safe_filename(requested)
+        .chars()
+        .take(140)
+        .collect::<String>();
+    let candidate = request.candidate_id.chars().take(12).collect::<String>();
+    format!(
+        "{base} [{candidate}].{}",
+        progressive_extension_hint(&request.url)
+    )
+}
+
+fn progressive_content_type_allowed(value: &str) -> bool {
+    let mime = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    mime.starts_with("video/") || mime.starts_with("audio/") || mime == "application/octet-stream"
+}
+
+fn progressive_total_bytes(headers: &reqwest::header::HeaderMap, offset: u64) -> Option<u64> {
+    if let Some(value) = headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit('/').next())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return Some(value);
+    }
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|length| length.saturating_add(offset))
+}
+
+fn direct_progressive_client() -> Result<Client, String> {
+    Client::builder()
+        .no_proxy()
+        .redirect(Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.stop();
+            }
+            if valid_http_url(attempt.url().as_str()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(60 * 60))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn request_origin(referrer: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(referrer).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
+fn execute_progressive_download<F>(
+    request: &Request,
+    downloads: &Path,
+    state: &mut JobState,
+    notify: &F,
+    cancel_path: Option<&Path>,
+    pause_path: Option<&Path>,
+) -> DownloadAttemptResult
+where
+    F: Fn(&JobState),
+{
+    let filename = progressive_output_filename(request);
+    let requested_final = downloads.join(&filename);
+    let requested_part = PathBuf::from(format!("{}.part", requested_final.display()));
+    let final_path = if requested_part.is_file() && !requested_final.exists() {
+        requested_final
+    } else {
+        unique_media_path(downloads, &filename)
+    };
+    let part_path = PathBuf::from(format!("{}.part", final_path.display()));
+    let mut offset = fs::metadata(&part_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+
+    let client = match direct_progressive_client() {
+        Ok(client) => client,
+        Err(error) => return DownloadAttemptResult::SpawnError(error),
+    };
+    let mut builder = client
+        .get(&request.url)
+        .header(
+            reqwest::header::ACCEPT,
+            "video/*,audio/*;q=0.9,application/octet-stream;q=0.8",
+        )
+        .header(
+            reqwest::header::USER_AGENT,
+            if request.user_agent.is_empty() {
+                MEDIA_USER_AGENT
+            } else {
+                request.user_agent.as_str()
+            },
+        );
+    if let Some(referrer) = request.referrer.as_deref() {
+        builder = builder.header(reqwest::header::REFERER, referrer);
+        if let Some(origin) = request_origin(referrer) {
+            builder = builder.header(reqwest::header::ORIGIN, origin);
+        }
+    }
+    if !request.accept_language.is_empty() {
+        builder = builder.header(reqwest::header::ACCEPT_LANGUAGE, &request.accept_language);
+    }
+    if offset > 0 {
+        builder = builder.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+    }
+    let mut response = match builder.send() {
+        Ok(response) => response,
+        Err(error) => return DownloadAttemptResult::Failed(error.to_string()),
+    };
+    if !response.status().is_success() {
+        return DownloadAttemptResult::Failed(format!(
+            "progressive HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !progressive_content_type_allowed(content_type) {
+        return DownloadAttemptResult::Failed(format!(
+            "progressive response is not media ({})",
+            content_type.split(';').next().unwrap_or("unknown")
+        ));
+    }
+    if offset > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
+        offset = 0;
+    }
+    let total = progressive_total_bytes(response.headers(), offset);
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(offset > 0)
+        .truncate(offset == 0)
+        .open(&part_path)
+    {
+        Ok(file) => file,
+        Err(error) => return DownloadAttemptResult::SpawnError(error.to_string()),
+    };
+    state.file_name = final_path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned());
+    state.completed = Some(offset);
+    state.total = total;
+    state.status_text = "미디어를 직접 저장하는 중…".into();
+    update_state(state, notify);
+
+    let mut written = offset;
+    let mut last_reported = offset;
+    let mut buffer = [0_u8; 256 * 1024];
+    loop {
+        if cancel_path.is_some_and(Path::exists) {
+            drop(file);
+            let _ = fs::remove_file(&part_path);
+            return DownloadAttemptResult::Cancelled;
+        }
+        if pause_path.is_some_and(Path::exists) {
+            let _ = file.flush();
+            let _ = file.sync_all();
+            return DownloadAttemptResult::Paused;
+        }
+        let count = match response.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) => return DownloadAttemptResult::Failed(error.to_string()),
+        };
+        if let Err(error) = file.write_all(&buffer[..count]) {
+            return DownloadAttemptResult::Failed(error.to_string());
+        }
+        written = written.saturating_add(count as u64);
+        if written.saturating_sub(last_reported) >= 1024 * 1024 {
+            last_reported = written;
+            state.completed = Some(written);
+            state.progress =
+                total.map(|total| ((written.saturating_mul(100) / total.max(1)).min(100)) as u8);
+            state.status_text = match total {
+                Some(total) => format!("다운로드 중 · {written} / {total} bytes"),
+                None => format!("다운로드 중 · {written} bytes"),
+            };
+            update_state(state, notify);
+        }
+    }
+    if written == 0 {
+        let _ = fs::remove_file(&part_path);
+        return DownloadAttemptResult::Failed("empty progressive response".into());
+    }
+    if let Err(error) = file.flush().and_then(|_| file.sync_all()) {
+        return DownloadAttemptResult::Failed(error.to_string());
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&part_path, &final_path) {
+        return DownloadAttemptResult::Failed(error.to_string());
+    }
+    state.completed = Some(written);
+    state.total = total.or(Some(written));
+    DownloadAttemptResult::Completed
+}
+
 fn configure_media_download_command(
     command: &mut Command,
     request: &Request,
     downloads: &Path,
     node: &Path,
     ffmpeg: &Path,
+    impersonate_browser: bool,
 ) {
     command
         .arg("--newline")
@@ -3022,11 +3519,37 @@ fn configure_media_download_command(
     if let Some(referrer) = request.referrer.as_deref() {
         command.arg("--referer").arg(referrer);
     }
+    if matches!(
+        request.input_kind.as_str(),
+        "HLS_MASTER" | "HLS_MEDIA" | "DASH"
+    ) {
+        if impersonate_browser {
+            command.arg("--impersonate").arg("chrome");
+        } else {
+            let user_agent = if request.user_agent.is_empty() {
+                MEDIA_USER_AGENT
+            } else {
+                request.user_agent.as_str()
+            };
+            command.arg("--user-agent").arg(user_agent);
+        }
+        command
+            .arg("--add-headers")
+            .arg("Accept:application/vnd.apple.mpegurl,application/x-mpegURL,*/*");
+        if let Some(origin) = request.referrer.as_deref().and_then(request_origin) {
+            command.arg("--add-headers").arg(format!("Origin:{origin}"));
+        }
+        if !request.accept_language.is_empty() {
+            command
+                .arg("--add-headers")
+                .arg(format!("Accept-Language:{}", request.accept_language));
+        }
+    }
     command.arg(&request.url);
     apply_hidden_process(command);
 }
 
-fn execute_media_download<F>(request: Request, notify: F)
+fn execute_media_download_attempt<F>(request: Request, notify: F, impersonate_browser: bool)
 where
     F: Fn(&JobState),
 {
@@ -3044,16 +3567,6 @@ where
         return;
     }
 
-    let (yt_dlp, node, ffmpeg) = match command_tools() {
-        Ok(tools) => tools,
-        Err(error) => {
-            state.status = "failed".into();
-            state.status_text = "미디어 도구가 설치되지 않았습니다.".into();
-            state.error = Some(error.to_string());
-            update_state(&mut state, &notify);
-            return;
-        }
-    };
     let downloads = match aura_downloads_dir() {
         Ok(path) => path,
         Err(error) => {
@@ -3067,8 +3580,42 @@ where
 
     let cancel_path = job_cancel_path(&request.job_id).ok();
     let pause_path = job_pause_path(&request.job_id).ok();
+    if request.input_kind == "PROGRESSIVE" {
+        let outcome = execute_progressive_download(
+            &request,
+            &downloads,
+            &mut state,
+            &notify,
+            cancel_path.as_deref(),
+            pause_path.as_deref(),
+        );
+        if let Some(path) = cancel_path {
+            let _ = fs::remove_file(path);
+        }
+        apply_download_outcome(&mut state, outcome);
+        update_state(&mut state, &notify);
+        return;
+    }
+
+    let (yt_dlp, node, ffmpeg) = match command_tools() {
+        Ok(tools) => tools,
+        Err(error) => {
+            state.status = "failed".into();
+            state.status_text = "미디어 도구가 설치되지 않았습니다.".into();
+            state.error = Some(error.to_string());
+            update_state(&mut state, &notify);
+            return;
+        }
+    };
     let mut process = Command::new(yt_dlp);
-    configure_media_download_command(&mut process, &request, &downloads, &node, &ffmpeg);
+    configure_media_download_command(
+        &mut process,
+        &request,
+        &downloads,
+        &node,
+        &ffmpeg,
+        impersonate_browser,
+    );
     let outcome = match process.spawn() {
         Err(error) => DownloadAttemptResult::SpawnError(error.to_string()),
         Ok(mut child) => {
@@ -3147,44 +3694,25 @@ where
             }
         }
     };
+    if !impersonate_browser && should_retry_media_download_with_impersonation(&request, &outcome) {
+        state.status_text = "Cloudflare 요청 검증을 다시 시도하는 중…".into();
+        update_state(&mut state, &notify);
+        execute_media_download_attempt(request, notify, true);
+        return;
+    }
     if let Some(path) = cancel_path {
         let _ = fs::remove_file(path);
     }
 
-    match outcome {
-        DownloadAttemptResult::Completed => {
-            state.status = "completed".into();
-            state.status_text = "Companion 다운로드 폴더에 저장했습니다.".into();
-            state.progress = Some(100);
-            state.error = None;
-        }
-        DownloadAttemptResult::Failed(error) => {
-            state.status = "failed".into();
-            state.status_text = "미디어 다운로드에 실패했습니다.".into();
-            state.error = Some(error);
-        }
-        DownloadAttemptResult::SpawnError(error) => {
-            state.status = "failed".into();
-            state.status_text = "미디어 도구를 실행하지 못했습니다.".into();
-            state.error = Some(error);
-        }
-        DownloadAttemptResult::StatusError(error) => {
-            state.status = "failed".into();
-            state.status_text = "미디어 도구 종료 상태를 확인하지 못했습니다.".into();
-            state.error = Some(error);
-        }
-        DownloadAttemptResult::Cancelled => {
-            state.status = "cancelled".into();
-            state.status_text = "다운로드를 취소했습니다.".into();
-            state.error = None;
-        }
-        DownloadAttemptResult::Paused => {
-            state.status = "paused".into();
-            state.status_text = "일시정지했습니다. 이어받기를 누르면 계속합니다.".into();
-            state.error = None;
-        }
-    }
+    apply_download_outcome(&mut state, outcome);
     update_state(&mut state, &notify);
+}
+
+fn execute_media_download<F>(request: Request, notify: F)
+where
+    F: Fn(&JobState),
+{
+    execute_media_download_attempt(request, notify, false);
 }
 
 fn execute_download<F>(request: Request, notify: F)
@@ -3984,8 +4512,12 @@ mod tests {
         if with_license {
             fs::write(
                 settings_path(&root),
-                serde_json::to_vec(&json!({ "licenseKey": format!("AM-{}", "A".repeat(36)) }))
-                    .expect("settings serialize"),
+                serde_json::to_vec(&json!({
+                    "licenseKey": format!("AM-{}", "A".repeat(36)),
+                    "licenseEdition": "pro",
+                    "licenseStatus": "approved"
+                }))
+                .expect("settings serialize"),
             )
             .expect("settings write");
         }
@@ -4271,6 +4803,124 @@ mod tests {
         assert!(!subtitle_request_path_in(&jobs, &envelope.job_id)
             .expect("request path")
             .exists());
+        fs::remove_dir_all(root).expect("test root removes");
+    }
+
+    #[test]
+    fn local_subtitle_audio_extraction_matches_modal_duration_limit() {
+        let mut command = Command::new("ffmpeg.exe");
+        configure_local_subtitle_audio_command(
+            &mut command,
+            Path::new("input.mp4"),
+            Path::new("output.m4a"),
+        );
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let duration_index = arguments
+            .iter()
+            .position(|argument| argument == "-t")
+            .expect("subtitle extraction has a duration limit");
+        assert_eq!(
+            arguments.get(duration_index + 1).map(String::as_str),
+            Some("3600")
+        );
+        assert_eq!(arguments.last().map(String::as_str), Some("output.m4a"));
+    }
+
+    #[test]
+    fn subtitle_submit_preserves_server_error_code_and_safe_persisted_text() {
+        let error = parse_submit_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "ok": false, "error": "audio-size-mismatch" }),
+        )
+        .expect_err("server rejection is returned");
+        assert_eq!(error.code, "audio-size-mismatch");
+        assert_eq!(error.message, "subtitle audio upload size did not match");
+
+        let (root, jobs, output, envelope) = subtitle_run_fixture(true);
+        let transport = FakeSubtitleTransport::new(Err(error), vec![]);
+        let run_error = run_subtitle_job_with_transport(
+            &transport,
+            &envelope,
+            &root,
+            &jobs,
+            &output,
+            test_run_policy(),
+        )
+        .expect_err("rejected upload fails the job");
+        assert_eq!(run_error.code, "audio-size-mismatch");
+        let state_path = job_state_path_in(&jobs, &envelope.job_id).expect("state path");
+        let state = read_job_state(&state_path).expect("failed state reads");
+        assert_eq!(state.status, "failed");
+        assert_eq!(state.error.as_deref(), Some("audio-size-mismatch"));
+        assert_eq!(
+            state.status_text,
+            "subtitle audio upload size did not match"
+        );
+        let serialized = fs::read_to_string(state_path).expect("state JSON reads");
+        assert!(!serialized.contains("https://"));
+        assert!(!serialized.contains("AM-"));
+        fs::remove_dir_all(root).expect("test root removes");
+    }
+
+    #[test]
+    fn subtitle_http_boundaries_preserve_known_server_error_codes() {
+        for (status, code) in [
+            (StatusCode::UNAUTHORIZED, "unauthorized"),
+            (StatusCode::TOO_MANY_REQUESTS, "rate-limited"),
+            (StatusCode::SERVICE_UNAVAILABLE, "asr-not-configured"),
+            (StatusCode::BAD_GATEWAY, "asr-upstream-unreachable"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "job-failed"),
+        ] {
+            let error = parse_submit_response(status, json!({ "ok": false, "error": code }))
+                .expect_err("known server error rejects");
+            assert_eq!(error.code, code, "server code {code} must survive");
+            assert!(!error.message.contains("http"));
+            assert!(!error.message.contains("AM-"));
+        }
+    }
+
+    #[test]
+    fn completed_poll_preserves_nested_modal_error() {
+        let error = parse_poll_response(
+            StatusCode::OK,
+            json!({
+                "ok": true,
+                "status": "completed",
+                "result": { "ok": false, "error": "audio-input-missing" }
+            }),
+        )
+        .expect_err("failed Modal result rejects instead of becoming invalid VTT");
+        assert_eq!(error.code, "audio-input-missing");
+        assert_eq!(error.message, "subtitle audio input was missing");
+
+        let (root, jobs, output, envelope) = subtitle_run_fixture(true);
+        let transport = FakeSubtitleTransport::new(
+            Ok(SubtitleSubmitResult {
+                remote_job_id: "modal-job-nested-error".into(),
+            }),
+            vec![Err(error)],
+        );
+        let run_error = run_subtitle_job_with_transport(
+            &transport,
+            &envelope,
+            &root,
+            &jobs,
+            &output,
+            test_run_policy(),
+        )
+        .expect_err("nested Modal failure reaches the runner");
+        assert_eq!(run_error.code, "audio-input-missing");
+        let state_path = job_state_path_in(&jobs, &envelope.job_id).expect("state path");
+        let state = read_job_state(&state_path).expect("failed state reads");
+        assert_eq!(state.status, "failed");
+        assert_eq!(state.error.as_deref(), Some("audio-input-missing"));
+        assert_eq!(state.status_text, "subtitle audio input was missing");
+        let serialized = fs::read_to_string(state_path).expect("state JSON reads");
+        assert!(!serialized.contains("https://"));
+        assert!(!serialized.contains("AM-"));
         fs::remove_dir_all(root).expect("test root removes");
     }
 
@@ -4641,6 +5291,35 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_entitlement_requires_app_approved_pro_metadata() {
+        let root = test_directory();
+        fs::create_dir_all(&root).expect("root creates");
+        let key = "AM-0123456789ABCDEF0123456789ABCDEF0123";
+        fs::write(
+            settings_path(&root),
+            serde_json::to_vec(&json!({ "licenseKey": key })).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_companion_license_key(&root).unwrap_err().code,
+            "pro-license-required"
+        );
+        fs::write(
+            settings_path(&root),
+            serde_json::to_vec(&json!({
+                "licenseKey": key,
+                "licenseEdition": "pro",
+                "licenseStatus": "approved",
+                "licenseExpiresAt": now_millis() + 60_000
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_companion_license_key(&root).unwrap(), key);
+        fs::remove_dir_all(root).expect("root removes");
+    }
+
+    #[test]
     fn the_configured_folder_is_read_back_from_settings() {
         let root = test_directory();
         fs::create_dir_all(&root).expect("root creates");
@@ -4736,6 +5415,8 @@ mod tests {
             candidate_id: String::new(),
             referrer: None,
             input_kind: String::new(),
+            user_agent: String::new(),
+            accept_language: String::new(),
             total: None,
             resume_file_name: String::new(),
             resume_from: None,
@@ -4753,12 +5434,15 @@ mod tests {
         json!({
             "type": "media-download",
             "protocolVersion": 1,
+            "requestId": "request-123",
             "jobId": "media-job-123",
             "candidateId": "candidate-123",
             "url": "https://cdn.example.com/video/master.m3u8?token=public",
             "referrer": "https://player.example.com/watch/123",
             "title": "Sample media",
-            "inputKind": "HLS_MASTER"
+            "inputKind": "HLS_MASTER",
+            "userAgent": "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36",
+            "acceptLanguage": "ko,en-US;q=0.9,en;q=0.8"
         })
     }
 
@@ -4767,7 +5451,9 @@ mod tests {
         let bytes = serde_json::to_vec(&sample_media_download_command()).unwrap();
         let command = parse_media_download_command_bytes(&bytes).expect("valid command parses");
         assert_eq!(command.job_id, "media-job-123");
+        assert_eq!(command.request_id, "request-123");
         assert_eq!(command.input_kind, "HLS_MASTER");
+        assert_eq!(command.accept_language, "ko,en-US;q=0.9,en;q=0.8");
 
         for (field, value) in [
             ("url", "https://user:secret@cdn.example.com/video.mp4"),
@@ -4778,6 +5464,8 @@ mod tests {
             ("url", "https://cdn.example.com:99999/video.mp4"),
             ("referrer", "http://[::1]/watch"),
             ("inputKind", "HLS_WITH_HEADERS"),
+            ("userAgent", "bad\r\nInjected: yes"),
+            ("acceptLanguage", "ko,*;q=0.9"),
         ] {
             let mut raw = sample_media_download_command();
             raw[field] = Value::String(value.into());
@@ -4805,6 +5493,22 @@ mod tests {
     }
 
     #[test]
+    fn progressive_php_redirect_keeps_the_media_extension_and_direct_contract() {
+        let mut request: Request = serde_json::from_value(sample_media_download_command()).unwrap();
+        request.url =
+            "https://pimpbunny.example/get_file/26/token/479734/479734_720p.mp4/?token=redacted"
+                .into();
+        request.title = "Ivory Fox sample | PimpBunny".into();
+        assert_eq!(progressive_extension_hint(&request.url), "mp4");
+        assert!(progressive_output_filename(&request).ends_with(".mp4"));
+        assert!(!progressive_output_filename(&request).ends_with(".php"));
+        assert!(progressive_content_type_allowed("video/mp4"));
+        assert!(!progressive_content_type_allowed(
+            "text/html; charset=utf-8"
+        ));
+    }
+
+    #[test]
     fn media_job_state_and_command_keep_only_candidate_metadata_and_referer() {
         let raw = sample_media_download_command();
         let bytes = serde_json::to_vec(&raw).unwrap();
@@ -4824,19 +5528,79 @@ mod tests {
             Path::new("downloads"),
             Path::new("node.exe"),
             Path::new("ffmpeg"),
+            false,
         );
         let arguments = process
             .get_args()
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(arguments.iter().filter(|arg| *arg == "--referer").count(), 1);
+        assert_eq!(
+            arguments.iter().filter(|arg| *arg == "--referer").count(),
+            1
+        );
+        assert!(arguments
+            .windows(2)
+            .any(|window| { window == ["--referer", "https://player.example.com/watch/123"] }));
         assert!(arguments.windows(2).any(|window| {
-            window == ["--referer", "https://player.example.com/watch/123"]
+            window == ["--user-agent", "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36"]
         }));
-        for forbidden in ["--add-header", "--cookies", "--cookies-from-browser", "--paths-from-request"] {
+        assert!(arguments
+            .windows(2)
+            .any(|window| { window == ["--add-headers", "Origin:https://player.example.com"] }));
+        assert!(arguments.windows(2).any(|window| {
+            window == ["--add-headers", "Accept-Language:ko,en-US;q=0.9,en;q=0.8"]
+        }));
+        assert!(arguments.windows(2).any(|window| {
+            window
+                == [
+                    "--add-headers",
+                    "Accept:application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+                ]
+        }));
+        for forbidden in [
+            "--cookies",
+            "--cookies-from-browser",
+            "--paths-from-request",
+        ] {
             assert!(!arguments.iter().any(|argument| argument == forbidden));
         }
-        assert_eq!(arguments.last().map(String::as_str), Some(request.url.as_str()));
+        assert_eq!(
+            arguments.last().map(String::as_str),
+            Some(request.url.as_str())
+        );
+
+        let mut retry = Command::new("yt-dlp.exe");
+        configure_media_download_command(
+            &mut retry,
+            &request,
+            Path::new("downloads"),
+            Path::new("node.exe"),
+            Path::new("ffmpeg"),
+            true,
+        );
+        let retry_arguments = retry
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(retry_arguments
+            .windows(2)
+            .any(|window| window == ["--impersonate", "chrome"]));
+        assert!(!retry_arguments
+            .iter()
+            .any(|argument| argument == "--user-agent"));
+        assert!(retry_arguments.windows(2).any(|window| {
+            window == ["--add-headers", "Accept-Language:ko,en-US;q=0.9,en;q=0.8"]
+        }));
+        assert!(should_retry_media_download_with_impersonation(
+            &request,
+            &DownloadAttemptResult::Failed(
+                "ERROR: [generic] HTTP Error 403 caused by Cloudflare anti-bot challenge".into()
+            )
+        ));
+        assert!(!should_retry_media_download_with_impersonation(
+            &request,
+            &DownloadAttemptResult::Failed("ERROR: HTTP Error 403: token expired".into())
+        ));
     }
 
     #[test]

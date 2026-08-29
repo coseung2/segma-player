@@ -1,29 +1,43 @@
-//! Nonblocking seek-hover previews rendered in a native sibling child window.
+//! Nonblocking seek-hover preview extraction for egui-owned surfaces.
 //!
 //! A single worker owns ffmpeg extraction. Its pending slot is replaceable, so
 //! pointer motion can leave at most one stale extraction in flight and one
-//! newest request waiting instead of spawning an ffmpeg process per event.
+//! newest request waiting instead of spawning an ffmpeg process per event. The
+//! UI owns the resulting texture; no second Win32 child window participates in
+//! player/PiP composition or z-order.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
+use eframe::egui;
+
 use crate::jobs;
-use crate::player_contract::PhysicalVideoRect;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 const QUANTUM_MILLIS: u64 = 500;
-const MAX_CACHE_FILES: usize = 96;
-const MAX_MEMORY_PREVIEWS: usize = 96;
-const PREVIEW_FILTER: &str = "scale=192:108:force_original_aspect_ratio=increase,crop=192:108";
+/// Disk and memory caches are both bounded, and both are sized for a real sweep
+/// across a long local file rather than a handful of hovers. A 96-slot cache is
+/// only 48 seconds of a video, so a user scrubbing a movie evicted entries they
+/// were about to hover again and paid for a fresh ffmpeg extraction each time.
+const MAX_CACHE_FILES: usize = 512;
+/// One decoded frame is 192x108 BGRA, so this bound is about 16 MiB.
+const MAX_MEMORY_PREVIEWS: usize = 192;
+/// Ceiling the memory bound is checked against, so a future size change cannot
+/// quietly turn a hover cache into a large resident allocation.
+#[cfg(test)]
+const MAX_MEMORY_CACHE_BYTES: usize = 24 * 1_024 * 1_024;
+const PREVIEW_FILTER: &str =
+    "scale=192:108:force_original_aspect_ratio=decrease,pad=192:108:(ow-iw)/2:(oh-ih)/2:black";
 const EXTRACTION_POLL_INTERVAL: Duration = Duration::from_millis(12);
 
 #[cfg(target_os = "windows")]
@@ -43,11 +57,19 @@ struct PreviewResult {
     image: Option<DecodedPreview>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct DecodedPreview {
     width: i32,
     height: i32,
-    bgra: Vec<u8>,
+    rgba: Vec<u8>,
+}
+
+/// Borrowed UI-ready preview. The texture is owned by the controller and stays
+/// valid until the media changes, hover ends, or a newer request replaces it.
+#[derive(Clone, Copy)]
+pub struct SeekPreviewVisual<'a> {
+    pub texture: &'a egui::TextureHandle,
+    pub timecode: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -135,16 +157,14 @@ impl WorkerQueue {
         }
     }
 
-    /// An in-flight extraction is disposable as soon as a different newest
-    /// request is waiting. Cancelling it prevents fast pointer motion from
-    /// queueing behind an irrelevant keyframe seek.
-    fn superseded(&self, active: &PreviewRequest) -> bool {
-        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.shutdown
-            || state
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.id != active.id)
+    /// Extraction is interrupted only for shutdown. Pointer motion already
+    /// replaces the one pending slot, so killing every in-flight ffmpeg seek
+    /// can starve continuous hover and leave the preview blank forever.
+    fn shutdown_requested(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .shutdown
     }
 
     fn shutdown(&self) {
@@ -155,22 +175,28 @@ impl WorkerQueue {
     }
 }
 
-/// UI-thread owner for seek-preview extraction and its native child overlay.
+/// UI-thread owner for seek-preview extraction and its egui texture.
 ///
 /// Call [`Self::request`] while hover is active, [`Self::poll`] once per UI
 /// frame, and [`Self::hide`] as soon as hover ends. Dropping the controller
-/// stops the worker and destroys its Win32 window.
+/// stops the worker. The controller never creates or repositions a native
+/// window, so a preview cannot escape its Player/PiP surface or disturb the
+/// mpv child window's z-order.
 pub struct SeekPreviewController {
     queue: Arc<WorkerQueue>,
     results: Receiver<PreviewResult>,
     worker: Option<JoinHandle<()>>,
     next_request_id: u64,
     current_request: Option<PreviewRequest>,
-    current_parent: isize,
-    current_rect: PhysicalVideoRect,
+    visual_request: Option<PreviewRequest>,
     hover_active: bool,
     memory_cache: MemoryPreviewCache,
-    overlay: NativeOverlay,
+    /// Memoized `(caller key, path, resolved identity)` for the loaded file.
+    /// Hover fires on every frame, so file metadata is read once per media
+    /// instead of once per pointer move.
+    identity: Option<(String, PathBuf, String)>,
+    texture: Option<egui::TextureHandle>,
+    timecode: String,
 }
 
 impl SeekPreviewController {
@@ -188,30 +214,28 @@ impl SeekPreviewController {
             worker: Some(worker),
             next_request_id: 0,
             current_request: None,
-            current_parent: 0,
-            current_rect: PhysicalVideoRect::default(),
+            visual_request: None,
             hover_active: false,
             memory_cache: MemoryPreviewCache::default(),
-            overlay: NativeOverlay::default(),
+            identity: None,
+            texture: None,
+            timecode: String::new(),
         }
     }
 
     /// Request a preview without blocking the caller.
     ///
-    /// `overlay_rect` is in physical parent-client pixels. `parent_hwnd` is the
-    /// raw Win32 parent handle represented as `isize`, matching PlayerCommand.
-    #[allow(clippy::too_many_arguments)]
     pub fn request(
         &mut self,
+        context: &egui::Context,
         media_key: impl Into<String>,
         media_path: impl Into<PathBuf>,
         target_seconds: f64,
         duration_seconds: f64,
-        parent_hwnd: isize,
-        overlay_rect: PhysicalVideoRect,
     ) {
         let media_key = media_key.into();
         let media_path = media_path.into();
+        let media_key = self.resolved_identity(media_key, &media_path);
         let timestamp_millis = quantize_timestamp(target_seconds, duration_seconds);
         let same_preview = self.current_request.as_ref().is_some_and(|request| {
             request.media_key == media_key
@@ -219,18 +243,8 @@ impl SeekPreviewController {
                 && request.timestamp_millis == timestamp_millis
         });
 
-        let media_changed = self.current_request.as_ref().is_some_and(|request| {
-            request.media_key != media_key || request.media_path != media_path
-        });
-        if media_changed || self.current_parent != parent_hwnd {
-            self.overlay.hide();
-        }
-
         self.hover_active = true;
-        self.current_parent = parent_hwnd;
-        self.current_rect = overlay_rect;
         if same_preview {
-            self.overlay.reposition(parent_hwnd, overlay_rect);
             return;
         }
 
@@ -242,55 +256,139 @@ impl SeekPreviewController {
             timestamp_millis,
         };
         self.current_request = Some(request.clone());
-        let timecode = format_timecode(timestamp_millis as f64 / 1_000.0);
         if let Some(image) = self.memory_cache.get(&PreviewCacheKey::from(&request)) {
-            self.overlay
-                .show(parent_hwnd, overlay_rect, image, timecode);
+            self.show(context, request, image);
             return;
         }
-        self.overlay
-            .retain_and_reposition(parent_hwnd, overlay_rect, timecode);
+        // Retain the last frame from this media while the newest slot loads.
+        // The current target timecode is updated immediately, so pointer motion
+        // feels responsive without a placeholder flash between half-second
+        // cache slots.
+        if self.visual_request.as_ref().is_some_and(|visual| {
+            visual.media_key == request.media_key && visual.media_path == request.media_path
+        }) {
+            self.timecode = format_timecode(request.timestamp_millis as f64 / 1_000.0);
+        } else {
+            self.visual_request = None;
+        }
         self.queue.submit(request);
+        context.request_repaint();
+    }
+
+    /// Resolve the cache identity for the hovered file, reusing the memoized
+    /// value while the same caller key and path stay loaded.
+    fn resolved_identity(&mut self, media_key: String, media_path: &Path) -> String {
+        if let Some(identity) = reusable_identity(self.identity.as_ref(), &media_key, media_path) {
+            return identity;
+        }
+        let identity = media_identity(&media_key, media_path);
+        self.identity = Some((media_key, media_path.to_path_buf(), identity.clone()));
+        identity
     }
 
     /// Display a completed newest result, if one is available. Never blocks.
-    pub fn poll(&mut self) {
+    pub fn poll(&mut self, context: &egui::Context) {
         while let Ok(result) = self.results.try_recv() {
             if let Some(image) = result.image.as_ref() {
                 self.memory_cache
                     .insert(PreviewCacheKey::from(&result.request), image.clone());
             }
-            if !self.hover_active || self.current_request.as_ref() != Some(&result.request) {
+            if !self.hover_active {
+                continue;
+            }
+            let same_media = self.current_request.as_ref().is_some_and(|current| {
+                current.media_key == result.request.media_key
+                    && current.media_path == result.request.media_path
+            });
+            if !same_media {
                 continue;
             }
             if let Some(image) = result.image {
-                self.overlay.show(
-                    self.current_parent,
-                    self.current_rect,
-                    image,
-                    format_timecode(result.request.timestamp_millis as f64 / 1_000.0),
-                );
+                self.show(context, result.request, image);
             }
         }
     }
 
-    /// Hide immediately and invalidate all outstanding results.
+    fn show(&mut self, context: &egui::Context, request: PreviewRequest, image: DecodedPreview) {
+        let Ok(width) = usize::try_from(image.width) else {
+            return;
+        };
+        let Ok(height) = usize::try_from(image.height) else {
+            return;
+        };
+        if width == 0 || height == 0 || image.rgba.len() != width * height * 4 {
+            return;
+        }
+        let color_image = egui::ColorImage::from_rgba_unmultiplied([width, height], &image.rgba);
+        if let Some(texture) = self.texture.as_mut() {
+            texture.set(color_image, egui::TextureOptions::LINEAR);
+        } else {
+            self.texture = Some(context.load_texture(
+                "segma-seek-preview",
+                color_image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        let target_millis = self
+            .current_request
+            .as_ref()
+            .filter(|current| {
+                current.media_key == request.media_key && current.media_path == request.media_path
+            })
+            .map_or(request.timestamp_millis, |current| current.timestamp_millis);
+        self.timecode = format_timecode(target_millis as f64 / 1_000.0);
+        self.visual_request = Some(request);
+        context.request_repaint();
+    }
+
+    pub fn visual(&self) -> Option<SeekPreviewVisual<'_>> {
+        if !self.hover_active {
+            return None;
+        }
+        let same_media = self
+            .visual_request
+            .as_ref()
+            .zip(self.current_request.as_ref())
+            .is_some_and(|(visual, current)| {
+                visual.media_key == current.media_key && visual.media_path == current.media_path
+            });
+        if !same_media {
+            return None;
+        }
+        Some(SeekPreviewVisual {
+            texture: self.texture.as_ref()?,
+            timecode: &self.timecode,
+        })
+    }
+
+    pub fn hover_active(&self) -> bool {
+        self.hover_active
+    }
+
+    /// Hide immediately. Keep the last same-media texture warm so re-entering
+    /// the seek bar or moving into another slot never flashes a placeholder.
+    /// [`Self::media_changed`] is the boundary that releases this association.
     pub fn hide(&mut self) {
         self.hover_active = false;
         self.current_request = None;
         self.next_request_id = self.next_request_id.wrapping_add(1);
-        self.overlay.hide();
     }
 
     /// Hide immediately when the loaded media identity changes.
     pub fn media_changed(&mut self) {
+        // The next hover must re-read file metadata; the previous file's
+        // identity can no longer describe what is loaded.
+        self.identity = None;
         self.hide();
+        self.visual_request = None;
+        self.texture = None;
+        self.timecode.clear();
     }
 
-    /// Explicitly release the native window and join the one extraction worker.
+    /// Explicitly release the texture and join the one extraction worker.
     pub fn shutdown(&mut self) {
         self.hide();
-        self.overlay.destroy();
+        self.texture = None;
         self.queue.shutdown();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -348,28 +446,6 @@ fn replace_pending<T>(slot: &mut Option<T>, newest: T) -> Option<T> {
     slot.replace(newest)
 }
 
-/// Clamp a requested child rectangle to physical parent-client bounds.
-pub fn clamp_overlay_bounds(
-    requested: PhysicalVideoRect,
-    parent: PhysicalVideoRect,
-) -> PhysicalVideoRect {
-    if !requested.visible() || !parent.visible() {
-        return PhysicalVideoRect::default();
-    }
-    let width = requested.width.min(parent.width).max(0);
-    let height = requested.height.min(parent.height).max(0);
-    let maximum_x = parent.x.saturating_add(parent.width.saturating_sub(width));
-    let maximum_y = parent
-        .y
-        .saturating_add(parent.height.saturating_sub(height));
-    PhysicalVideoRect {
-        x: requested.x.clamp(parent.x, maximum_x),
-        y: requested.y.clamp(parent.y, maximum_y),
-        width,
-        height,
-    }
-}
-
 pub fn format_timecode(seconds: f64) -> String {
     let total = if seconds.is_finite() && seconds > 0.0 {
         seconds.floor() as u64
@@ -390,6 +466,35 @@ fn cache_path(request: &PreviewRequest) -> io::Result<PathBuf> {
     Ok(jobs::companion_root()?
         .join("seek-previews")
         .join(cache_name(&request.media_key, request.timestamp_millis)))
+}
+
+/// Include the local file's path and current metadata in the cache identity.
+/// The caller-provided key remains part of the identity for compatibility with
+/// the Library's file records, while metadata invalidates previews after a
+/// downloaded file is replaced in place.
+fn media_identity(media_key: &str, media_path: &Path) -> String {
+    let path = fs::canonicalize(media_path).unwrap_or_else(|_| media_path.to_path_buf());
+    let metadata = fs::metadata(media_path).ok();
+    let size = metadata.as_ref().map_or(0, |value| value.len());
+    let modified = metadata
+        .and_then(|value| value.modified().ok())
+        .and_then(|value| value.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or(0, |value| value.as_nanos());
+    format!("{media_key}|{}|{size}|{modified}", path.to_string_lossy())
+}
+
+/// Decide whether a memoized identity still describes the hovered file. Pure so
+/// the "no filesystem call per pointer move" rule is directly testable.
+fn reusable_identity(
+    memoized: Option<&(String, PathBuf, String)>,
+    media_key: &str,
+    media_path: &Path,
+) -> Option<String> {
+    memoized
+        .filter(|(cached_key, cached_path, _)| {
+            cached_key == media_key && cached_path.as_path() == media_path
+        })
+        .map(|(_, _, identity)| identity.clone())
 }
 
 fn ffmpeg_path() -> io::Result<PathBuf> {
@@ -423,14 +528,11 @@ fn decode(path: &Path) -> Option<DecodedPreview> {
         image::imageops::resize(&image, 192, 108, image::imageops::FilterType::Triangle)
     };
     let (width, height) = image.dimensions();
-    let mut bgra = image.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
+    let rgba = image.into_raw();
     Some(DecodedPreview {
         width: i32::try_from(width).ok()?,
         height: i32::try_from(height).ok()?,
-        bgra,
+        rgba,
     })
 }
 
@@ -460,7 +562,7 @@ fn generate(request: &PreviewRequest, queue: &WorkerQueue) -> Option<DecodedPrev
     command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command.spawn().ok()?;
     let status = loop {
-        if queue.superseded(request) {
+        if queue.shutdown_requested() {
             let _ = child.kill();
             let _ = child.wait();
             let _ = fs::remove_file(&temporary);
@@ -485,8 +587,29 @@ fn generate(request: &PreviewRequest, queue: &WorkerQueue) -> Option<DecodedPrev
         let _ = fs::remove_file(&temporary);
         return None;
     }
-    prune_cache(parent);
+    if prune_is_due(&EXTRACTIONS_SINCE_PRUNE) {
+        prune_cache(parent);
+    }
     decode(&output)
+}
+
+/// Extractions since the last disk prune. Pruning reads the whole cache
+/// directory, so doing it on every extraction added a directory scan to each
+/// uncached hover.
+static EXTRACTIONS_SINCE_PRUNE: AtomicUsize = AtomicUsize::new(0);
+/// How many extractions may pass between prunes. The cache can overshoot
+/// `MAX_CACHE_FILES` by at most this much before it is trimmed back.
+const PRUNE_INTERVAL: usize = 32;
+
+/// Whether this extraction should pay for the directory scan. Pure apart from
+/// the counter, so the amortization is testable.
+fn prune_is_due(counter: &AtomicUsize) -> bool {
+    let previous = counter.fetch_add(1, Ordering::Relaxed);
+    if previous + 1 >= PRUNE_INTERVAL {
+        counter.store(0, Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 fn prune_cache(directory: &Path) {
@@ -517,354 +640,6 @@ fn prune_cache(directory: &Path) {
     }
 }
 
-#[cfg(target_os = "windows")]
-mod native_overlay {
-    use super::{clamp_overlay_bounds, DecodedPreview, PhysicalVideoRect};
-    use std::ffi::c_void;
-    use std::mem::size_of;
-    use std::sync::OnceLock;
-    use windows::core::{w, PCWSTR};
-    use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{
-        BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect,
-        SetBkMode, SetDIBitsToDevice, SetTextColor, StretchDIBits, UpdateWindow, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
-        DT_VCENTER, HGDIOBJ, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
-    };
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
-        RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, GWLP_USERDATA,
-        HTTRANSPARENT, HWND_TOP, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WM_ERASEBKGND,
-        WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
-        WS_EX_NOACTIVATE,
-    };
-
-    const CLASS_NAME: PCWSTR = w!("AuraSeekPreviewOverlay");
-    const TIMECODE_STRIP_HEIGHT: i32 = 28;
-    static CLASS_REGISTERED: OnceLock<bool> = OnceLock::new();
-
-    #[derive(Default)]
-    struct OverlayState {
-        image: Option<DecodedPreview>,
-        timecode: Vec<u16>,
-    }
-
-    #[derive(Default)]
-    pub(super) struct NativeOverlay {
-        hwnd: Option<HWND>,
-        parent: Option<HWND>,
-        state: Option<Box<OverlayState>>,
-    }
-
-    impl NativeOverlay {
-        pub(super) fn show(
-            &mut self,
-            parent_raw: isize,
-            requested: PhysicalVideoRect,
-            image: DecodedPreview,
-            timecode: String,
-        ) {
-            if parent_raw == 0 || !requested.visible() || !self.ensure_window(parent_raw) {
-                self.hide();
-                return;
-            }
-            let Some(state) = self.state.as_mut() else {
-                return;
-            };
-            state.image = Some(image);
-            state.timecode = timecode.encode_utf16().collect();
-            self.reposition(parent_raw, requested);
-            if let Some(hwnd) = self.hwnd {
-                unsafe {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                    let _ = UpdateWindow(hwnd);
-                }
-            }
-        }
-
-        pub(super) fn reposition(&mut self, parent_raw: isize, requested: PhysicalVideoRect) {
-            if self.parent != Some(raw_hwnd(parent_raw)) {
-                return;
-            }
-            let Some(hwnd) = self.hwnd else {
-                return;
-            };
-            let bounds = parent_client_bounds(raw_hwnd(parent_raw));
-            let rect = clamp_overlay_bounds(requested, bounds);
-            if !rect.visible() {
-                self.hide();
-                return;
-            }
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    Some(HWND_TOP),
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
-            }
-        }
-
-        /// Keep the last decoded frame visible while a newer slot is being
-        /// extracted. This avoids flashing an empty holder between requests.
-        pub(super) fn retain_and_reposition(
-            &mut self,
-            parent_raw: isize,
-            requested: PhysicalVideoRect,
-            timecode: String,
-        ) {
-            if self.parent != Some(raw_hwnd(parent_raw))
-                || self
-                    .state
-                    .as_ref()
-                    .and_then(|state| state.image.as_ref())
-                    .is_none()
-            {
-                return;
-            }
-            if let Some(state) = self.state.as_mut() {
-                state.timecode = timecode.encode_utf16().collect();
-            }
-            self.reposition(parent_raw, requested);
-            if let Some(hwnd) = self.hwnd {
-                unsafe {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                    let _ = UpdateWindow(hwnd);
-                }
-            }
-        }
-
-        pub(super) fn hide(&mut self) {
-            if let Some(hwnd) = self.hwnd {
-                unsafe {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                }
-            }
-        }
-
-        pub(super) fn destroy(&mut self) {
-            if let Some(hwnd) = self.hwnd.take() {
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-            }
-            self.parent = None;
-            self.state = None;
-        }
-
-        fn ensure_window(&mut self, parent_raw: isize) -> bool {
-            let parent = raw_hwnd(parent_raw);
-            if self.hwnd.is_some() && self.parent == Some(parent) {
-                return true;
-            }
-            self.destroy();
-            if !register_class() {
-                return false;
-            }
-            let mut state = Box::<OverlayState>::default();
-            let state_pointer = (&mut *state) as *mut OverlayState as *const c_void;
-            let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
-                return false;
-            };
-            let window = unsafe {
-                CreateWindowExW(
-                    WS_EX_NOACTIVATE,
-                    CLASS_NAME,
-                    w!(""),
-                    WS_CHILD | WS_CLIPSIBLINGS,
-                    0,
-                    0,
-                    1,
-                    1,
-                    Some(parent),
-                    None,
-                    Some(HINSTANCE(module.0)),
-                    Some(state_pointer),
-                )
-            };
-            let Ok(hwnd) = window else {
-                return false;
-            };
-            self.hwnd = Some(hwnd);
-            self.parent = Some(parent);
-            self.state = Some(state);
-            true
-        }
-    }
-
-    fn raw_hwnd(value: isize) -> HWND {
-        HWND(value as *mut c_void)
-    }
-
-    fn parent_client_bounds(parent: HWND) -> PhysicalVideoRect {
-        let mut rect = RECT::default();
-        if unsafe { GetClientRect(parent, &mut rect) }.is_err() {
-            return PhysicalVideoRect::default();
-        }
-        PhysicalVideoRect {
-            x: 0,
-            y: 0,
-            width: rect.right.saturating_sub(rect.left),
-            height: rect.bottom.saturating_sub(rect.top),
-        }
-    }
-
-    fn register_class() -> bool {
-        *CLASS_REGISTERED.get_or_init(|| {
-            let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
-                return false;
-            };
-            let class = WNDCLASSW {
-                lpfnWndProc: Some(window_proc),
-                hInstance: HINSTANCE(module.0),
-                lpszClassName: CLASS_NAME,
-                ..Default::default()
-            };
-            unsafe { RegisterClassW(&class) != 0 }
-        })
-    }
-
-    unsafe extern "system" fn window_proc(
-        hwnd: HWND,
-        message: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        if message == WM_NCCREATE {
-            let create = &*(lparam.0 as *const CREATESTRUCTW);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
-        }
-        let state_pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut OverlayState;
-        match message {
-            WM_PAINT => {
-                paint(hwnd, state_pointer.as_ref());
-                LRESULT(0)
-            }
-            WM_ERASEBKGND => LRESULT(1),
-            WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
-            WM_NCDESTROY => {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                DefWindowProcW(hwnd, message, wparam, lparam)
-            }
-            _ => DefWindowProcW(hwnd, message, wparam, lparam),
-        }
-    }
-
-    unsafe fn paint(hwnd: HWND, state: Option<&OverlayState>) {
-        let mut paint = PAINTSTRUCT::default();
-        let dc = BeginPaint(hwnd, &mut paint);
-        let mut client = RECT::default();
-        if GetClientRect(hwnd, &mut client).is_ok() {
-            let background = CreateSolidBrush(COLORREF(0x0018_1513));
-            FillRect(dc, &client, background);
-            let _ = DeleteObject(HGDIOBJ(background.0));
-
-            if let Some(state) = state {
-                let image_bottom = (client.bottom - TIMECODE_STRIP_HEIGHT).max(client.top);
-                if let Some(image) = &state.image {
-                    let bitmap = BITMAPINFO {
-                        bmiHeader: BITMAPINFOHEADER {
-                            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                            biWidth: image.width,
-                            biHeight: -image.height,
-                            biPlanes: 1,
-                            biBitCount: 32,
-                            biCompression: BI_RGB.0,
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    };
-                    let drawn = StretchDIBits(
-                        dc,
-                        client.left,
-                        client.top,
-                        client.right - client.left,
-                        image_bottom - client.top,
-                        0,
-                        0,
-                        image.width,
-                        image.height,
-                        Some(image.bgra.as_ptr().cast()),
-                        &bitmap,
-                        DIB_RGB_COLORS,
-                        SRCCOPY,
-                    );
-                    if drawn <= 0 {
-                        let _ = SetDIBitsToDevice(
-                            dc,
-                            client.left,
-                            client.top,
-                            image.width as u32,
-                            image.height as u32,
-                            0,
-                            0,
-                            0,
-                            image.height as u32,
-                            image.bgra.as_ptr().cast(),
-                            &bitmap,
-                            DIB_RGB_COLORS,
-                        );
-                    }
-                }
-
-                let strip = RECT {
-                    left: client.left,
-                    top: image_bottom,
-                    right: client.right,
-                    bottom: client.bottom,
-                };
-                let brush = CreateSolidBrush(COLORREF(0x0022_1d1a));
-                FillRect(dc, &strip, brush);
-                let _ = DeleteObject(HGDIOBJ(brush.0));
-                SetBkMode(dc, TRANSPARENT);
-                SetTextColor(dc, COLORREF(0x00ff_ffff));
-                let mut text_rect = strip;
-                let mut text = state.timecode.clone();
-                DrawTextW(
-                    dc,
-                    &mut text,
-                    &mut text_rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-                );
-            }
-        }
-        let _ = EndPaint(hwnd, &paint);
-    }
-}
-
-#[cfg(target_os = "windows")]
-use native_overlay::NativeOverlay;
-
-#[cfg(not(target_os = "windows"))]
-#[derive(Default)]
-struct NativeOverlay;
-
-#[cfg(not(target_os = "windows"))]
-impl NativeOverlay {
-    fn show(
-        &mut self,
-        _parent: isize,
-        _rect: PhysicalVideoRect,
-        _image: DecodedPreview,
-        _timecode: String,
-    ) {
-    }
-    fn reposition(&mut self, _parent: isize, _rect: PhysicalVideoRect) {}
-    fn retain_and_reposition(
-        &mut self,
-        _parent: isize,
-        _rect: PhysicalVideoRect,
-        _timecode: String,
-    ) {
-    }
-    fn hide(&mut self) {}
-    fn destroy(&mut self) {}
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,7 +657,7 @@ mod tests {
         DecodedPreview {
             width: 1,
             height: 1,
-            bgra: vec![value; 4],
+            rgba: vec![value; 4],
         }
     }
 
@@ -916,21 +691,26 @@ mod tests {
     }
 
     #[test]
-    fn a_new_pending_request_supersedes_inflight_extraction() {
+    fn pointer_motion_replaces_pending_work_without_cancelling_inflight_extraction() {
         let queue = WorkerQueue::new();
-        let active = request(1, 1_000);
         let newest = request(2, 8_000);
-        assert!(!queue.superseded(&active));
         queue.submit(newest.clone());
-        assert!(queue.superseded(&active));
-        assert!(!queue.superseded(&newest));
+        assert!(!queue.shutdown_requested());
+        assert_eq!(
+            queue
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pending,
+            Some(newest)
+        );
     }
 
     #[test]
     fn new_previews_are_generated_at_overlay_size() {
         assert_eq!(
             PREVIEW_FILTER,
-            "scale=192:108:force_original_aspect_ratio=increase,crop=192:108"
+            "scale=192:108:force_original_aspect_ratio=decrease,pad=192:108:(ow-iw)/2:(oh-ih)/2:black"
         );
     }
 
@@ -953,49 +733,134 @@ mod tests {
     }
 
     #[test]
+    fn cache_hit_reuses_the_existing_decoded_frame() {
+        let request = request(1, 1_000);
+        let key = PreviewCacheKey::from(&request);
+        let expected = image(42);
+        let mut cache = MemoryPreviewCache::default();
+        cache.insert(key.clone(), expected.clone());
+
+        assert_eq!(cache.get(&key), Some(expected));
+        assert_eq!(cache.get(&key), Some(image(42)));
+    }
+
+    #[test]
+    fn local_file_identity_changes_when_path_or_metadata_changes() {
+        let first = media_identity("record", Path::new("clip-a.mp4"));
+        let second = media_identity("record", Path::new("clip-b.mp4"));
+        assert_ne!(first, second);
+        assert!(first.starts_with("record|"));
+    }
+
+    #[test]
+    fn identity_is_memoized_per_loaded_file_and_dropped_when_it_changes() {
+        // Hover runs on every frame. Reusing the memoized identity is what keeps
+        // a pointer sweep from calling into the filesystem once per event.
+        let memoized = (
+            "record".to_string(),
+            PathBuf::from("clip-a.mp4"),
+            "record|clip-a.mp4|10|20".to_string(),
+        );
+        assert_eq!(
+            reusable_identity(Some(&memoized), "record", Path::new("clip-a.mp4")),
+            Some("record|clip-a.mp4|10|20".to_string())
+        );
+        assert_eq!(
+            reusable_identity(Some(&memoized), "record", Path::new("clip-b.mp4")),
+            None
+        );
+        assert_eq!(
+            reusable_identity(Some(&memoized), "other", Path::new("clip-a.mp4")),
+            None
+        );
+        assert_eq!(
+            reusable_identity(None, "record", Path::new("clip-a.mp4")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_repeated_hover_slot_is_served_from_cache_without_new_extraction_work() {
+        // One quantized slot revisited many times must stay one cache entry and
+        // never queue another ffmpeg extraction.
+        let queue = WorkerQueue::new();
+        let mut cache = MemoryPreviewCache::default();
+        let hovered = request(1, 4_000);
+        let key = PreviewCacheKey::from(&hovered);
+        cache.insert(key.clone(), image(7));
+
+        for _ in 0..32 {
+            let hit = cache.get(&key);
+            assert_eq!(hit, Some(image(7)));
+            if hit.is_none() {
+                queue.submit(hovered.clone());
+            }
+        }
+        assert_eq!(cache.order.len(), 1);
+        assert!(!queue.shutdown_requested());
+        assert!(queue
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pending
+            .is_none());
+    }
+
+    #[test]
+    fn the_reusable_window_covers_a_real_scrub_and_stays_bounded() {
+        // A pointer sweep across a two-hour file revisits slots as it moves back
+        // and forth. The cache has to be large enough that a nearby revisit is a
+        // hit, and still small enough to stay a hover cache.
+        assert!(MAX_MEMORY_PREVIEWS >= 128);
+        let frame_bytes = 192 * 108 * 4;
+        assert!(MAX_MEMORY_PREVIEWS * frame_bytes <= MAX_MEMORY_CACHE_BYTES);
+        // Disk retains at least as much as memory, so an eviction from memory can
+        // still be re-decoded instead of re-extracted.
+        assert!(MAX_CACHE_FILES >= MAX_MEMORY_PREVIEWS);
+
+        let mut cache = MemoryPreviewCache::default();
+        let slot = |index: u64| {
+            let mut request = request(index + 1, index * QUANTUM_MILLIS);
+            request.timestamp_millis = index * QUANTUM_MILLIS;
+            request
+        };
+        // Sweep forward across the whole window, then sweep back over it.
+        for index in 0..MAX_MEMORY_PREVIEWS as u64 {
+            let request = slot(index);
+            cache.insert(PreviewCacheKey::from(&request), image(index as u8));
+        }
+        for index in (0..MAX_MEMORY_PREVIEWS as u64).rev() {
+            let request = slot(index);
+            assert!(
+                cache.get(&PreviewCacheKey::from(&request)).is_some(),
+                "slot {index} should still be reusable within one sweep"
+            );
+        }
+        assert_eq!(cache.order.len(), MAX_MEMORY_PREVIEWS);
+        assert_eq!(cache.images.len(), MAX_MEMORY_PREVIEWS);
+    }
+
+    #[test]
+    fn disk_pruning_is_amortized_instead_of_running_on_every_extraction() {
+        let counter = AtomicUsize::new(0);
+        let mut prunes = 0;
+        for _ in 0..PRUNE_INTERVAL * 3 {
+            if prune_is_due(&counter) {
+                prunes += 1;
+            }
+        }
+        assert_eq!(prunes, 3);
+        // The very first extraction of a session must not trigger a scan.
+        let fresh = AtomicUsize::new(0);
+        assert!(!prune_is_due(&fresh));
+        assert!(PRUNE_INTERVAL < MAX_CACHE_FILES);
+    }
+
+    #[test]
     fn timecode_formats_short_long_and_invalid_positions() {
         assert_eq!(format_timecode(0.0), "00:00");
         assert_eq!(format_timecode(65.9), "01:05");
         assert_eq!(format_timecode(3_661.2), "1:01:01");
         assert_eq!(format_timecode(f64::NAN), "00:00");
-    }
-
-    #[test]
-    fn overlay_bounds_clamp_position_and_size_to_parent() {
-        let parent = PhysicalVideoRect {
-            x: 0,
-            y: 0,
-            width: 800,
-            height: 450,
-        };
-        assert_eq!(
-            clamp_overlay_bounds(
-                PhysicalVideoRect {
-                    x: 700,
-                    y: -20,
-                    width: 320,
-                    height: 204,
-                },
-                parent,
-            ),
-            PhysicalVideoRect {
-                x: 480,
-                y: 0,
-                width: 320,
-                height: 204,
-            }
-        );
-        assert_eq!(
-            clamp_overlay_bounds(
-                PhysicalVideoRect {
-                    x: 20,
-                    y: 20,
-                    width: 1_000,
-                    height: 700,
-                },
-                parent,
-            ),
-            parent
-        );
     }
 }

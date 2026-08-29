@@ -32,6 +32,7 @@ import {
 } from "./player-page-resolver.js";
 import {
   companionStatus,
+  mediaDownloadBrowserContext,
   showCompanionUi,
   startCompanionMediaDownload,
   startCompanionYouTubeDownload,
@@ -295,11 +296,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   });
 });
 
-chrome.storage.local?.onChanged?.addListener?.((changes, areaName) => {
-  if (areaName !== "local" || !changes?.auraLicense) return;
-  void chrome.runtime.sendMessage({ type: "license-changed" }).catch(() => {});
-});
-
 async function queueMediaDownload(candidate) {
   const transferCandidate = await resolvePlayerCandidate(candidate);
   const jobId = crypto.randomUUID();
@@ -310,6 +306,7 @@ async function queueMediaDownload(candidate) {
     ...(transferCandidate.pageUrl ? { referrer: transferCandidate.pageUrl } : {}),
     title: transferCandidate.pageTitle || "미디어 다운로드",
     inputKind: transferCandidate.mediaType,
+    ...mediaDownloadBrowserContext(),
   });
   return { mode: "media-companion", jobId };
 }

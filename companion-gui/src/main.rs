@@ -14,6 +14,7 @@ mod gif_export;
 mod icons;
 mod jobs;
 mod library_state;
+mod license;
 mod model;
 mod player_backend;
 mod player_contract;
@@ -90,9 +91,14 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     };
     refresh_shell_icon_cache();
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../../assets/microsoft-store/listing/store-logo-50x50.png"
+    ))
+    .expect("bundled Segma window icon must be valid PNG");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Segma Player")
+            .with_icon(icon)
             .with_inner_size(metric::WINDOW_DEFAULT)
             .with_min_inner_size(metric::WINDOW_MIN),
         ..Default::default()

@@ -689,3 +689,52 @@ The av19 result is a confirmed current live detection regression and remains the
 - Evidence: focused detection/site regressions 146/146; `npm run build:dev-staging` = `DEV_STAGING_OK` version `0.4.28`
 - De-obfuscation evidence: deterministic tests cover Dean Edwards Packer script unpacking, hex-escaped URL decoding, string reversal, percent decoding, and Base64 JSON config extraction without `eval()` (146/146 focused pass)
 - Remaining live gap: reload staging `0.4.28` on a page that previously needed playback before an address appeared, plus one Filemoon/Mixdrop/Voe embed
+
+## 2026-08-28 PimpBunny progressive redirect diagnosis
+
+- Extension version: active Chrome development build not re-read during this check; current staging source is `0.4.34`.
+- Browser/channel: Chrome; stored Companion jobs from the user's active path.
+- Site IDs: `pimpbunny` (unregistered profile at diagnosis time).
+- AdBlock/VPN mode: not reported.
+- detect: `NOT_RUN` — this check began from already persisted candidate jobs.
+- progressive-probe: `PASS` — authenticated candidate with its page referrer returned HTTP 200, `Content-Type: video/mp4`, inline MP4 filename, and 216,533,486-byte length. The final CDN URL path nevertheless ended in `.php`.
+- extension-download: `FAIL` — yt-dlp generic extraction rejected the final `.php` path as an unusual extracted extension before saving, despite the MP4 response headers.
+- playback, subtitle, overlay: `NOT_RUN`.
+- Confirmed diagnosis: PimpBunny serves MP4 bytes through a PHP-named CDN endpoint. This is a yt-dlp URL-extension safety false positive, not evidence that the response body is PHP. No downloader fix was applied in this diagnostic check.
+
+## 2026-08-28 PimpBunny progressive direct-save retest (0.4.35)
+
+- Extension version: source/staging `0.4.35`; the retest replayed the exact persisted Chrome candidate through the newly installed Companion host.
+- Browser/channel: Chrome candidate context, installed Windows Companion.
+- Site ID: `pimpbunny`.
+- AdBlock/VPN mode: not re-read during the persisted-request replay.
+- detect: `NOT_RUN` — the exact previously detected request was replayed.
+- progressive-probe: `PASS` — prior live probe established HTTP 200, `video/mp4`, inline MP4 filename, and 216,533,486 bytes through the final `.php` CDN path.
+- extension-download: `PASS` — completed in 22.6 seconds at 100%; output was 216,533,486 bytes with `.mp4`, and ffprobe reported an MP4-family container with duration 1381.171458 seconds. The previous unusual-PHP-extension error did not recur.
+- playback, subtitle, overlay: `NOT_RUN`.
+- Evidence: installed host SHA-256 `66c5af52e00c7a69aeab7e5f75307070af613cfb283dc952a397ccbc152e07c5` matched the release binary; Native Host tests 38/38 and focused site/staging/package tests 31/31 passed.
+
+## 2026-08-28 LuluStream browser-bound HLS diagnosis and code fix (0.4.36)
+
+- Extension version: source/staging target `0.4.36`; the active unpacked Chrome extension version was not re-read during diagnosis.
+- Browser/channel: Chrome 151 request characteristics, stored Companion job, and direct header-isolation probes.
+- Site ID: `lulustream`; page host `luluvdo.com`.
+- AdBlock/VPN mode: not reported.
+- detect: `NOT_RUN` — diagnosis began from the already persisted `HLS_MEDIA` candidate.
+- playback: `NOT_RUN`.
+- progressive-probe: `NOT_RUN` — the affected transport is HLS.
+- extension-download: `CODE-FIXED / LIVE-UNVERIFIED` — the original Companion request failed at the master manifest with HTTP 403. The token was not expired. The CDN returned 200 when the current browser User-Agent and Accept-Language accompanied Referer/Origin/media Accept; Referer alone and partial combinations returned 403. Cookies were not needed. Installed yt-dlp successfully opened and parsed the exact still-live stored manifest with the new bounded combination (`LULUSTREAM_YTDLP_CONTEXT_OK`), but a freshly reloaded extension job has not yet completed.
+- subtitle, overlay: `NOT_RUN`.
+- Evidence: exact tokenized URL and secret-bearing probe details remain redacted. Native Host 38/38 and focused protocol/site/package tests 44/44 passed; staging build reported `DEV_STAGING_OK`, version `0.4.36`, 51 files. Installed Host SHA-256 `31f4b51f2ac54154496a847a925a34102e9115c636cff16f46c88c260c92e67f` matches the release build. Manual unpacked-extension reload and fresh Chrome download remain required.
+
+## 2026-08-29 MissAV Cloudflare HLS diagnosis and code fix (0.4.40)
+
+- Extension version: source/staging target `0.4.40`; failed-request baseline `0.4.39`. The active unpacked browser version was not re-read.
+- Browser/channel: not supplied; stored Companion request and installed yt-dlp `2026.08.19` were used for the transport A/B.
+- Site ID: `missav`; page path `jur-655-uncensored-leak`; media host `surrit.com`.
+- AdBlock/VPN mode: not reported.
+- detect: `PASS` from the persisted request contract only; the detected candidate was `HLS_MEDIA` on `surrit.com`.
+- playback, progressive-probe, subtitle, overlay, tab switching, and Aura AdBlock on/off: `NOT_RUN`.
+- extension-download: `PASS` — the exact existing request reproduced Cloudflare HTTP 403 with browser headers. The extractor-local impersonation hint still returned 403, while global Chrome impersonation parsed the live manifest as `generic:m3u8_native`. Installed Native Host `0.4.40` then exercised the Cloudflare-only retry and completed the exact persisted Companion job at 100%.
+- Evidence: tokenized URLs remain redacted. Native Host 40/40 and focused architecture/staging/package/site tests 35/35 pass. Build and installed Host SHA-256 both equal `a5e196313f5e482a93ab449e5759d60d8680ce45cd9e9424355f511f8c7046e3`. The saved MP4 is 3,076,881,087 bytes; ffprobe reports duration 7,112.363167 seconds, 1920x1080 H.264 video, and AAC audio. Full `npm test` has only the pre-existing encoded-workspace-path `ENOENT` failures.
+- Incident: `INC-2026-08-29-045`.

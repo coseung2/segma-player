@@ -158,6 +158,7 @@ test("browser-prepared subtitle audio is proxied to the CPU audio ingest endpoin
         authorization: `Bearer ${key}`,
         "x-aura-audio-upload": "1",
         "x-aura-audio-bytes": "4",
+        "content-length": "4",
         "x-aura-audio-source": "hls-audio-rendition",
         "x-aura-source-language": "ja",
         "x-aura-title": encodeURIComponent("Audio sample"),
@@ -174,6 +175,7 @@ test("browser-prepared subtitle audio is proxied to the CPU audio ingest endpoin
     assert.equal(decodeURIComponent(forwarded.options.headers["x-aura-title"]), "Audio sample");
     assert.equal(forwarded.options.headers["x-aura-source-language"], "ja");
     assert.equal(forwarded.options.headers["x-aura-audio-bytes"], "4");
+    assert.equal(forwarded.options.headers["content-length"], "4");
     assert.deepEqual([...forwarded.bytes], [1, 2, 3, 4]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -198,6 +200,73 @@ test("subtitle proxy rejects private media addresses and handles preflight", asy
   assert.equal(options.status, 204);
   assert.equal(options.headers.get("access-control-allow-origin"), "*");
   assert.match(options.headers.get("access-control-allow-methods"), /\bDELETE\b/);
+});
+
+test("subtitle audio proxy enforces exact Content-Length and the 80 MiB boundary before upload", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const key = `AM-${"B".repeat(36)}`;
+  await kv.put(key, JSON.stringify({ status: "approved", createdAt: new Date().toISOString() }));
+  const env = environment(kv, {
+    MODAL_ASR_URL: "https://aura-asr.modal.run",
+    MODAL_ASR_TOKEN: "modal-secret",
+  });
+  const originalFetch = globalThis.fetch;
+  const forwarded = [];
+  globalThis.fetch = async (request, options) => {
+    forwarded.push({ request: String(request), options });
+    return new Response(JSON.stringify({ ok: true, jobId: "audio-boundary-job" }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const request = ({ claimedBytes, contentLength, body = new Uint8Array([1, 2, 3, 4]), ip }) => new Request(
+    "https://aura.mdownloader.workers.dev/api/subtitles",
+    {
+      method: "POST",
+      headers: {
+        "cf-connecting-ip": ip,
+        "content-type": "audio/mp4",
+        authorization: `Bearer ${key}`,
+        "x-aura-audio-upload": "1",
+        "x-aura-audio-bytes": String(claimedBytes),
+        "content-length": String(contentLength),
+      },
+      body,
+    },
+  );
+  try {
+    const mismatch = await worker.fetch(request({
+      claimedBytes: 5,
+      contentLength: 4,
+      ip: "203.0.113.41",
+    }), env);
+    assert.equal(mismatch.status, 400);
+    assert.deepEqual(await mismatch.json(), { ok: false, error: "audio-size-mismatch" });
+    assert.equal(forwarded.length, 0, "a mismatched request must not reach Modal");
+
+    const maxBytes = 80 * 1024 * 1024;
+    const bounded = await worker.fetch(request({
+      claimedBytes: maxBytes,
+      contentLength: maxBytes,
+      ip: "203.0.113.42",
+    }), env);
+    assert.equal(bounded.status, 202);
+    assert.equal(forwarded.length, 1);
+    assert.equal(forwarded[0].options.headers["content-length"], String(maxBytes));
+    assert.equal(forwarded[0].options.headers["x-aura-audio-bytes"], String(maxBytes));
+
+    const oversized = await worker.fetch(request({
+      claimedBytes: maxBytes + 1,
+      contentLength: maxBytes + 1,
+      ip: "203.0.113.43",
+    }), env);
+    assert.equal(oversized.status, 413);
+    assert.deepEqual(await oversized.json(), { ok: false, error: "subtitle-audio-too-large" });
+    assert.equal(forwarded.length, 1, "an oversized request must be rejected before upload");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("subtitle result polling requires an approved license and forwards only the Modal credential", async () => {

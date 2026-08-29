@@ -34,29 +34,32 @@ The backend foundation now includes:
   not report success when remote cancellation failed;
 - Windows atomic state replacement, collision-safe subtitle output allocation,
   and two-hour cleanup of crash-left active URL request files;
-- Companion-first routing in `background.js`: when the installed Companion
-  reports `licenseConfigured: true`, the extension sends `subtitle.create`,
-  tracks the returned Companion job ID, restores active subtitle states, and
-  sends cancellation back to the Companion.
+- App-owned routing: the free extension only detects media and hands it to the
+  installed app. Library subtitle creation starts in the app, and the Native
+  Host reads only the app-approved Pro entitlement.
 
-This is now the active local backend route for the existing extension Subtitle
-command when Companion license setup is present. If the Companion is absent or
-reports `licenseConfigured: false`, the existing licensed extension subtitle
-worker remains the migration fallback. A configured Companion start failure is
-surfaced instead of silently falling back. Binary-audio preparation,
-authenticated browser request brokering, capability-token exchange, deployment,
-updated Companion installation, and real-browser/live-service verification
-remain open.
+There is no extension-side license or subtitle-worker fallback. General/Pro is
+an app product state: General keeps detection, downloading, playback, and the
+library available; Pro unlocks AI subtitle creation. A rejected or expired key
+remains blocked by both the app gate and the Worker.
 
 The temporary settings contract is:
 
 ```json
-{ "licenseKey": "AM-<36 uppercase hex characters>" }
+{
+  "licenseKey": "AM-<36 uppercase hex characters>",
+  "licenseEdition": "pro",
+  "licenseStatus": "approved",
+  "licenseExpiresAt": null,
+  "licenseDevices": 1,
+  "licenseLimit": 3
+}
 ```
 
-Only the Companion reads this file. The extension command and job state never
-contain the key. A production account UI should move the credential to a
-Windows-protected secret store before the Companion-first store release.
+Only the installed app and Native Host read this file. The extension command
+and job state never contain the key. A future hardening pass can move the key
+to a Windows-protected secret store without changing the app-owned entitlement
+contract.
 
 ## Existing service contract to reuse
 
@@ -81,11 +84,17 @@ Current verified limits and behavior:
 - Japanese ASR: `litagin/anime-whisper`;
 - English ASR: `openai/whisper-large-v3-turbo`;
 - translation: `google/translategemma-12b-it`;
+- maximum processed duration: 60 minutes per subtitle job (longer local and
+  remote media inputs are limited to the first 60 minutes);
 - binary audio upload limit: 80 MiB;
 - accepted upload types: octet-stream, AAC/MP4/MPEG/OGG audio, and MPEG-TS;
 - progress phases: `queued`, `extracting-audio`, `transcribing`, `translating`,
   and `finalizing`;
 - result: WebVTT plus model/source metadata;
+- speaker diarization: `pyannote/speaker-diarization-community-1` assigns
+  stable `화자 1`, `화자 2`, ... labels to translated cues using exclusive
+  speaker turns; WebVTT carries them as standard `<v ...>` voice spans and the
+  result includes `speakers` plus `speakerCount` metadata;
 - unfinished jobs are polled asynchronously; uploaded Modal audio files are
   removed in job cleanup and stale files are pruned after two hours.
 

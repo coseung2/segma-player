@@ -61,6 +61,28 @@ const OBSERVED_PROPERTIES: [&str; 16] = [
     "ab-loop-b",
 ];
 
+/// Stable embedded-player flags. `window` output is intentional: in mpv's
+/// DirectComposition mode the swapchain can keep the former PiP dimensions
+/// after the Win32 child HWND returns to the full Player surface. Window mode
+/// binds presentation to that child HWND, so `SetWindowPos` remains the one
+/// authoritative size transition for Player, PiP, and every resize edge.
+const MPV_EMBEDDED_ARGS: [&str; 14] = [
+    "--no-config",
+    "--idle=yes",
+    "--keep-open=yes",
+    "--terminal=no",
+    "--input-terminal=no",
+    "--input-default-bindings=no",
+    "--osc=no",
+    "--really-quiet",
+    "--vo=gpu-next",
+    "--gpu-api=d3d11",
+    "--d3d11-output-mode=window",
+    "--video-output-levels=full",
+    "--sub-auto=fuzzy",
+    "--force-window=no",
+];
+
 static PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Non-blocking UI handle for the embedded player process.
@@ -420,18 +442,7 @@ fn launch_mpv(executable: &Path, window: HWND) -> io::Result<(Child, IpcConnecti
     let window_id = window.0 as usize;
     let mut command = Command::new(executable);
     command
-        .args([
-            "--no-config",
-            "--idle=yes",
-            "--keep-open=yes",
-            "--terminal=no",
-            "--input-terminal=no",
-            "--input-default-bindings=no",
-            "--osc=no",
-            "--really-quiet",
-            "--video-output-levels=full",
-            "--sub-auto=fuzzy",
-        ])
+        .args(MPV_EMBEDDED_ARGS)
         .arg(format!("--sub-file-paths={}", subtitle_directory.display()))
         .arg(format!("--input-ipc-server={pipe_name}"))
         .arg(format!("--wid={window_id}"))
@@ -1179,6 +1190,16 @@ mod tests {
         );
         assert!(command_json(&PlayerCommand::SetSubtitleDelay(f64::NAN)).is_none());
         assert!(command_json(&PlayerCommand::SetLoopA(Some(f64::INFINITY))).is_none());
+    }
+
+    #[test]
+    fn embedded_mpv_uses_the_child_window_instead_of_direct_composition() {
+        assert!(MPV_EMBEDDED_ARGS.contains(&"--vo=gpu-next"));
+        assert!(MPV_EMBEDDED_ARGS.contains(&"--gpu-api=d3d11"));
+        assert!(MPV_EMBEDDED_ARGS.contains(&"--d3d11-output-mode=window"));
+        assert!(!MPV_EMBEDDED_ARGS
+            .iter()
+            .any(|argument| *argument == "--d3d11-output-mode=composition"));
     }
 
     #[test]

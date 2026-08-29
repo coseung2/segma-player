@@ -137,6 +137,13 @@ async function approvedAsrLicense(env, value) {
   return key;
 }
 
+function positiveAudioLength(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!/^\d+$/.test(text)) return null;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 async function asrLicenseFingerprint(value) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -233,7 +240,11 @@ export default {
         const sourceLanguage = (request.headers.get("x-aura-source-language") || "ja").trim().toLowerCase();
         const contentType = (request.headers.get("content-type") || "application/octet-stream")
           .split(";", 1)[0].trim().toLowerCase();
-        const claimedBytes = Number(request.headers.get("x-aura-audio-bytes") || 0);
+        const claimedBytes = positiveAudioLength(request.headers.get("x-aura-audio-bytes"));
+        const contentLengthHeader = request.headers.get("content-length");
+        const contentLength = contentLengthHeader === null
+          ? null
+          : positiveAudioLength(contentLengthHeader);
         let title = "";
         try {
           title = decodeURIComponent(request.headers.get("x-aura-title") || "").trim().slice(0, 240);
@@ -256,11 +267,14 @@ export default {
         ].includes(contentType)) {
           return json({ ok: false, error: "invalid-audio-content-type" }, 415);
         }
-        if (!Number.isInteger(claimedBytes) || claimedBytes <= 0) {
+        if (claimedBytes === null || (contentLengthHeader !== null && contentLength === null)) {
           return json({ ok: false, error: "invalid-audio-upload" }, 400);
         }
-        if (claimedBytes > MAX_ASR_AUDIO_BYTES) {
+        if (claimedBytes > MAX_ASR_AUDIO_BYTES || (contentLength !== null && contentLength > MAX_ASR_AUDIO_BYTES)) {
           return json({ ok: false, error: "subtitle-audio-too-large" }, 413);
+        }
+        if (contentLength !== null && contentLength !== claimedBytes) {
+          return json({ ok: false, error: "audio-size-mismatch" }, 400);
         }
         if (!request.body) return json({ ok: false, error: "invalid-audio-upload" }, 400);
         const approvedKey = await approvedAsrLicense(env, licenseKey);
@@ -280,6 +294,7 @@ export default {
               "x-aura-source-language": sourceLanguage,
               "x-aura-audio-source": audioSource,
               "x-aura-audio-bytes": String(claimedBytes),
+              "content-length": String(claimedBytes),
             },
             body: request.body,
           });

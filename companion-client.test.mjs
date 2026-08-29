@@ -8,6 +8,7 @@ import {
   SUBTITLE_COMMAND_PROTOCOL,
   companionRequest,
   disconnectCompanion,
+  mediaDownloadBrowserContext,
   onCompanionEvent,
   startCompanionMediaDownload,
   startCompanionSubtitleJob,
@@ -93,6 +94,8 @@ function sampleMediaDownloadInput() {
     referrer: "https://page.example:443/watch?id=7#player",
     title: "Sample video",
     inputKind: "HLS_MASTER",
+    userAgent: "Mozilla/5.0 TestBrowser/151.0",
+    acceptLanguage: "ko,en-US;q=0.9,en;q=0.8",
   };
 }
 
@@ -144,14 +147,30 @@ test("media-download v1 sends only the allowlisted canonical handoff payload", a
     referrer: "https://page.example/watch?id=7",
     title: "Sample video",
     inputKind: "HLS_MASTER",
+    userAgent: "Mozilla/5.0 TestBrowser/151.0",
+    acceptLanguage: "ko,en-US;q=0.9,en;q=0.8",
     type: "media-download",
     requestId: download.requestId,
   });
   assert.deepEqual(
     Object.keys(download).sort(),
-    ["candidateId", "inputKind", "jobId", "protocolVersion", "referrer", "requestId", "title", "type", "url"].sort(),
+    ["acceptLanguage", "candidateId", "inputKind", "jobId", "protocolVersion", "referrer", "requestId", "title", "type", "url", "userAgent"].sort(),
   );
   assert.equal(JSON.stringify(download).match(/cookie|authorization|header|license|bytes|path/gi), null);
+});
+
+test("media-download derives bounded non-secret browser request metadata", () => {
+  assert.deepEqual(mediaDownloadBrowserContext({
+    userAgent: "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36",
+    languages: ["ko", "en-US", "en", "ko", "invalid_language"],
+  }), {
+    userAgent: "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36",
+    acceptLanguage: "ko,en-US;q=0.9,en;q=0.8",
+  });
+  assert.deepEqual(mediaDownloadBrowserContext({
+    userAgent: `bad\r\nInjected: yes`,
+    languages: ["bad_language"],
+  }), {});
 });
 
 test("media-download rejects secrets, bytes, paths, and arbitrary fields before connecting", () => {
@@ -186,6 +205,10 @@ test("media-download rejects non-public URLs and unsupported input kinds before 
     { ...sampleMediaDownloadInput(), url: "https://user:pass@media.example/video.mp4" },
     { ...sampleMediaDownloadInput(), inputKind: "BLOB" },
     { ...sampleMediaDownloadInput(), title: "x".repeat(513) },
+    { ...sampleMediaDownloadInput(), userAgent: `bad\r\nInjected: yes` },
+    { ...sampleMediaDownloadInput(), userAgent: "x".repeat(513) },
+    { ...sampleMediaDownloadInput(), acceptLanguage: "ko\r\nInjected: yes" },
+    { ...sampleMediaDownloadInput(), acceptLanguage: "ko,*;q=0.9" },
   ]) {
     assert.throws(
       () => startCompanionMediaDownload(input),

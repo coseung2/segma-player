@@ -3,9 +3,11 @@ import { av19Regressions } from "./av19/regressions.js";
 import { avseeRegressions } from "./avsee/regressions.js";
 import { beegRegressions } from "./beeg/regressions.js";
 import { jamakRegressions } from "./jamak/regressions.js";
+import { lulustreamRegressions } from "./lulustream/regressions.js";
 import { missavRegressions } from "./missav/regressions.js";
 import { onlyjerkRegressions } from "./onlyjerk/regressions.js";
 import { playmogoRegressions } from "./playmogo/regressions.js";
+import { pimpbunnyRegressions } from "./pimpbunny/regressions.js";
 import { recuRegressions } from "./recu/regressions.js";
 import { shackledshowRegressions } from "./shackledshow/regressions.js";
 
@@ -16,6 +18,8 @@ export const SITE_REGRESSION_FIXTURES = Object.freeze([
   ...asianpornRegressions,
   ...onlyjerkRegressions,
   ...playmogoRegressions,
+  ...lulustreamRegressions,
+  ...pimpbunnyRegressions,
   ...recuRegressions,
   ...shackledshowRegressions,
   ...beegRegressions,

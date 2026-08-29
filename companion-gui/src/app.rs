@@ -30,12 +30,26 @@ use crate::widgets::{
     ButtonStyle, RowEvent, TileMenuEvent,
 };
 
-const POLL_INTERVAL: Duration = Duration::from_millis(900);
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// A notice stays long enough to read, then clears itself so a stale message
 /// never looks like current state.
 const NOTICE_LIFETIME: Duration = Duration::from_secs(6);
+const MINI_PLAYER_WIDTH: f32 = 320.0;
+const MINI_PLAYER_MARGIN: f32 = 20.0;
+const MINI_PLAYER_DRAG_HEIGHT: f32 = 22.0;
+const MINI_PLAYER_CONTROLS_HEIGHT: f32 = 56.0;
+const MINI_PLAYER_PREVIEW_WIDTH: f32 = 128.0;
+/// 128x72 image plus a compact 20-point timecode strip.
+const MINI_PLAYER_PREVIEW_HEIGHT: f32 = 92.0;
+const MINI_PLAYER_PREVIEW_ROW_PADDING: f32 = 8.0;
+const MINI_PLAYER_MIN_WIDTH: f32 = 240.0;
+const MINI_PLAYER_MAX_WIDTH: f32 = 640.0;
+/// Native mpv never covers this perimeter, so all eight resize targets receive
+/// pointer input even while the child window is topmost.
+const MINI_PLAYER_RESIZE_GUTTER: f32 = 10.0;
 const RATING_STAR_HIT_SIZE: f32 = 26.0;
 const RATING_STAR_ICON_SIZE: f32 = 14.0;
+const BRAND_LOGO_SIZE: f32 = 32.0;
 
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
@@ -172,6 +186,106 @@ enum NoticeTone {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipResizeEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl PipResizeEdge {
+    const ALL: [Self; 8] = [
+        Self::Left,
+        Self::Right,
+        Self::Top,
+        Self::Bottom,
+        Self::TopLeft,
+        Self::TopRight,
+        Self::BottomLeft,
+        Self::BottomRight,
+    ];
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+
+    fn cursor(self) -> egui::CursorIcon {
+        match self {
+            Self::Left | Self::Right => egui::CursorIcon::ResizeHorizontal,
+            Self::Top | Self::Bottom => egui::CursorIcon::ResizeVertical,
+            Self::TopRight | Self::BottomLeft => egui::CursorIcon::ResizeNeSw,
+            Self::TopLeft | Self::BottomRight => egui::CursorIcon::ResizeNwSe,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PipResizeDrag {
+    edge: PipResizeEdge,
+    start_width: f32,
+    start_position: egui::Pos2,
+}
+
+fn pip_resize_width(edge: PipResizeEdge, start_width: f32, delta: Vec2) -> f32 {
+    let horizontal = match edge {
+        PipResizeEdge::Left | PipResizeEdge::TopLeft | PipResizeEdge::BottomLeft => -delta.x,
+        PipResizeEdge::Right | PipResizeEdge::TopRight | PipResizeEdge::BottomRight => delta.x,
+        PipResizeEdge::Top | PipResizeEdge::Bottom => 0.0,
+    };
+    let vertical = match edge {
+        PipResizeEdge::Top | PipResizeEdge::TopLeft | PipResizeEdge::TopRight => {
+            -delta.y * 16.0 / 9.0
+        }
+        PipResizeEdge::Bottom | PipResizeEdge::BottomLeft | PipResizeEdge::BottomRight => {
+            delta.y * 16.0 / 9.0
+        }
+        PipResizeEdge::Left | PipResizeEdge::Right => 0.0,
+    };
+    let delta = match edge {
+        PipResizeEdge::Left | PipResizeEdge::Right => horizontal,
+        PipResizeEdge::Top | PipResizeEdge::Bottom => vertical,
+        _ if horizontal.abs() >= vertical.abs() => horizontal,
+        _ => vertical,
+    };
+    (start_width + delta).clamp(MINI_PLAYER_MIN_WIDTH, MINI_PLAYER_MAX_WIDTH)
+}
+
+fn pip_resize_position(
+    edge: PipResizeEdge,
+    start_position: egui::Pos2,
+    start_width: f32,
+    width: f32,
+) -> egui::Pos2 {
+    let mut position = start_position;
+    if matches!(
+        edge,
+        PipResizeEdge::Left | PipResizeEdge::TopLeft | PipResizeEdge::BottomLeft
+    ) {
+        position.x += start_width - width;
+    }
+    if matches!(
+        edge,
+        PipResizeEdge::Top | PipResizeEdge::TopLeft | PipResizeEdge::TopRight
+    ) {
+        position.y += (start_width - width) * 9.0 / 16.0;
+    }
+    position
+}
+
 struct Notice {
     text: String,
     tone: NoticeTone,
@@ -202,6 +316,14 @@ pub struct ManagerApp {
     library_state: LibraryState,
     /// File name waiting for the delete confirmation modal.
     pending_delete: Option<String>,
+    /// Stable folder/file keys selected for one recoverable batch action.
+    library_selection: HashSet<jobs::LibraryFileRef>,
+    library_selection_mode: bool,
+    pending_batch_delete: bool,
+    /// Preview-first automatic organization and its most recent reversible
+    /// journal. Neither is persisted: undo is scoped to this app session.
+    pending_organization: Option<jobs::LibraryOrganizationPlan>,
+    organization_journal: Option<jobs::LibraryMoveJournal>,
     /// `None` shows the download folder root; `Some(name)` shows one folder.
     library_folder: Option<String>,
     library_folders: Vec<jobs::LibraryFolder>,
@@ -214,6 +336,9 @@ pub struct ManagerApp {
     /// File currently dragged from a library tile. Folder chips consume it on
     /// pointer release and the existing move routine performs the safe rename.
     dragged_library_file: Option<String>,
+    /// Folder that just received a dropped file and the animation deadline for
+    /// its settle ring. Cleared when the deadline passes, so no state persists.
+    library_drop_settle: Option<(Option<String>, f64)>,
     player: PlayerController,
     gif_export: GifExportController,
     seek_preview: SeekPreviewController,
@@ -226,6 +351,10 @@ pub struct ManagerApp {
     last_resume_save: Instant,
     /// Folder the currently loaded file came from.
     player_loaded_folder: Option<String>,
+    /// Last Player surface is also the PiP surface after navigation. Keeping
+    /// one rectangle avoids creating a second popup/window composition.
+    last_player_video_rect: PhysicalVideoRect,
+    last_player_video_logical_rect: egui::Rect,
     fullscreen: bool,
     downloads_folder: Option<String>,
     player_shortcuts: PlayerShortcuts,
@@ -235,11 +364,35 @@ pub struct ManagerApp {
     thumbnail_textures: HashMap<String, egui::TextureHandle>,
     thumbnail_pending: HashSet<String>,
     thumbnail_unavailable: HashSet<String>,
+    license: crate::license::AppLicense,
+    license_key_input: String,
+    license_checking: bool,
+    license_checking_existing: bool,
+    license_focus_requested: bool,
+    license_result_sender: Sender<Result<crate::license::AppLicense, crate::license::LicenseError>>,
+    license_result_receiver:
+        Receiver<Result<crate::license::AppLicense, crate::license::LicenseError>>,
+    pip_armed: bool,
+    pip_dismissed: bool,
+    pip_position: Option<egui::Pos2>,
+    pip_width: f32,
+    /// Fixed position captured when the dedicated PiP drag strip is pressed.
+    pip_move_start: Option<egui::Pos2>,
+    /// Geometry captured at the start of an edge drag. `Response::drag_delta`
+    /// is cumulative, so resizing must always derive from this fixed baseline.
+    pip_resize_drag: Option<PipResizeDrag>,
 }
 
 impl Default for ManagerApp {
     fn default() -> Self {
         let thumbnails = crate::thumbnails::start_worker();
+        let (license_result_sender, license_result_receiver) = std::sync::mpsc::channel();
+        let license = crate::license::load();
+        let license_key_input = if license.pro {
+            String::new()
+        } else {
+            license.key.clone()
+        };
         Self {
             view: View::Queue,
             queue_filter: QueueFilter::All,
@@ -255,12 +408,18 @@ impl Default for ManagerApp {
             library_min_rating: 0,
             library_state: LibraryState::load().unwrap_or_default(),
             pending_delete: None,
+            library_selection: HashSet::new(),
+            library_selection_mode: false,
+            pending_batch_delete: false,
+            pending_organization: None,
+            organization_journal: None,
             library_folder: None,
             library_folders: Vec::new(),
             pending_move: None,
             pending_folder_name: None,
             pending_folder_rename: None,
             dragged_library_file: None,
+            library_drop_settle: None,
             player: PlayerController::new(),
             gif_export: GifExportController::new(),
             seek_preview: SeekPreviewController::new(),
@@ -272,6 +431,8 @@ impl Default for ManagerApp {
             pending_resume_position: None,
             last_resume_save: Instant::now() - Duration::from_secs(3),
             player_loaded_folder: None,
+            last_player_video_rect: PhysicalVideoRect::default(),
+            last_player_video_logical_rect: egui::Rect::NOTHING,
             fullscreen: false,
             downloads_folder: jobs::downloads_dir()
                 .ok()
@@ -283,6 +444,19 @@ impl Default for ManagerApp {
             thumbnail_textures: HashMap::new(),
             thumbnail_pending: HashSet::new(),
             thumbnail_unavailable: HashSet::new(),
+            license,
+            license_key_input,
+            license_checking: false,
+            license_checking_existing: false,
+            license_focus_requested: false,
+            license_result_sender,
+            license_result_receiver,
+            pip_armed: false,
+            pip_dismissed: false,
+            pip_position: None,
+            pip_width: MINI_PLAYER_WIDTH,
+            pip_move_start: None,
+            pip_resize_drag: None,
         }
     }
 }
@@ -383,6 +557,64 @@ impl ManagerApp {
         });
     }
 
+    fn verify_license(&mut self, key: String) {
+        if self.license_checking {
+            return;
+        }
+        let Some(key) = crate::license::normalize_key(&key) else {
+            self.notify("인증키 형식을 확인해 주세요.", NoticeTone::Error);
+            return;
+        };
+        self.license_checking_existing = self.license.pro && self.license.key == key;
+        self.license_checking = true;
+        let sender = self.license_result_sender.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(crate::license::verify(&key));
+        });
+    }
+
+    fn poll_license_result(&mut self) {
+        while let Ok(result) = self.license_result_receiver.try_recv() {
+            self.license_checking = false;
+            let checking_existing = std::mem::take(&mut self.license_checking_existing);
+            match result {
+                Ok(license) => match crate::license::save_approved(&license) {
+                    Ok(()) => {
+                        self.license = license;
+                        self.license_key_input.clear();
+                        self.notify("Segma Player Pro 인증이 완료됐습니다.", NoticeTone::Info);
+                    }
+                    Err(_) => self.notify(
+                        crate::license::LicenseError::SaveFailed.message(),
+                        NoticeTone::Error,
+                    ),
+                },
+                Err(error) => {
+                    if checking_existing && error.invalidates_existing_pro() {
+                        let _ = crate::license::remove();
+                        self.license = crate::license::AppLicense::default();
+                        self.license_key_input.clear();
+                    }
+                    self.notify(error.message(), NoticeTone::Error);
+                }
+            }
+        }
+    }
+
+    fn remove_license(&mut self) {
+        match crate::license::remove() {
+            Ok(()) => {
+                self.license = crate::license::AppLicense::default();
+                self.license_key_input.clear();
+                self.notify("일반 플랜으로 전환했습니다.", NoticeTone::Info);
+            }
+            Err(error) => self.notify(
+                format!("인증 정보를 지우지 못했습니다: {error}"),
+                NoticeTone::Error,
+            ),
+        }
+    }
+
     fn expire_notice(&mut self) {
         if self
             .notice
@@ -451,6 +683,15 @@ impl ManagerApp {
 
     /// Opens a file in the built-in player.
     fn generate_library_subtitle(&mut self, file_name: &str) {
+        if !self.license.pro {
+            self.view = View::Settings;
+            self.license_focus_requested = true;
+            self.notify(
+                "AI 자막 생성은 앱 Pro 기능입니다. 설정에서 인증키를 등록해 주세요.",
+                NoticeTone::Error,
+            );
+            return;
+        }
         match jobs::start_library_subtitle_job(self.library_folder.as_deref(), file_name) {
             Ok(_) => {
                 self.notify(
@@ -470,7 +711,6 @@ impl ManagerApp {
     }
 
     fn play_file(&mut self, file_name: &str) {
-
         self.play_file_in(self.library_folder.clone(), file_name);
     }
 
@@ -493,6 +733,8 @@ impl ManagerApp {
                 self.player_loaded_folder = folder;
                 self.player_media = media;
                 self.view = View::Player;
+                self.pip_armed = false;
+                self.pip_dismissed = false;
                 let _ = self.player.send(PlayerCommand::Load(path));
             }
             Err(error) => self.notify(format!("재생하지 못했습니다: {error}"), NoticeTone::Error),
@@ -684,18 +926,358 @@ impl ManagerApp {
         }
     }
 
+    fn clear_thumbnail_cache(&mut self) {
+        self.thumbnail_textures.clear();
+        self.thumbnail_pending.clear();
+        self.thumbnail_unavailable.clear();
+    }
+
+    fn current_library_ref(&self, file_name: impl Into<String>) -> jobs::LibraryFileRef {
+        jobs::LibraryFileRef::new(self.library_folder.clone(), file_name)
+    }
+
+    fn selection_contains(&self, file_name: &str) -> bool {
+        self.library_selection
+            .contains(&self.current_library_ref(file_name.to_string()))
+    }
+
+    fn toggle_library_selection(&mut self, file_name: &str) {
+        let item = self.current_library_ref(file_name.to_string());
+        if !self.library_selection.remove(&item) {
+            self.library_selection.insert(item);
+        }
+        // Selection mode is explicit: deselecting the last item must not make
+        // the very next thumbnail click unexpectedly start playback.
+        self.library_selection_mode = true;
+    }
+
+    fn clear_library_selection(&mut self) {
+        self.library_selection.clear();
+        self.library_selection_mode = false;
+        self.pending_batch_delete = false;
+    }
+
+    fn retain_current_folder_selection(&mut self) {
+        let folder = self.library_folder.clone();
+        self.library_selection.retain(|item| item.folder == folder);
+        self.library_selection_mode = !self.library_selection.is_empty();
+        self.pending_batch_delete = false;
+    }
+
+    fn select_visible_library_items<'a>(
+        &mut self,
+        entries: impl IntoIterator<Item = &'a model::LibraryEntry>,
+    ) {
+        let folder = self.library_folder.clone();
+        self.library_selection.extend(
+            entries
+                .into_iter()
+                .map(|entry| jobs::LibraryFileRef::new(folder.clone(), entry.file_name.clone())),
+        );
+        self.library_selection_mode = !self.library_selection.is_empty();
+    }
+
+    fn selected_library_size(&self) -> u64 {
+        self.library_selection
+            .iter()
+            .filter(|item| item.folder == self.library_folder)
+            .filter_map(|item| {
+                self.media_files
+                    .iter()
+                    .find(|media| media.file_name == item.file_name)
+                    .map(|media| media.size)
+            })
+            .sum()
+    }
+
+    fn execute_batch_delete(&mut self) {
+        let mut selected = self.library_selection.iter().cloned().collect::<Vec<_>>();
+        selected.sort_by(|left, right| {
+            left.folder
+                .cmp(&right.folder)
+                .then_with(|| left.file_name.cmp(&right.file_name))
+        });
+        for item in &selected {
+            if self.player_loaded_folder == item.folder
+                && self.player_loaded_file.as_deref() == Some(item.file_name.as_str())
+            {
+                self.stop_playback_session();
+            }
+            if item.folder == self.library_folder {
+                self.forget_thumbnail(&item.file_name);
+            }
+        }
+        match jobs::batch_recycle_media_files(&selected) {
+            Ok(report) => {
+                self.library_selection = report
+                    .items
+                    .iter()
+                    .filter(|item| !item.outcome.is_success())
+                    .map(|item| item.item.clone())
+                    .collect();
+                self.library_selection_mode = !self.library_selection.is_empty();
+                self.notify(
+                    if report.failed_count() == 0 {
+                        format!(
+                            "선택한 파일 {}개를 휴지통으로 보냈습니다.",
+                            report.succeeded_count()
+                        )
+                    } else {
+                        format!(
+                            "{}개 삭제, {}개 실패했습니다. 실패한 파일은 선택 상태로 남겼습니다.",
+                            report.succeeded_count(),
+                            report.failed_count()
+                        )
+                    },
+                    if report.failed_count() == 0 {
+                        NoticeTone::Info
+                    } else {
+                        NoticeTone::Error
+                    },
+                );
+            }
+            Err(error) => self.notify(
+                format!("선택 파일을 삭제하지 못했습니다: {error}"),
+                NoticeTone::Error,
+            ),
+        }
+        self.pending_batch_delete = false;
+        self.poll(true);
+    }
+
+    fn preview_library_organization(&mut self) {
+        match jobs::preview_library_organization() {
+            Ok(plan) if plan.is_empty() => {
+                self.notify("최상위에 자동 정리할 미디어가 없습니다.", NoticeTone::Info)
+            }
+            Ok(plan) => self.pending_organization = Some(plan),
+            Err(error) => self.notify(
+                format!("정리 계획을 만들지 못했습니다: {error}"),
+                NoticeTone::Error,
+            ),
+        }
+    }
+
+    fn apply_library_organization(&mut self) {
+        let Some(plan) = self.pending_organization.take() else {
+            return;
+        };
+        let report = jobs::apply_library_organization(&plan);
+        let succeeded = report.succeeded_count();
+        let failed = report.failed_count();
+        if !report.journal.is_empty() {
+            self.organization_journal = Some(report.journal);
+        }
+        self.clear_thumbnail_cache();
+        self.clear_library_selection();
+        self.poll(true);
+        self.notify(
+            if failed == 0 {
+                format!("미디어 {succeeded}개를 자동 정리했습니다.")
+            } else {
+                format!(
+                    "{succeeded}개 정리, {failed}개 실패했습니다. 성공한 이동은 실행 취소할 수 있습니다."
+                )
+            },
+            if failed == 0 {
+                NoticeTone::Info
+            } else {
+                NoticeTone::Error
+            },
+        );
+    }
+
+    fn undo_library_organization(&mut self) {
+        let Some(journal) = self.organization_journal.take() else {
+            return;
+        };
+        let report = jobs::reverse_library_organization(&journal);
+        let succeeded = report.succeeded_count();
+        let failed = report.failed_count();
+        if !report.remaining.is_empty() {
+            self.organization_journal = Some(report.remaining);
+        }
+        self.clear_thumbnail_cache();
+        self.poll(true);
+        self.notify(
+            if failed == 0 {
+                format!("자동 정리 이동 {succeeded}개를 되돌렸습니다.")
+            } else {
+                format!(
+                    "{succeeded}개 복원, {failed}개 실패했습니다. 실패한 이동은 다시 실행 취소할 수 있습니다."
+                )
+            },
+            if failed == 0 {
+                NoticeTone::Info
+            } else {
+                NoticeTone::Error
+            },
+        );
+    }
+
+    fn library_batch_delete_modal(&mut self, ui: &mut egui::Ui) {
+        if !self.pending_batch_delete || self.pending_delete.is_some() {
+            return;
+        }
+        let count = self.library_selection.len();
+        if count == 0 {
+            self.pending_batch_delete = false;
+            return;
+        }
+        let size = model::media_usage_label(self.selected_library_size());
+        let mut confirmed = false;
+        let mut cancelled = false;
+        let modal = egui::Modal::new(egui::Id::new("library-batch-delete-confirm")).show(
+            ui.ctx(),
+            |ui| {
+                ui.set_width(380.0);
+                ui.spacing_mut().item_spacing = Vec2::new(space::X12, space::X16);
+                ui.label(
+                    RichText::new("선택 파일 삭제")
+                        .size(text::HEADING_SM)
+                        .strong()
+                        .color(color::TEXT_PRIMARY),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "선택한 파일 {count}개({size})를 휴지통으로 보낼까요? 휴지통에서 복원할 수 있습니다."
+                    ))
+                    .size(text::BODY_MD)
+                    .color(color::TEXT_SECONDARY),
+                );
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if button(ui, "삭제", ButtonStyle::Danger, true).clicked() {
+                            confirmed = true;
+                        }
+                        if button(ui, "취소", ButtonStyle::Secondary, true).clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            },
+        );
+        if modal.backdrop_response.clicked() {
+            cancelled = true;
+        }
+        if confirmed {
+            self.execute_batch_delete();
+        } else if cancelled {
+            self.pending_batch_delete = false;
+        }
+    }
+
+    fn library_organization_modal(&mut self, ui: &mut egui::Ui) {
+        let Some(plan) = self.pending_organization.as_ref() else {
+            return;
+        };
+        let items = plan.items().to_vec();
+        let mut apply = false;
+        let mut cancelled = false;
+        let modal =
+            egui::Modal::new(egui::Id::new("library-organization-preview")).show(ui.ctx(), |ui| {
+                ui.set_width(540.0);
+                ui.spacing_mut().item_spacing = Vec2::new(space::X8, space::X12);
+                ui.label(
+                    RichText::new("자동 정리 미리보기")
+                        .size(text::HEADING_SM)
+                        .strong()
+                        .color(color::TEXT_PRIMARY),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "최상위 미디어 {}개를 확장자에 따라 Videos 또는 Audio 폴더로 이동합니다.",
+                        items.len()
+                    ))
+                    .size(text::BODY_MD)
+                    .color(color::TEXT_SECONDARY),
+                );
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for item in &items {
+                            egui::Frame::new()
+                                .fill(color::BG_SUBTLE)
+                                .corner_radius(corner(radius::MD))
+                                .inner_margin(margin_xy(12.0, 9.0))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&item.source.file_name)
+                                                .size(text::BODY_MD)
+                                                .color(color::TEXT_PRIMARY),
+                                        )
+                                        .truncate(),
+                                    );
+                                    let destination =
+                                        item.destination.folder.as_deref().map_or_else(
+                                            || item.destination.file_name.clone(),
+                                            |folder| {
+                                                format!("{folder}\\{}", item.destination.file_name)
+                                            },
+                                        );
+                                    ui.label(
+                                        RichText::new(format!("→ {destination}"))
+                                            .size(text::BODY_SM)
+                                            .color(color::TEXT_MUTED),
+                                    );
+                                });
+                        }
+                    });
+                ui.label(
+                    RichText::new("적용 후 이 앱 세션에서 한 번에 실행 취소할 수 있습니다.")
+                        .size(text::BODY_SM)
+                        .color(color::TEXT_MUTED),
+                );
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if button(ui, "정리 적용", ButtonStyle::Primary, !items.is_empty())
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                        if button(ui, "취소", ButtonStyle::Secondary, true).clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            });
+        if modal.backdrop_response.clicked() {
+            cancelled = true;
+        }
+        if apply {
+            self.apply_library_organization();
+        } else if cancelled {
+            self.pending_organization = None;
+        }
+    }
+
     /// Stops playback when the file being changed is the one currently loaded.
     fn release_if_playing(&mut self, file_name: &str) {
         if self.player_loaded_file.as_deref() == Some(file_name)
             && self.player_loaded_folder == self.library_folder
         {
-            let _ = self.player.send(PlayerCommand::Stop);
-            self.seek_preview.media_changed();
-            self.player_loaded_file = None;
-            self.player_loaded_folder = None;
-            self.player_media = None;
-            self.pending_resume_position = None;
+            self.stop_playback_session();
         }
+    }
+
+    /// Ends playback and releases every app-owned reference to the active file.
+    /// PiP close uses this path too: closing a playing surface must not leave an
+    /// invisible mpv session running in the background.
+    fn stop_playback_session(&mut self) {
+        self.save_playback_state(true);
+        let _ = self.player.send(PlayerCommand::Stop);
+        self.seek_preview.media_changed();
+        self.player_loaded_file = None;
+        self.player_loaded_folder = None;
+        self.player_media = None;
+        self.pending_resume_position = None;
+        self.pip_armed = false;
+        self.pip_dismissed = true;
+        self.pip_move_start = None;
+        self.pip_resize_drag = None;
     }
 
     fn create_library_folder(&mut self, name: &str) {
@@ -967,33 +1549,82 @@ impl ManagerApp {
         ui.spacing_mut().item_spacing = Vec2::new(0.0, space::X4);
 
         ui.add_space(space::X4);
+        // The title block's real height depends on the installed Korean UI font,
+        // so it is measured rather than assumed. Both blocks are then placed
+        // against one shared row height instead of relying on cross-alignment.
+        let title_block_height = brand_title_block_height(ui);
+        let row_height = brand_row_height(BRAND_LOGO_SIZE, title_block_height);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = space::X8;
-            ui.add(
-                egui::Image::new(egui::include_image!("../assets/segma-mark.png"))
-                    .fit_to_exact_size(Vec2::splat(32.0))
-                    .sense(egui::Sense::hover()),
+            ui.allocate_ui_with_layout(
+                Vec2::new(BRAND_LOGO_SIZE, row_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.add_space(brand_logo_offset(BRAND_LOGO_SIZE, title_block_height));
+                    ui.add(
+                        egui::Image::new(egui::include_image!("../assets/segma-mark.png"))
+                            .fit_to_exact_size(Vec2::splat(BRAND_LOGO_SIZE))
+                            .sense(egui::Sense::hover()),
+                    );
+                },
             );
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(
-                    RichText::new("SEGMA")
-                        .size(text::HEADING_SM)
-                        .strong()
-                        .color(color::TEXT_PRIMARY),
-                );
-                ui.label(
-                    RichText::new("PLAYER")
-                        .size(text::LABEL_SM)
-                        .strong()
-                        .color(color::TEXT_SECONDARY),
-                );
-            });
+            let title_width = ui.available_width();
+            ui.allocate_ui_with_layout(
+                Vec2::new(title_width, row_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.add_space(brand_title_offset(BRAND_LOGO_SIZE, title_block_height));
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let origin = ui.cursor().min;
+                    // Both lines are painted on their letterforms, so the only
+                    // separation is one explicit optical gap. Nothing here goes
+                    // through a Label, whose line box would reintroduce the
+                    // font's ascent/descent between the two lines.
+                    let segma = paint_brand_title_line(
+                        ui,
+                        origin,
+                        "SEGMA",
+                        text::HEADING_SM,
+                        color::TEXT_PRIMARY,
+                    );
+                    let second_origin =
+                        egui::Pos2::new(origin.x, segma.ink.bottom() + BRAND_TITLE_LINE_GAP);
+                    let player = paint_brand_title_line(
+                        ui,
+                        second_origin,
+                        "PLAYER",
+                        text::LABEL_SM,
+                        color::TEXT_SECONDARY,
+                    );
+                    let badge = if self.license.pro { "PRO" } else { "일반" };
+                    // The badge shares PLAYER's baseline instead of its own ink
+                    // top: Hangul rises above Latin caps, so ink-aligning it
+                    // would visibly drop the badge.
+                    paint_brand_title_run(
+                        ui,
+                        egui::Pos2::new(player.ink.right() + space::X4, player.box_top),
+                        badge,
+                        text::LABEL_SM,
+                        if self.license.pro {
+                            color::ACCENT
+                        } else {
+                            color::TEXT_MUTED
+                        },
+                    );
+                    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                        origin,
+                        egui::Vec2::new(ui.available_width(), title_block_height),
+                    ));
+                },
+            );
         });
         ui.add_space(space::X16);
 
         for view in View::ALL {
             if nav_item(ui, view.label(), self.view == view).clicked() {
+                if view == View::Player {
+                    self.pip_dismissed = false;
+                }
                 self.view = view;
             }
         }
@@ -1027,7 +1658,11 @@ impl ManagerApp {
                     .unwrap_or_else(|| "용량 확인 불가".to_string());
                 (path, usage, Tone::Neutral)
             }
-            Some(error) => ("작업 폴더를 읽지 못함".to_string(), error.clone(), Tone::Danger),
+            Some(error) => (
+                "작업 폴더를 읽지 못함".to_string(),
+                error.clone(),
+                Tone::Danger,
+            ),
         };
 
         egui::Frame::new()
@@ -1060,34 +1695,39 @@ impl ManagerApp {
         &mut self,
         ui: &mut egui::Ui,
         summary: String,
-        actions: &[(Icon, &str, ButtonStyle)],
+        actions: &[(Icon, &str)],
     ) -> Option<usize> {
         let mut clicked = None;
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = space::X4;
-                ui.label(
-                    RichText::new(self.view.title())
-                        .size(text::HEADING_LG)
-                        .strong()
-                        .color(color::TEXT_PRIMARY),
-                );
-                if !summary.is_empty() {
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), player_ui::PAGE_HEADER_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Min),
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = space::X4;
                     ui.label(
-                        RichText::new(summary)
-                            .size(text::BODY_MD)
-                            .color(color::TEXT_MUTED),
+                        RichText::new(self.view.title())
+                            .size(text::HEADING_LG)
+                            .strong()
+                            .color(color::TEXT_PRIMARY),
                     );
-                }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                for (index, (icon, label, style)) in actions.iter().enumerate().rev() {
-                    if icon_button(ui, *icon, label, *style, true).clicked() {
-                        clicked = Some(index);
+                    if !summary.is_empty() {
+                        ui.label(
+                            RichText::new(summary)
+                                .size(text::BODY_MD)
+                                .color(color::TEXT_MUTED),
+                        );
                     }
-                }
-            });
-        });
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.x = space::X8;
+                    for (index, (icon, label)) in actions.iter().enumerate().rev() {
+                        if player_ui::header_action(ui, *icon, label).clicked() {
+                            clicked = Some(index);
+                        }
+                    }
+                });
+            },
+        );
         clicked
     }
 
@@ -1131,13 +1771,13 @@ impl ManagerApp {
             ui,
             summary,
             &[
-                (Icon::Retry, "새로 고침", ButtonStyle::Secondary),
-                (Icon::FolderOpen, "폴더 열기", ButtonStyle::Primary),
+                (Icon::Retry, "새로 고침"),
+                (Icon::FolderOpen, "다운로드 폴더 변경"),
             ],
         );
         match clicked {
             Some(0) => self.poll(true),
-            Some(1) => self.open_folder(),
+            Some(1) => self.choose_folder(),
             _ => {}
         }
 
@@ -1257,75 +1897,134 @@ impl ManagerApp {
         };
 
         let mut refresh = false;
-        let mut open_folder = false;
+        let mut choose_download_folder = false;
         let mut new_folder = false;
         let mut leave_folder = false;
+        let mut toggle_selection_mode = false;
+        let mut organize = false;
+        let mut undo_organization = false;
 
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = space::X4;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = space::X8;
-                    if let Some(folder) = self.library_folder.clone() {
-                        if icon_button(ui, Icon::Back, "보관함 최상위", ButtonStyle::Quiet, true)
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), player_ui::PAGE_HEADER_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Min),
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = space::X4;
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = space::X8;
+                        if let Some(folder) = self.library_folder.clone() {
+                            if icon_button(
+                                ui,
+                                Icon::Back,
+                                "보관함 최상위",
+                                ButtonStyle::Quiet,
+                                true,
+                            )
                             .clicked()
-                        {
-                            leave_folder = true;
+                            {
+                                leave_folder = true;
+                            }
+                            ui.label(
+                                RichText::new(folder)
+                                    .size(text::HEADING_LG)
+                                    .strong()
+                                    .color(color::TEXT_PRIMARY),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(self.view.title())
+                                    .size(text::HEADING_LG)
+                                    .strong()
+                                    .color(color::TEXT_PRIMARY),
+                            );
                         }
-                        ui.label(
-                            RichText::new(folder)
-                                .size(text::HEADING_LG)
-                                .strong()
-                                .color(color::TEXT_PRIMARY),
-                        );
+                    });
+                    let summary = if missing > 0 {
+                        format!("파일 {}건 · 없는 완료 작업 {missing}건", entries.len())
                     } else {
-                        ui.label(
-                            RichText::new(self.view.title())
-                                .size(text::HEADING_LG)
-                                .strong()
-                                .color(color::TEXT_PRIMARY),
-                        );
+                        format!("파일 {}건", entries.len())
+                    };
+                    ui.label(
+                        RichText::new(summary)
+                            .size(text::BODY_MD)
+                            .color(color::TEXT_MUTED),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.x = space::X8;
+                    if player_ui::header_action(ui, Icon::FolderOpen, "다운로드 폴더 변경")
+                        .clicked()
+                    {
+                        choose_download_folder = true;
+                    }
+                    if player_ui::header_action(ui, Icon::Retry, "새로 고침").clicked() {
+                        refresh = true;
+                    }
+                    if self.library_folder.is_none()
+                        && player_ui::header_action(ui, Icon::FolderPlus, "새 폴더").clicked()
+                    {
+                        new_folder = true;
+                    }
+                    if player_ui::header_action(
+                        ui,
+                        Icon::Trash,
+                        if self.library_selection_mode {
+                            "선택 종료"
+                        } else {
+                            "파일 선택"
+                        },
+                    )
+                    .clicked()
+                    {
+                        toggle_selection_mode = true;
                     }
                 });
-                let summary = if missing > 0 {
-                    format!("파일 {}건 · 없는 완료 작업 {missing}건", entries.len())
-                } else {
-                    format!("파일 {}건", entries.len())
-                };
-                ui.label(
-                    RichText::new(summary)
-                        .size(text::BODY_MD)
-                        .color(color::TEXT_MUTED),
-                );
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = space::X8;
-                if icon_button(
-                    ui,
-                    Icon::FolderOpen,
-                    "폴더 열기",
-                    ButtonStyle::Secondary,
-                    true,
-                )
-                .clicked()
-                {
-                    open_folder = true;
-                }
-                if icon_button(ui, Icon::Retry, "새로 고침", ButtonStyle::Quiet, true).clicked()
-                {
-                    refresh = true;
-                }
-                if self.library_folder.is_none()
-                    && icon_button(ui, Icon::FolderPlus, "새 폴더", ButtonStyle::Quiet, true)
-                        .clicked()
-                {
-                    new_folder = true;
-                }
-            });
-        });
+            },
+        );
 
         search_field(ui, &mut self.search);
         self.library_controls(ui);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(space::X8, space::X4);
+            if self.library_selection_mode {
+                let selected = self.library_selection.len();
+                let size = model::media_usage_label(self.selected_library_size());
+                ui.label(
+                    RichText::new(format!("{selected}개 선택 · {size}"))
+                        .size(text::BODY_MD)
+                        .strong()
+                        .color(color::TEXT_PRIMARY),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.organization_journal.is_some()
+                    && button(ui, "정리 실행 취소", ButtonStyle::Secondary, true).clicked()
+                {
+                    undo_organization = true;
+                }
+                if self.library_folder.is_none()
+                    && button(ui, "자동 정리", ButtonStyle::Secondary, true).clicked()
+                {
+                    organize = true;
+                }
+                if self.library_selection_mode {
+                    if button(
+                        ui,
+                        "선택 삭제",
+                        ButtonStyle::Danger,
+                        !self.library_selection.is_empty(),
+                    )
+                    .clicked()
+                    {
+                        self.pending_batch_delete = true;
+                    }
+                    if button(ui, "선택 해제", ButtonStyle::Quiet, true).clicked() {
+                        self.clear_library_selection();
+                    }
+                }
+            });
+        });
 
         if missing > 0 {
             // A completed job whose file left the folder is explained rather
@@ -1340,12 +2039,30 @@ impl ManagerApp {
         let mut enter_folder = None;
         let mut rename_folder = None;
         let mut drop_destination: Option<Option<String>> = None;
+        let now = ui.input(|input| input.time);
+        // A finished settle animation is dropped here, so the library keeps no
+        // lingering "last dropped folder" highlight between frames.
+        if !expire_drop_settle(&mut self.library_drop_settle, now)
+            && self.library_drop_settle.is_some()
+        {
+            ui.ctx().request_repaint();
+        }
+        let dragging_file = self.dragged_library_file.is_some();
+        let settle = self.library_drop_settle.clone();
         if !self.library_folders.is_empty() || self.library_folder.is_some() {
             let folders = self.library_folders.clone();
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(space::X8, space::X8);
                 if self.library_folder.is_some() {
-                    let response = folder_chip(ui, "최상위", None);
+                    let response = folder_chip(
+                        ui,
+                        "최상위",
+                        None,
+                        FolderDropHint {
+                            dragging: dragging_file,
+                            settle: drop_settle_progress_for(&settle, None, now),
+                        },
+                    );
                     if response.clicked() {
                         leave_folder = true;
                     }
@@ -1360,7 +2077,19 @@ impl ManagerApp {
                     if self.library_folder.as_deref() == Some(folder.name.as_str()) {
                         continue;
                     }
-                    let response = folder_chip(ui, &folder.name, Some(folder.media_count));
+                    let response = folder_chip(
+                        ui,
+                        &folder.name,
+                        Some(folder.media_count),
+                        FolderDropHint {
+                            dragging: dragging_file,
+                            settle: drop_settle_progress_for(
+                                &settle,
+                                Some(folder.name.as_str()),
+                                now,
+                            ),
+                        },
+                    );
                     if response.clicked() {
                         enter_folder = Some(folder.name.clone());
                     }
@@ -1423,6 +2152,35 @@ impl ManagerApp {
             }
         });
 
+        let select_all_pressed = self.library_selection_mode
+            && !ui.ctx().text_edit_focused()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::A));
+        if select_all_pressed {
+            self.select_visible_library_items(filtered.iter().copied());
+        }
+        let keyboard_actions_available = !ui.ctx().text_edit_focused()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && self.pending_delete.is_none()
+            && !self.pending_batch_delete
+            && self.pending_organization.is_none()
+            && self.pending_move.is_none()
+            && self.pending_folder_name.is_none()
+            && self.pending_folder_rename.is_none();
+        let escape_pressed = self.library_selection_mode
+            && keyboard_actions_available
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if escape_pressed {
+            self.clear_library_selection();
+        }
+        let delete_pressed = self.library_selection_mode
+            && !self.library_selection.is_empty()
+            && keyboard_actions_available
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
+        if delete_pressed {
+            self.pending_batch_delete = true;
+        }
+
         let mut play_target = None;
         let mut subtitle_target = None;
         let mut reveal_target = None;
@@ -1476,20 +2234,65 @@ impl ManagerApp {
                                     self.thumbnail_textures.get(&entry.thumbnail_key),
                                     &entry.type_label,
                                     tile_width,
+                                )
+                                .on_hover_text(
+                                    if self.library_selection_mode {
+                                        "선택 전환"
+                                    } else {
+                                        "재생"
+                                    },
                                 );
                                 if response.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
                                 if response.clicked() {
-                                    play_target = Some(entry.file_name.clone());
+                                    if self.library_selection_mode {
+                                        self.toggle_library_selection(&entry.file_name);
+                                    } else {
+                                        play_target = Some(entry.file_name.clone());
+                                    }
                                 }
-                                let drag = ui.interact(
-                                    response.rect,
-                                    response.id.with("library-drag"),
-                                    egui::Sense::drag(),
-                                );
-                                if drag.drag_started() {
+                                if !self.library_selection_mode && response.drag_started() {
                                     self.dragged_library_file = Some(entry.file_name.clone());
+                                }
+                                // Motion only: painted over the existing rect so
+                                // the grid never reflows while dragging.
+                                let lifted = self.dragged_library_file.as_deref()
+                                    == Some(entry.file_name.as_str());
+                                let lift = ui.ctx().animate_bool_with_time(
+                                    response.id.with("library-drag-lift"),
+                                    lifted,
+                                    crate::widgets::DRAG_LIFT_MOTION_TIME,
+                                );
+                                crate::widgets::paint_drag_lift(ui, response.rect, lift);
+                                if self.selection_contains(&entry.file_name) {
+                                    ui.painter().rect_filled(
+                                        response.rect,
+                                        corner(radius::LG),
+                                        color::ACCENT.gamma_multiply(0.18),
+                                    );
+                                    ui.painter().rect_stroke(
+                                        response.rect,
+                                        corner(radius::LG),
+                                        egui::Stroke::new(3.0, color::ACCENT),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    let badge = egui::Rect::from_center_size(
+                                        response.rect.right_top() + Vec2::new(-18.0, 18.0),
+                                        Vec2::splat(24.0),
+                                    );
+                                    ui.painter().circle_filled(
+                                        badge.center(),
+                                        badge.width() / 2.0,
+                                        color::ACCENT,
+                                    );
+                                    ui.painter().text(
+                                        badge.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "✓",
+                                        egui::FontId::proportional(text::LABEL_MD),
+                                        color::TEXT_INVERSE,
+                                    );
                                 }
 
                                 // The menu belongs on the title row, right-aligned,
@@ -1637,18 +2440,33 @@ impl ManagerApp {
         if refresh {
             self.poll(true);
         }
-        if open_folder {
-            self.open_library_folder(self.library_folder.clone());
+        if toggle_selection_mode {
+            if self.library_selection_mode {
+                self.clear_library_selection();
+            } else {
+                self.library_selection_mode = true;
+            }
+        }
+        if organize {
+            self.preview_library_organization();
+        }
+        if undo_organization {
+            self.undo_library_organization();
+        }
+        if choose_download_folder {
+            self.choose_folder();
         }
         if new_folder {
             self.pending_folder_name = Some(String::new());
         }
         if leave_folder {
             self.library_folder = None;
+            self.retain_current_folder_selection();
             self.poll(true);
         }
         if let Some(folder) = enter_folder {
             self.library_folder = Some(folder);
+            self.retain_current_folder_selection();
             self.poll(true);
         }
         if let Some(folder) = rename_folder {
@@ -1656,6 +2474,8 @@ impl ManagerApp {
         }
         if let Some(destination) = drop_destination {
             if let Some(file_name) = self.dragged_library_file.take() {
+                self.library_drop_settle =
+                    Some((destination.clone(), now + crate::widgets::DROP_SETTLE_TIME));
                 self.move_library_file(&file_name, destination.as_deref());
             }
         } else if ui.input(|input| input.pointer.any_released()) {
@@ -1674,7 +2494,9 @@ impl ManagerApp {
             self.pending_move = Some(file_name);
         }
         if let Some(file_name) = delete_target {
-            self.pending_delete = Some(file_name);
+            if !self.pending_batch_delete {
+                self.pending_delete = Some(file_name);
+            }
         }
         if let Some(file_name) = favorite_target {
             if let Some(media) = self
@@ -1711,12 +2533,256 @@ impl ManagerApp {
             }
         }
         self.library_delete_modal(ui);
+        self.library_batch_delete_modal(ui);
+        self.library_organization_modal(ui);
         self.library_move_modal(ui);
         self.library_folder_modal(ui);
         self.library_folder_rename_modal(ui);
     }
 
+    fn pip_surface(&mut self, context: &egui::Context) -> PhysicalVideoRect {
+        let snapshot = self.player.snapshot();
+        if !pip_is_active(&snapshot) || self.pip_dismissed {
+            self.seek_preview.hide();
+            self.pip_move_start = None;
+            self.pip_resize_drag = None;
+            return PhysicalVideoRect::default();
+        }
+
+        let mut overlay_output = player_ui::PlayerUiOutput::default();
+        let mut physical_video_rect = PhysicalVideoRect::default();
+        let pip_width = self.pip_width;
+        let video_size = Vec2::new(pip_width, pip_width * 9.0 / 16.0);
+        let preview_open = self.seek_preview.hover_active();
+        let preview_row_height = if preview_open {
+            MINI_PLAYER_PREVIEW_HEIGHT + MINI_PLAYER_PREVIEW_ROW_PADDING * 2.0
+        } else {
+            0.0
+        };
+        let surface_size = Vec2::new(
+            pip_width + MINI_PLAYER_RESIZE_GUTTER * 2.0,
+            MINI_PLAYER_RESIZE_GUTTER * 2.0
+                + MINI_PLAYER_DRAG_HEIGHT
+                + video_size.y
+                + MINI_PLAYER_CONTROLS_HEIGHT
+                + preview_row_height,
+        );
+        let preview_visual = self
+            .seek_preview
+            .visual()
+            .map(|visual| (visual.texture.clone(), visual.timecode.to_owned()));
+
+        // The native mpv child owns only the inset video rectangle. The drag
+        // strip, controls, preview, and every resize handle stay in egui-owned
+        // pixels, so a topmost child HWND cannot steal their pointer events.
+        let mut area = egui::Area::new(egui::Id::new("segma-pip-surface"))
+            .order(egui::Order::Foreground)
+            .movable(false)
+            .constrain_to(context.content_rect());
+        area = if let Some(position) = self.pip_position {
+            area.current_pos(position)
+        } else {
+            area.default_pos(
+                context.content_rect().right_bottom()
+                    - Vec2::new(
+                        surface_size.x + MINI_PLAYER_MARGIN,
+                        surface_size.y + MINI_PLAYER_MARGIN,
+                    ),
+            )
+        };
+        let mut next_width = None;
+        let mut next_position = None;
+        let mut dragged_position = None;
+        let mut resize_finished = false;
+        let shown = area.show(context, |ui| {
+            let (surface, _) = ui.allocate_exact_size(surface_size, egui::Sense::hover());
+            ui.painter()
+                .rect_filled(surface, corner(radius::MD), color::BG_INVERSE);
+            let content_left = surface.left() + MINI_PLAYER_RESIZE_GUTTER;
+            let content_top = surface.top() + MINI_PLAYER_RESIZE_GUTTER;
+            let drag_strip = egui::Rect::from_min_size(
+                egui::pos2(content_left, content_top),
+                Vec2::new(pip_width, MINI_PLAYER_DRAG_HEIGHT),
+            );
+            let drag_response = ui.interact(
+                drag_strip,
+                ui.id().with("pip-drag-strip"),
+                egui::Sense::drag(),
+            );
+            if drag_response.hovered() || drag_response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            if drag_response.drag_started() {
+                self.pip_move_start = Some(surface.min);
+            }
+            if drag_response.dragged() {
+                dragged_position =
+                    Some(self.pip_move_start.unwrap_or(surface.min) + drag_response.drag_delta());
+            }
+            if drag_response.drag_stopped() {
+                self.pip_move_start = None;
+            }
+            let grip = egui::Rect::from_center_size(drag_strip.center(), Vec2::new(38.0, 3.0));
+            ui.painter()
+                .rect_filled(grip, corner(radius::FULL), Color32::from_white_alpha(92));
+
+            let video = egui::Rect::from_min_size(
+                egui::pos2(content_left, drag_strip.bottom()),
+                video_size,
+            );
+            let controls = egui::Rect::from_min_max(
+                egui::Pos2::new(surface.left(), video.bottom()),
+                egui::Pos2::new(
+                    surface.right(),
+                    video.bottom() + MINI_PLAYER_CONTROLS_HEIGHT,
+                ),
+            );
+            let controls = controls.shrink2(Vec2::new(MINI_PLAYER_RESIZE_GUTTER, 0.0));
+            physical_video_rect = player_ui::physical_rect(ui, video);
+            player_ui::pip_controls(
+                ui,
+                controls,
+                &snapshot,
+                &mut overlay_output,
+                Vec2::new(MINI_PLAYER_PREVIEW_WIDTH, MINI_PLAYER_PREVIEW_HEIGHT),
+                Vec2::ZERO,
+            );
+            if preview_open {
+                let preview_width = MINI_PLAYER_PREVIEW_WIDTH;
+                let preview_size = Vec2::new(preview_width, MINI_PLAYER_PREVIEW_HEIGHT);
+                let preview_position = egui::Pos2::new(
+                    surface.center().x - preview_size.x / 2.0,
+                    controls.bottom() + MINI_PLAYER_PREVIEW_ROW_PADDING,
+                );
+                player_ui::paint_seek_preview(
+                    ui,
+                    preview_position,
+                    preview_size,
+                    preview_visual.as_ref().map(|(texture, _)| texture),
+                    preview_visual
+                        .as_ref()
+                        .map_or("00:00", |(_, timecode)| timecode.as_str()),
+                );
+            }
+            let gutter = MINI_PLAYER_RESIZE_GUTTER;
+            for edge in PipResizeEdge::ALL {
+                let handle_rect = match edge {
+                    PipResizeEdge::Left => egui::Rect::from_min_max(
+                        egui::pos2(surface.left(), surface.top() + gutter),
+                        egui::pos2(surface.left() + gutter, surface.bottom() - gutter),
+                    ),
+                    PipResizeEdge::Right => egui::Rect::from_min_max(
+                        egui::pos2(surface.right() - gutter, surface.top() + gutter),
+                        egui::pos2(surface.right(), surface.bottom() - gutter),
+                    ),
+                    PipResizeEdge::Top => egui::Rect::from_min_max(
+                        egui::pos2(surface.left() + gutter, surface.top()),
+                        egui::pos2(surface.right() - gutter, surface.top() + gutter),
+                    ),
+                    PipResizeEdge::Bottom => egui::Rect::from_min_max(
+                        egui::pos2(surface.left() + gutter, surface.bottom() - gutter),
+                        egui::pos2(surface.right() - gutter, surface.bottom()),
+                    ),
+                    PipResizeEdge::TopLeft => {
+                        egui::Rect::from_min_size(surface.left_top(), Vec2::splat(gutter))
+                    }
+                    PipResizeEdge::TopRight => egui::Rect::from_min_size(
+                        egui::pos2(surface.right() - gutter, surface.top()),
+                        Vec2::splat(gutter),
+                    ),
+                    PipResizeEdge::BottomLeft => egui::Rect::from_min_size(
+                        egui::pos2(surface.left(), surface.bottom() - gutter),
+                        Vec2::splat(gutter),
+                    ),
+                    PipResizeEdge::BottomRight => egui::Rect::from_min_size(
+                        surface.right_bottom() - Vec2::splat(gutter),
+                        Vec2::splat(gutter),
+                    ),
+                };
+                let response = ui.interact(
+                    handle_rect,
+                    ui.id().with(("pip-resize-handle", edge.id())),
+                    egui::Sense::drag(),
+                );
+                if response.hovered() || response.dragged() {
+                    ui.ctx().set_cursor_icon(edge.cursor());
+                }
+                if response.drag_started() {
+                    self.pip_resize_drag = Some(PipResizeDrag {
+                        edge,
+                        start_width: pip_width,
+                        start_position: surface.min,
+                    });
+                }
+                if response.dragged() {
+                    if let Some(drag) = self.pip_resize_drag.filter(|drag| drag.edge == edge) {
+                        let width = pip_resize_width(edge, drag.start_width, response.drag_delta());
+                        next_width = Some(width);
+                        next_position = Some(pip_resize_position(
+                            edge,
+                            drag.start_position,
+                            drag.start_width,
+                            width,
+                        ));
+                    }
+                }
+                if response.drag_stopped() {
+                    resize_finished = true;
+                }
+            }
+        });
+        if resize_finished {
+            self.pip_resize_drag = None;
+        }
+        self.pip_position = Some(
+            next_position
+                .or(dragged_position)
+                .unwrap_or(shown.response.rect.min),
+        );
+        if let Some(width) = next_width {
+            self.pip_width = width;
+        }
+
+        if let (Some(hover), Some(path)) =
+            (overlay_output.hover_preview, snapshot.loaded_path.as_ref())
+        {
+            let media_key = self
+                .player_loaded_file
+                .as_deref()
+                .and_then(|name| self.media_files.iter().find(|file| file.file_name == name))
+                .map(crate::thumbnails::key)
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            self.seek_preview.request(
+                context,
+                media_key,
+                PathBuf::from(path),
+                hover.target,
+                snapshot.duration,
+            );
+        } else {
+            self.seek_preview.hide();
+        }
+
+        if overlay_output.pip_close_requested {
+            self.stop_playback_session();
+        }
+        if overlay_output.fullscreen_requested {
+            clear_video_window_region(self.player_video_hwnd);
+            self.view = View::Player;
+            self.pip_dismissed = false;
+        }
+        if let Some(command) = overlay_output.command {
+            let _ = self.player.send(command);
+        }
+        if self.pip_dismissed {
+            PhysicalVideoRect::default()
+        } else {
+            physical_video_rect
+        }
+    }
+
     fn player_view(&mut self, ui: &mut egui::Ui) {
+        clear_video_window_region(self.player_video_hwnd);
         let snapshot = self.player.snapshot();
         if snapshot.loaded_path.is_some() && snapshot.duration > 0.0 {
             if let Some(position) = self.pending_resume_position.take() {
@@ -1744,15 +2810,21 @@ impl ManagerApp {
                 pose_markers: &pose_markers,
                 fullscreen: self.fullscreen,
                 shortcuts: self.player_shortcuts,
+                pro: self.license.pro,
             },
         );
 
         layout_video_window(self.player_video_hwnd, output.physical_video_rect, true);
+        if output.physical_video_rect.visible() {
+            self.last_player_video_rect = output.physical_video_rect;
+            self.last_player_video_logical_rect = output.logical_video_rect;
+        }
         if let Some(command) = output.command {
             if matches!(&command, PlayerCommand::Stop) {
-                self.save_playback_state(true);
+                self.stop_playback_session();
+            } else {
+                let _ = self.player.send(command);
             }
-            let _ = self.player.send(command);
         }
 
         if output.gif_requested {
@@ -1814,13 +2886,6 @@ impl ManagerApp {
         }
 
         if let (Some(hover), Some(path)) = (output.hover_preview, snapshot.loaded_path.as_ref()) {
-            let scale = ui.ctx().pixels_per_point();
-            let overlay = PhysicalVideoRect {
-                x: (hover.placement.x * scale).round() as i32,
-                y: (hover.placement.y * scale).round() as i32,
-                width: (192.0 * scale).round() as i32,
-                height: (136.0 * scale).round() as i32,
-            };
             let media_key = self
                 .player_loaded_file
                 .as_deref()
@@ -1828,27 +2893,32 @@ impl ManagerApp {
                 .map(crate::thumbnails::key)
                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
             self.seek_preview.request(
+                ui.ctx(),
                 media_key,
                 PathBuf::from(path),
                 hover.target,
                 snapshot.duration,
-                self.player_parent_hwnd,
-                overlay,
+            );
+            let visual = self.seek_preview.visual();
+            let placement = egui::Pos2::new(
+                hover.placement.x,
+                output.logical_video_rect.bottom() + space::X8,
+            );
+            player_ui::paint_seek_preview(
+                ui,
+                placement,
+                hover.size,
+                visual.map(|visual| visual.texture),
+                visual.map_or("00:00", |visual| visual.timecode),
             );
         } else {
             self.seek_preview.hide();
         }
-        self.seek_preview.poll();
     }
 
     fn subtitles_view(&mut self, ui: &mut egui::Ui) {
         let summary = subtitle_summary(&self.jobs);
-        if self.header(
-            ui,
-            summary,
-            &[(Icon::Retry, "새로 고침", ButtonStyle::Secondary)],
-        ) == Some(0)
-        {
+        if self.header(ui, summary, &[(Icon::Retry, "새로 고침")]) == Some(0) {
             self.poll(true);
         }
 
@@ -1878,6 +2948,139 @@ impl ManagerApp {
             self.open_folder();
         }
         ui.set_width(ui.available_width().min(760.0));
+
+        let mut activate_license = false;
+        let mut refresh_license = false;
+        let mut remove_license = false;
+        let license = self.license.clone();
+        let checking = self.license_checking;
+        Self::setting_group(ui, "이용 플랜", |ui| {
+            egui::Frame::new()
+                .fill(if license.pro {
+                    color::BG_WARNING
+                } else {
+                    color::BG_SURFACE
+                })
+                .stroke(hairline(if license.pro {
+                    color::ACCENT
+                } else {
+                    color::BORDER_SUBTLE
+                }))
+                .corner_radius(corner(radius::MD))
+                .inner_margin(margin_xy(16.0, 14.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(if license.pro { "PRO" } else { "일반" })
+                                .strong()
+                                .size(text::BODY_MD)
+                                .color(if license.pro {
+                                    color::ACCENT
+                                } else {
+                                    color::TEXT_PRIMARY
+                                }),
+                        );
+                        ui.label(
+                            RichText::new(if license.pro {
+                                "AI 자막 생성을 사용할 수 있습니다."
+                            } else {
+                                "다운로드·재생·보관함은 무료로 사용할 수 있습니다."
+                            })
+                            .size(text::BODY_MD)
+                            .color(color::TEXT_SECONDARY),
+                        );
+                    });
+                    ui.add_space(space::X10);
+                    if license.pro {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(license.masked_key())
+                                    .monospace()
+                                    .color(color::TEXT_PRIMARY),
+                            );
+                            if let (Some(devices), Some(limit)) = (license.devices, license.limit) {
+                                ui.label(
+                                    RichText::new(format!("기기 {devices}/{limit}"))
+                                        .color(color::TEXT_SECONDARY),
+                                );
+                            }
+                            if let Some(days) = license.days_remaining() {
+                                ui.label(
+                                    RichText::new(format!("{days}일 남음"))
+                                        .color(color::TEXT_SECONDARY),
+                                );
+                            }
+                        });
+                        ui.add_space(space::X8);
+                        ui.horizontal(|ui| {
+                            if button(
+                                ui,
+                                if checking {
+                                    "확인 중…"
+                                } else {
+                                    "인증 다시 확인"
+                                },
+                                ButtonStyle::Secondary,
+                                !checking,
+                            )
+                            .clicked()
+                            {
+                                refresh_license = true;
+                            }
+                            if button(ui, "인증 해제", ButtonStyle::Quiet, !checking).clicked()
+                            {
+                                remove_license = true;
+                            }
+                        });
+                    } else {
+                        ui.label(
+                            RichText::new("Pro: AI 자막 생성")
+                                .size(text::BODY_SM)
+                                .color(color::TEXT_SECONDARY),
+                        );
+                        ui.add_space(space::X8);
+                        ui.horizontal(|ui| {
+                            let response = ui.add_enabled(
+                                !checking,
+                                egui::TextEdit::singleline(&mut self.license_key_input)
+                                    .password(true)
+                                    .hint_text("AM-…")
+                                    .desired_width(360.0),
+                            );
+                            if self.license_focus_requested {
+                                response.request_focus();
+                                self.license_focus_requested = false;
+                            }
+                            let enter = response.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                            if button(
+                                ui,
+                                if checking {
+                                    "확인 중…"
+                                } else {
+                                    "Pro 인증"
+                                },
+                                ButtonStyle::Primary,
+                                !checking && !self.license_key_input.trim().is_empty(),
+                            )
+                            .clicked()
+                                || enter
+                            {
+                                activate_license = true;
+                            }
+                        });
+                    }
+                });
+        });
+        if activate_license {
+            self.verify_license(self.license_key_input.clone());
+        }
+        if refresh_license {
+            self.verify_license(self.license.key.clone());
+        }
+        if remove_license {
+            self.remove_license();
+        }
 
         let folder = self
             .downloads_folder
@@ -2052,7 +3255,7 @@ impl ManagerApp {
 
 impl eframe::App for ManagerApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        Color32::TRANSPARENT.to_normalized_gamma_f32()
+        native_clear_color()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -2072,14 +3275,12 @@ impl eframe::App for ManagerApp {
             }
         }
         self.poll(false);
+        self.poll_license_result();
         self.poll_gif_export();
         self.save_playback_state(false);
         self.sync_thumbnails(&context);
+        self.seek_preview.poll(&context);
         self.expire_notice();
-        if self.view != View::Player {
-            layout_video_window(self.player_video_hwnd, PhysicalVideoRect::default(), false);
-            self.seek_preview.hide();
-        }
         // Job state lives on disk and changes without user input, so the window
         // has to wake on its own rather than only on events.
         context.request_repaint_after(POLL_INTERVAL);
@@ -2104,7 +3305,12 @@ impl eframe::App for ManagerApp {
             } else {
                 egui::Frame::new()
                     .fill(color::BG_CANVAS)
-                    .inner_margin(margin_xy(space::X28, space::X24))
+                    .inner_margin(egui::Margin {
+                        left: space::X28 as i8,
+                        right: 0,
+                        top: space::X24 as i8,
+                        bottom: space::X24 as i8,
+                    })
             })
             .show(ui, |ui| {
                 if fullscreen_player {
@@ -2114,18 +3320,48 @@ impl eframe::App for ManagerApp {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(space::X12, space::X16);
-                            self.notice_bar(ui);
-                            match self.view {
-                                View::Queue => self.queue_view(ui),
-                                View::Library => self.library_view(ui),
-                                View::Player => self.player_view(ui),
-                                View::Subtitles => self.subtitles_view(ui),
-                                View::Settings => self.settings_view(ui),
-                            }
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin {
+                                    left: 0,
+                                    right: space::X28 as i8,
+                                    top: 0,
+                                    bottom: 0,
+                                })
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.spacing_mut().item_spacing =
+                                        Vec2::new(space::X12, space::X16);
+                                    self.notice_bar(ui);
+                                    match self.view {
+                                        View::Queue => self.queue_view(ui),
+                                        View::Library => self.library_view(ui),
+                                        View::Player => self.player_view(ui),
+                                        View::Subtitles => self.subtitles_view(ui),
+                                        View::Settings => self.settings_view(ui),
+                                    }
+                                });
                         });
                 }
             });
+        let snapshot = self.player.snapshot();
+        let session = next_pip_session(
+            PipSession {
+                armed: self.pip_armed,
+                dismissed: self.pip_dismissed,
+            },
+            self.view,
+            pip_is_active(&snapshot),
+        );
+        self.pip_armed = session.armed;
+        self.pip_dismissed = session.dismissed;
+        if pip_should_show(&snapshot, self.view, session.armed, session.dismissed) {
+            let pip_rect = self.pip_surface(&context);
+            layout_video_window(self.player_video_hwnd, pip_rect, pip_rect.visible());
+        } else if self.view != View::Player {
+            self.seek_preview.hide();
+            clear_video_window_region(self.player_video_hwnd);
+            layout_video_window(self.player_video_hwnd, PhysicalVideoRect::default(), false);
+        }
     }
 }
 
@@ -2178,7 +3414,7 @@ fn create_video_window(_parent: isize) -> Result<isize, ()> {
 fn layout_video_window(window: isize, rect: PhysicalVideoRect, visible: bool) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
+        SetWindowPos, ShowWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SW_HIDE, SW_SHOWNA,
     };
 
     if window == 0 {
@@ -2186,15 +3422,17 @@ fn layout_video_window(window: isize, rect: PhysicalVideoRect, visible: bool) {
     }
     let window = HWND(window as *mut core::ffi::c_void);
     if visible && rect.visible() {
+        // Keep the native video above the canvas so idle PiP shows the picture.
+        // Controls are rendered in a sibling bar below the native video.
         let positioned = unsafe {
             SetWindowPos(
                 window,
-                None,
+                Some(HWND_TOP),
                 rect.x,
                 rect.y,
                 rect.width,
                 rect.height,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOOWNERZORDER | SWP_NOACTIVATE,
             )
         };
         if positioned.is_ok() {
@@ -2205,8 +3443,77 @@ fn layout_video_window(window: isize, rect: PhysicalVideoRect, visible: bool) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn clear_video_window_region(window: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::SetWindowRgn;
+
+    if window == 0 {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowRgn(HWND(window as *mut core::ffi::c_void), None, true);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clear_video_window_region(_window: isize) {}
+
 #[cfg(not(target_os = "windows"))]
 fn layout_video_window(_window: isize, _rect: PhysicalVideoRect, _visible: bool) {}
+
+fn pip_is_active(snapshot: &crate::player_contract::PlayerSnapshot) -> bool {
+    snapshot.engine_available
+        && snapshot.loaded_path.is_some()
+        && !snapshot.paused
+        && snapshot.error.is_none()
+}
+
+fn native_clear_color() -> [f32; 4] {
+    // The main viewport is not a transparent overlay. Clearing it with alpha 0
+    // can expose whatever window is behind Segma between GL presents or while
+    // the native video child is being resized. An opaque canvas makes Player,
+    // PiP, and Library transitions visually atomic.
+    color::BG_CANVAS.to_normalized_gamma_f32()
+}
+
+/// PiP eligibility for the current active session.
+///
+/// `armed` is earned only by active playback on the Player screen. `dismissed`
+/// records an explicit close and holds for the rest of that session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PipSession {
+    armed: bool,
+    dismissed: bool,
+}
+
+/// Advance the session for one frame.
+///
+/// A view change alone can never arm PiP: leaving Player while paused or stopped
+/// disarms it, so the window does not appear just because the screen changed.
+fn next_pip_session(session: PipSession, view: View, playback_active: bool) -> PipSession {
+    if view == View::Player {
+        return PipSession {
+            armed: playback_active,
+            // Returning to Player and playing again starts a new active session,
+            // so an earlier close no longer applies.
+            dismissed: session.dismissed && !playback_active,
+        };
+    }
+    PipSession {
+        armed: session.armed && playback_active,
+        dismissed: session.dismissed,
+    }
+}
+
+fn pip_should_show(
+    snapshot: &crate::player_contract::PlayerSnapshot,
+    view: View,
+    armed: bool,
+    dismissed: bool,
+) -> bool {
+    view != View::Player && armed && !dismissed && pip_is_active(snapshot)
+}
 
 #[cfg(target_os = "windows")]
 fn destroy_video_window(window: isize) {
@@ -2347,8 +3654,47 @@ fn search_field(ui: &mut egui::Ui, query: &mut String) {
         });
 }
 
+/// Folder that received a dropped file and the time its settle ring ends.
+type DropSettle = Option<(Option<String>, f64)>;
+
+/// Drops a settle record whose animation window has passed, so the library
+/// never keeps a permanent "last dropped folder" highlight.
+fn expire_drop_settle(settle: &mut DropSettle, now: f64) -> bool {
+    match settle {
+        Some((_, until)) if now >= *until => {
+            *settle = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Settle strength for one folder chip; `0.0` for every other chip.
+fn drop_settle_progress_for(settle: &DropSettle, folder: Option<&str>, now: f64) -> f32 {
+    match settle {
+        Some((target, until)) if target.as_deref() == folder => {
+            crate::widgets::drop_settle_progress(now, *until, crate::widgets::DROP_SETTLE_TIME)
+        }
+        _ => 0.0,
+    }
+}
+
+/// Drag feedback a folder chip should paint this frame.
+#[derive(Debug, Clone, Copy, Default)]
+struct FolderDropHint {
+    /// A library file is currently being dragged.
+    dragging: bool,
+    /// Remaining settle progress after this folder received a file.
+    settle: f32,
+}
+
 /// Folder row in the library grid header. Count is the file total inside it.
-fn folder_chip(ui: &mut egui::Ui, name: &str, media_count: Option<usize>) -> egui::Response {
+fn folder_chip(
+    ui: &mut egui::Ui,
+    name: &str,
+    media_count: Option<usize>,
+    drop_hint: FolderDropHint,
+) -> egui::Response {
     let font = egui::FontId::proportional(text::BODY_MD);
     let label = media_count
         .map(|count| format!("{name}  {count}"))
@@ -2365,6 +3711,16 @@ fn folder_chip(ui: &mut egui::Ui, name: &str, media_count: Option<usize>) -> egu
         ),
         egui::Sense::click(),
     );
+    // Emphasis is animated but painted outside the allocated rect, so the chip
+    // row keeps identical geometry whether or not a drag is in flight.
+    let targeted = drop_hint.dragging && response.hovered();
+    let target_progress = ui.ctx().animate_bool_with_time(
+        response.id.with("folder-drop-target"),
+        targeted,
+        crate::widgets::DROP_TARGET_MOTION_TIME,
+    );
+    crate::widgets::paint_drop_target_emphasis(ui, response.rect, target_progress);
+    crate::widgets::paint_drop_settle(ui, response.rect, drop_hint.settle);
     let fill = if response.hovered() {
         color::BG_SELECTED
     } else {
@@ -2391,10 +3747,25 @@ fn folder_chip(ui: &mut egui::Ui, name: &str, media_count: Option<usize>) -> egu
         color::TEXT_PRIMARY,
     );
     if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.ctx().set_cursor_icon(if drop_hint.dragging {
+            egui::CursorIcon::Copy
+        } else {
+            egui::CursorIcon::PointingHand
+        });
+    }
+    if targeted || drop_hint.settle > 0.0 {
+        ui.ctx().request_repaint();
     }
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{name} 폴더 열기"))
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            if targeted {
+                format!("{name} 폴더로 이동")
+            } else {
+                format!("{name} 폴더 열기")
+            },
+        )
     });
     response
 }
@@ -2430,7 +3801,7 @@ fn apply_taskbar_icon(window: isize) -> bool {
     let load = |cx: i32, cy: i32| unsafe {
         LoadImageW(
             Some(module.into()),
-            windows::core::w!( "#1" ),
+            windows::core::w!("#1"),
             IMAGE_ICON,
             cx,
             cy,
@@ -2446,8 +3817,18 @@ fn apply_taskbar_icon(window: isize) -> bool {
         return false;
     };
     unsafe {
-        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(small.0 as isize)));
-        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(big.0 as isize)));
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(small.0 as isize)),
+        );
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(big.0 as isize)),
+        );
         let _ = SetClassLongPtrW(hwnd, GCLP_HICONSM, small.0 as isize);
         let _ = SetClassLongPtrW(hwnd, GCLP_HICON, big.0 as isize);
     }
@@ -2457,7 +3838,6 @@ fn apply_taskbar_icon(window: isize) -> bool {
 fn apply_taskbar_icon(_window: isize) -> bool {
     true
 }
-
 
 /// Korean labels need a Korean-capable face. Use Malgun Gothic as the primary
 /// proportional face so Hangul, Latin, numbers, and punctuation share metrics
@@ -2527,6 +3907,16 @@ mod tests {
             true,
             false,
         )
+    }
+
+    /// A snapshot that satisfies every PiP activity condition.
+    fn playing_snapshot() -> crate::player_contract::PlayerSnapshot {
+        crate::player_contract::PlayerSnapshot {
+            engine_available: true,
+            loaded_path: Some(PathBuf::from("movie.mp4")),
+            paused: false,
+            ..crate::player_contract::PlayerSnapshot::default()
+        }
     }
 
     #[test]
@@ -2647,4 +4037,640 @@ mod tests {
         assert!(main.contains("refresh_shell_icon_cache();"));
     }
 
+    #[test]
+    fn library_thumbnail_uses_one_click_and_drag_interaction() {
+        let app = include_str!("app.rs");
+        let widgets = include_str!("widgets.rs");
+        let forbidden_overlay = ["response.id.with(\"library", "-drag\")"].concat();
+        assert!(!app.contains(&forbidden_overlay));
+        assert!(widgets.contains("sense(Sense::click_and_drag())"));
+        assert!(app.contains("if response.clicked()"));
+        assert!(app.contains("if response.drag_started()"));
+    }
+
+    #[test]
+    fn a_finished_drop_settle_leaves_no_permanent_library_state() {
+        let mut settle: DropSettle = Some((Some("보관".to_string()), 5.0));
+        // Mid-animation the record survives and still paints.
+        assert!(!expire_drop_settle(
+            &mut settle,
+            5.0 - crate::widgets::DROP_SETTLE_TIME / 2.0
+        ));
+        assert!(
+            drop_settle_progress_for(
+                &settle,
+                Some("보관"),
+                5.0 - crate::widgets::DROP_SETTLE_TIME / 2.0
+            ) > 0.0
+        );
+        // Past the deadline the record is released and contributes nothing.
+        assert!(expire_drop_settle(&mut settle, 5.0));
+        assert!(settle.is_none());
+        assert_eq!(drop_settle_progress_for(&settle, Some("보관"), 5.0), 0.0);
+        assert!(!expire_drop_settle(&mut settle, 99.0));
+    }
+
+    #[test]
+    fn a_drop_arms_the_settle_animation_only_for_its_own_destination() {
+        let start = 9.0 - crate::widgets::DROP_SETTLE_TIME;
+        let folder: DropSettle = Some((Some("보관".to_string()), 9.0));
+        assert!(drop_settle_progress_for(&folder, Some("보관"), start) > 0.0);
+        assert_eq!(drop_settle_progress_for(&folder, Some("기타"), start), 0.0);
+        assert_eq!(drop_settle_progress_for(&folder, None, start), 0.0);
+
+        // A drop onto the root chip highlights the root chip only.
+        let root: DropSettle = Some((None, 9.0));
+        assert!(drop_settle_progress_for(&root, None, start) > 0.0);
+        assert_eq!(drop_settle_progress_for(&root, Some("보관"), start), 0.0);
+        assert_eq!(drop_settle_progress_for(&None, None, start), 0.0);
+    }
+
+    #[test]
+    fn drag_feedback_is_paint_only_and_keeps_click_playback() {
+        let source = include_str!("app.rs");
+        let library_start = source.find("fn library_view").unwrap();
+        let chip_start = source.find("fn folder_chip").unwrap();
+        let library = &source[library_start..chip_start];
+        // Click-to-play stays the primary interaction on the thumbnail.
+        assert!(library.contains("play_target = Some(entry.file_name.clone());"));
+        assert!(library.contains("paint_drag_lift(ui, response.rect, lift)"));
+        // Emphasis must not allocate space or change tile geometry.
+        assert!(!library.contains("paint_drag_lift(ui, response.rect.expand"));
+        let chip = &source[chip_start..];
+        assert!(chip.contains("paint_drop_target_emphasis"));
+        assert!(chip.contains("paint_drop_settle"));
+        assert!(chip.contains("폴더 열기"));
+        assert!(chip.contains("폴더로 이동"));
+        assert!(chip.contains("egui::Sense::click()"));
+    }
+
+    #[test]
+    fn loaded_media_keeps_a_pip_surface_outside_the_player_view() {
+        let source = include_str!("app.rs");
+        let pip =
+            &source[source.find("fn pip_surface").unwrap()..source.find("fn player_view").unwrap()];
+        assert!(source.contains("fn pip_surface"));
+        assert!(pip.contains("segma-pip-surface"));
+        assert!(source.contains("if self.view != View::Player"));
+        assert!(source.contains("layout_video_window(self.player_video_hwnd, pip_rect"));
+        assert!(pip.contains("pip_width"));
+        assert!(pip.contains(".movable(false)"));
+        assert!(pip.contains(".current_pos(position)"));
+        assert!(pip.contains("pip-drag-strip"));
+        assert!(pip.contains("self.pip_move_start"));
+        assert!(pip.contains("pip-resize-handle"));
+        assert!(
+            source.contains("Self::TopLeft | Self::BottomRight => egui::CursorIcon::ResizeNwSe")
+        );
+        assert!(pip.contains("player_ui::pip_controls("));
+        assert!(pip.contains("MINI_PLAYER_CONTROLS_HEIGHT"));
+        assert!(pip.contains("let controls = egui::Rect::from_min_max"));
+        assert!(!pip.contains("pip_native_surface_hovered"));
+        assert!(!pip.contains("apply_pip_control_holes"));
+        assert!(!pip.contains("SetWindowRgn"));
+        assert!(!pip.contains("HWND_BOTTOM"));
+        assert!(!pip.contains("show_viewport_immediate"));
+    }
+
+    #[test]
+    fn pip_controls_use_a_sibling_bar_and_never_clip_the_native_video() {
+        let bar = egui::Rect::from_min_size(
+            egui::Pos2::new(10.0, 200.0),
+            egui::Vec2::new(320.0, MINI_PLAYER_CONTROLS_HEIGHT),
+        );
+        let layout = player_ui::pip_control_layout(bar);
+        for control in [
+            layout.close,
+            layout.return_to_tab,
+            layout.rewind,
+            layout.play,
+            layout.forward,
+            layout.seek,
+            layout.time,
+        ] {
+            assert!(bar.contains_rect(control));
+        }
+        let source = include_str!("app.rs");
+        let pip =
+            &source[source.find("fn pip_surface").unwrap()..source.find("fn player_view").unwrap()];
+        assert!(pip.contains("physical_video_rect = player_ui::physical_rect(ui, video)"));
+        assert!(pip.contains("player_ui::pip_controls("));
+        assert!(pip.contains("MINI_PLAYER_PREVIEW_WIDTH"));
+        assert!(pip.contains("overlay_output.hover_preview"));
+        assert!(pip.contains("self.seek_preview.request"));
+        assert!(!pip.contains("SetWindowRgn"));
+        assert!(source.contains("clear_video_window_region(self.player_video_hwnd)"));
+    }
+
+    #[test]
+    fn pip_close_stops_and_releases_the_active_playback_session() {
+        let source = include_str!("app.rs");
+        let stop = &source[source.find("fn stop_playback_session").unwrap()
+            ..source.find("fn create_library_folder").unwrap()];
+        assert!(stop.contains("PlayerCommand::Stop"));
+        assert!(stop.contains("self.player_loaded_file = None"));
+        assert!(stop.contains("self.player_media = None"));
+        assert!(stop.contains("self.pip_armed = false"));
+        let pip =
+            &source[source.find("fn pip_surface").unwrap()..source.find("fn player_view").unwrap()];
+        assert!(pip.contains("if overlay_output.pip_close_requested"));
+        assert!(pip.contains("self.stop_playback_session()"));
+    }
+
+    #[test]
+    fn pip_controls_never_open_a_second_window_or_paint_a_card() {
+        // Controls stay in the main viewport in a stable sibling bar. They never
+        // create a second window and never carve regions out of the native video.
+        let app = include_str!("app.rs");
+        let player_ui_source = include_str!("player_ui.rs");
+        let pip = &app[app.find("fn pip_surface").unwrap()..app.find("fn player_view").unwrap()];
+        for forbidden in [
+            "show_viewport_immediate",
+            "show_viewport_deferred",
+            "ViewportBuilder",
+            "ViewportId",
+            "with_always_on_top",
+            "with_transparent",
+            "egui::Frame::new()",
+        ] {
+            assert!(
+                !pip.contains(forbidden),
+                "PiP must not use {forbidden}: it would create a second window or wrapper"
+            );
+        }
+
+        let controls =
+            &player_ui_source[player_ui_source.find("pub(crate) fn pip_controls").unwrap()
+                ..player_ui_source.find("fn overlay_icon_button").unwrap()];
+        for forbidden in [
+            "ViewportBuilder",
+            "egui::Frame::new()",
+            "rect_stroke",
+            "scrubber(",
+        ] {
+            assert!(
+                !controls.contains(forbidden),
+                "PiP controls must stay compact, found {forbidden}"
+            );
+        }
+        assert!(controls.contains("BG_INVERSE"));
+        assert!(controls.contains("paint_pip_seek_bar"));
+        assert!(controls.contains("Color32::from_white_alpha"));
+        assert!(controls.contains("탭으로 돌아가기"));
+        let production = &app[..app.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains("apply_pip_control_holes"));
+        let shared_ui =
+            &app[app.find("fn ui(").unwrap()..app.find("impl Drop for ManagerApp").unwrap()];
+        assert!(shared_ui.contains("self.seek_preview.poll(&context)"));
+        let overlay_start = player_ui_source.find("fn overlay_icon_button").unwrap();
+        let overlay = &player_ui_source[overlay_start
+            ..player_ui_source[overlay_start..]
+                .find("\n}")
+                .map(|offset| overlay_start + offset + 2)
+                .unwrap()];
+        assert!(!overlay.contains("rect_filled"));
+        assert!(!overlay.contains("from_black_alpha"));
+    }
+
+    #[test]
+    fn all_pip_edges_resize_from_the_drag_start_and_keep_the_opposite_anchor() {
+        let start = egui::pos2(100.0, 80.0);
+        let start_width = 320.0;
+        let delta = egui::vec2(40.0, 22.5);
+        for edge in PipResizeEdge::ALL {
+            let width = pip_resize_width(edge, start_width, delta);
+            let position = pip_resize_position(edge, start, start_width, width);
+            assert!(width >= MINI_PLAYER_MIN_WIDTH && width <= MINI_PLAYER_MAX_WIDTH);
+
+            if matches!(
+                edge,
+                PipResizeEdge::Left | PipResizeEdge::TopLeft | PipResizeEdge::BottomLeft
+            ) {
+                assert_eq!(position.x + width, start.x + start_width);
+            } else {
+                assert_eq!(position.x, start.x);
+            }
+            if matches!(
+                edge,
+                PipResizeEdge::Top | PipResizeEdge::TopLeft | PipResizeEdge::TopRight
+            ) {
+                assert_eq!(
+                    position.y + width * 9.0 / 16.0,
+                    start.y + start_width * 9.0 / 16.0
+                );
+            } else {
+                assert_eq!(position.y, start.y);
+            }
+        }
+
+        // `drag_delta` is cumulative. Re-evaluating the same drag event must
+        // therefore produce the same geometry, not add another 40 points.
+        let first = pip_resize_width(PipResizeEdge::Right, start_width, delta);
+        let repeated = pip_resize_width(PipResizeEdge::Right, start_width, delta);
+        assert_eq!(first, 360.0);
+        assert_eq!(repeated, first);
+    }
+
+    #[test]
+    fn native_main_viewport_clear_is_opaque() {
+        let clear = native_clear_color();
+        assert_eq!(clear[3], 1.0);
+        assert_eq!(clear, color::BG_CANVAS.to_normalized_gamma_f32());
+    }
+
+    #[test]
+    fn library_batch_actions_have_guarded_keyboard_contracts() {
+        let source = include_str!("app.rs");
+        let library = &source
+            [source.find("fn library_view").unwrap()..source.find("fn folder_chip").unwrap()];
+        assert!(library.contains("egui::Modifiers::COMMAND, egui::Key::A"));
+        assert!(library.contains("egui::Modifiers::NONE, egui::Key::Escape"));
+        assert!(library.contains("egui::Modifiers::NONE, egui::Key::Delete"));
+        assert!(library.contains("!ui.ctx().text_edit_focused()"));
+        assert!(library.contains("!egui::Popup::is_any_open(ui.ctx())"));
+        assert!(library.contains("self.pending_batch_delete = true"));
+        assert!(library.contains("self.clear_library_selection()"));
+        assert!(library.contains("자동 정리"));
+        assert!(library.contains("정리 실행 취소"));
+    }
+
+    #[test]
+    fn a_view_change_alone_cannot_arm_pip_and_close_holds_for_the_session() {
+        let idle = PipSession {
+            armed: false,
+            dismissed: false,
+        };
+        // Paused on Player, then navigating away: nothing arms, so no PiP appears
+        // merely because the view changed.
+        let paused_on_player = next_pip_session(idle, View::Player, false);
+        assert_eq!(paused_on_player, idle);
+        assert_eq!(
+            next_pip_session(paused_on_player, View::Library, false),
+            idle
+        );
+
+        // Playing on Player arms the session; leaving Player keeps it armed.
+        let playing = next_pip_session(idle, View::Player, true);
+        assert!(playing.armed && !playing.dismissed);
+        let navigated = next_pip_session(playing, View::Library, true);
+        assert!(navigated.armed && !navigated.dismissed);
+
+        // Pausing outside Player disarms, and resuming there cannot re-arm it.
+        let paused_away = next_pip_session(navigated, View::Library, false);
+        assert!(!paused_away.armed);
+        assert!(!next_pip_session(paused_away, View::Library, true).armed);
+
+        // An explicit close survives further navigation while the session lasts.
+        let closed = PipSession {
+            armed: true,
+            dismissed: true,
+        };
+        let still_closed = next_pip_session(closed, View::Settings, true);
+        assert!(still_closed.dismissed);
+        assert!(!pip_should_show(
+            &playing_snapshot(),
+            View::Settings,
+            still_closed.armed,
+            still_closed.dismissed,
+        ));
+        // Playing again from Player starts a fresh session and clears the close.
+        let reopened = next_pip_session(closed, View::Player, true);
+        assert!(reopened.armed && !reopened.dismissed);
+    }
+
+    #[test]
+    fn pip_requires_active_playback_and_is_suppressed_after_close() {
+        let mut snapshot = playing_snapshot();
+
+        assert!(pip_is_active(&snapshot));
+        assert!(pip_should_show(&snapshot, View::Library, true, false));
+
+        snapshot.paused = true;
+        assert!(!pip_is_active(&snapshot));
+        assert!(!pip_should_show(&snapshot, View::Library, true, false));
+
+        snapshot.paused = false;
+        assert!(!pip_should_show(&snapshot, View::Library, true, true));
+        assert!(!pip_should_show(&snapshot, View::Player, true, false));
+    }
+
+    #[test]
+    fn shared_page_chrome_has_one_header_footprint() {
+        assert_eq!(player_ui::PAGE_HEADER_HEIGHT, 64.0);
+        let source = include_str!("app.rs");
+        assert!(source.contains("player_ui::PAGE_HEADER_HEIGHT"));
+        assert!(source.contains("brand_title_offset"));
+    }
+
+    #[test]
+    fn brand_title_block_uses_glyph_bounds_not_line_boxes() {
+        let source = include_str!("app.rs");
+        let helper_start = source.find("fn brand_title_galley").unwrap();
+        let helper = &source[helper_start..];
+        assert!(helper.contains("fn brand_title_block_height"));
+        assert!(helper.contains("brand_title_glyph_height"));
+        assert!(helper.contains("mesh_bounds"));
+        assert!(helper.contains("paint_brand_title_line"));
+        let rail = &source[source.find("fn rail(").unwrap()..source.find("fn header(").unwrap()];
+        let title = &rail[..rail.find("for view in View::ALL").unwrap()];
+        assert!(title.contains("item_spacing.y = 0.0"));
+        assert!(title.contains("paint_brand_title_line"));
+        assert!(!title.contains("egui::Label::new("));
+        assert!(title.contains("brand_title_block_height(ui)"));
+        // The rail stacks the two lines with the same single gap the measured
+        // block height accounts for, so the probe below mirrors real placement.
+        assert_eq!(title.matches("BRAND_TITLE_LINE_GAP").count(), 1);
+        // The badge rides PLAYER's baseline rather than its own ink top.
+        assert!(title.contains("player.box_top"));
+    }
+
+    /// One live layout pass over the real font set. Both the naive line-box sum
+    /// (the previous formula) and the packed block are read from the same
+    /// galleys, so the comparison cannot drift with the installed font.
+    struct BrandTitleProbe {
+        line_box_sum: f32,
+        packed: f32,
+        segma: BrandRun,
+        player: BrandRun,
+        badge: BrandRun,
+    }
+
+    fn measure_brand_title() -> BrandTitleProbe {
+        let context = egui::Context::default();
+        install_fonts(&context);
+        let mut probe = None;
+        let output = context.run_ui(Default::default(), |ui| {
+            let line_box_sum =
+                brand_title_galley(ui, "SEGMA", text::HEADING_SM, color::TEXT_PRIMARY)
+                    .rect
+                    .height()
+                    + brand_title_galley(ui, "PLAYER", text::LABEL_SM, color::TEXT_PRIMARY)
+                        .rect
+                        .height();
+            // Same placement arithmetic the rail uses.
+            let origin = egui::Pos2::ZERO;
+            let segma =
+                paint_brand_title_line(ui, origin, "SEGMA", text::HEADING_SM, color::TEXT_PRIMARY);
+            let player = paint_brand_title_line(
+                ui,
+                egui::Pos2::new(origin.x, segma.ink.bottom() + BRAND_TITLE_LINE_GAP),
+                "PLAYER",
+                text::LABEL_SM,
+                color::TEXT_SECONDARY,
+            );
+            let badge = paint_brand_title_run(
+                ui,
+                egui::Pos2::new(player.ink.right() + space::X4, player.box_top),
+                "일반",
+                text::LABEL_SM,
+                color::TEXT_MUTED,
+            );
+            probe = Some(BrandTitleProbe {
+                line_box_sum,
+                packed: brand_title_block_height(ui),
+                segma,
+                player,
+                badge,
+            });
+        });
+        output.drop_without_applying_deltas();
+        probe.expect("the brand title is laid out once per pass")
+    }
+
+    #[test]
+    fn packed_brand_title_is_shorter_than_stacked_line_boxes() {
+        let probe = measure_brand_title();
+        println!(
+            "TEMPPROBE segma={:?} player={:?} badge={:?} packed={} sum={}",
+            probe.segma.ink, probe.player.ink, probe.badge.ink, probe.packed, probe.line_box_sum
+        );
+
+        // The previous formula was exactly this sum of `Galley::rect` heights,
+        // which carries the font's ascent and descent on both lines. That
+        // leading is the space the user still saw between SEGMA and PLAYER.
+        assert!(
+            probe.packed < probe.line_box_sum,
+            "packed {} should be tighter than the line-box sum {}",
+            probe.packed,
+            probe.line_box_sum
+        );
+        // The saving is a real line's worth of leading, not a rounding artifact.
+        assert!(probe.line_box_sum - probe.packed >= BRAND_TITLE_LINE_GAP * 2.0);
+
+        // PLAYER sits directly under SEGMA's ink, separated only by the one
+        // optical gap, and the measured block is exactly that stack.
+        assert_eq!(
+            probe.player.ink.top() - probe.segma.ink.bottom(),
+            BRAND_TITLE_LINE_GAP
+        );
+        assert_eq!(
+            probe.player.ink.bottom() - probe.segma.ink.top(),
+            probe.packed
+        );
+        assert_eq!(
+            probe.segma.ink.height() + BRAND_TITLE_LINE_GAP + probe.player.ink.height(),
+            probe.packed
+        );
+        // Both lines share the block's left edge.
+        assert_eq!(probe.segma.ink.left(), probe.player.ink.left());
+        // Ink heights stay below their own line boxes, so nothing was measured
+        // from a default line metric.
+        assert!(probe.segma.ink.height() < text::HEADING_SM * 1.5);
+        assert!(probe.player.ink.height() < text::LABEL_SM * 1.5);
+    }
+
+    #[test]
+    fn the_edition_badge_keeps_players_baseline_after_ink_packing() {
+        let probe = measure_brand_title();
+
+        // Hangul ink starts higher than Latin caps, so ink-aligning the badge
+        // would drop it below PLAYER. Sharing one layout-box top keeps the two
+        // runs on the same baseline while the block stays ink-packed.
+        assert!(probe.badge.ink.top() < probe.player.ink.top());
+        assert_eq!(probe.badge.box_top, probe.player.box_top);
+        // The badge follows PLAYER horizontally with one gap between them.
+        assert_eq!(probe.badge.ink.left() - probe.player.ink.right(), space::X4);
+    }
+
+    #[test]
+    fn the_rail_row_is_sized_from_the_packed_title_block() {
+        let probe = measure_brand_title();
+
+        // The shared row and both optical offsets are derived from the packed
+        // height, so the mark cannot be centered against a phantom line box.
+        let row = brand_row_height(BRAND_LOGO_SIZE, probe.packed);
+        assert_eq!(row, BRAND_LOGO_SIZE.max(probe.packed));
+        assert!(row < brand_row_height(BRAND_LOGO_SIZE, probe.line_box_sum));
+
+        let title_top = brand_title_offset(BRAND_LOGO_SIZE, probe.packed);
+        assert!(title_top + probe.packed <= row);
+        // The title's optical center still tracks the mark's perceived center.
+        assert_eq!(
+            title_top + (probe.packed / 2.0).round(),
+            (BRAND_LOGO_SIZE / 2.0 - BRAND_LOGO_OPTICAL_BIAS).round()
+        );
+    }
+
+    #[test]
+    fn brand_title_alignment_uses_the_logo_perceived_center() {
+        // Title shorter than the mark: its center lands on the mark's perceived
+        // center, one point above the geometric midpoint.
+        assert_eq!(brand_row_height(32.0, 26.0), 32.0);
+        assert_eq!(brand_logo_offset(32.0, 26.0), 0.0);
+        assert_eq!(brand_title_offset(32.0, 26.0), 1.0);
+        assert_eq!(
+            brand_title_offset(32.0, 26.0) + 26.0 / 2.0,
+            32.0 / 2.0 - BRAND_LOGO_OPTICAL_BIAS
+        );
+
+        // Title taller than the mark: the mark is the block that gets centered,
+        // and the title still starts at the top of the shared row.
+        assert_eq!(brand_row_height(24.0, 40.0), 40.0);
+        assert_eq!(brand_logo_offset(24.0, 40.0), 8.0);
+        assert_eq!(brand_title_offset(24.0, 40.0), 0.0);
+        // The title cannot move above the shared row, so the optical lift is
+        // clamped and the two centers are not forced equal in this case.
+        assert_eq!(brand_title_offset(24.0, 40.0) + 40.0 / 2.0, 20.0);
+
+        // Whenever the mark is centered in the row, the title carries exactly the
+        // optical bias, and no input can push a block above the row's top edge.
+        assert_eq!(brand_title_offset(32.0, 32.0), 0.0);
+        assert_eq!(brand_title_offset(16.0, 64.0), 0.0);
+        for (logo, title) in [(32.0, 26.0), (24.0, 40.0), (32.0, 32.0), (0.0, 0.0)] {
+            assert!(brand_logo_offset(logo, title) >= 0.0);
+            assert!(brand_title_offset(logo, title) >= 0.0);
+            assert!(brand_row_height(logo, title) >= logo.max(title));
+        }
+    }
+}
+
+/// The title block's visual mass sits slightly below its geometric midpoint, so
+/// aligning it to the mark requires a one-point upward correction.
+const BRAND_LOGO_OPTICAL_BIAS: f32 = 2.0;
+
+/// Shared row height for the mark and the title block. Whichever block is
+/// shorter is centered inside it, so neither one can pull the row taller.
+fn brand_row_height(logo_height: f32, title_block_height: f32) -> f32 {
+    logo_height.max(title_block_height)
+}
+
+/// Top inset for the mark when the title block is the taller of the two.
+fn brand_logo_offset(logo_height: f32, title_block_height: f32) -> f32 {
+    ((title_block_height - logo_height).max(0.0) / 2.0).round()
+}
+
+/// Top inset that puts the title block's center on the mark's perceived center.
+fn brand_title_offset(logo_height: f32, title_block_height: f32) -> f32 {
+    let logo_top = brand_logo_offset(logo_height, title_block_height);
+    let perceived_center = logo_top + logo_height / 2.0 - BRAND_LOGO_OPTICAL_BIAS;
+    (perceived_center - title_block_height / 2.0)
+        .max(0.0)
+        .round()
+}
+
+/// Optical gap between the two stacked brand lines. The lines are placed on
+/// their letterforms, so the default ascent/descent leading is gone and this is
+/// the only separation left; it keeps `PLAYER` from touching `SEGMA`.
+const BRAND_TITLE_LINE_GAP: f32 = space::X2;
+
+/// One laid-out brand line. The Korean UI font decides the real metrics, so the
+/// block is measured from the live font set rather than assumed from the ramp.
+fn brand_title_galley(
+    ui: &egui::Ui,
+    text_value: &str,
+    size: f32,
+    color: Color32,
+) -> std::sync::Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(
+        text_value.to_owned(),
+        egui::FontId::proportional(size),
+        color,
+    )
+}
+
+/// Tight bounds of a line's ink. `Galley::rect` is the default line box and
+/// carries the font's ascent/descent, which is exactly the leftover space
+/// between the two title lines; `mesh_bounds` is the tessellated glyph extent.
+/// A face that produced no mesh falls back to the line box so the block never
+/// collapses to nothing.
+fn brand_title_ink(galley: &egui::Galley) -> egui::Rect {
+    if galley.mesh_bounds.is_positive() {
+        galley.mesh_bounds
+    } else {
+        galley.rect
+    }
+}
+
+fn brand_title_glyph_height(ui: &egui::Ui, text_value: &str, size: f32) -> f32 {
+    let galley = brand_title_galley(ui, text_value, size, color::TEXT_PRIMARY);
+    brand_title_ink(&galley).height().max(1.0)
+}
+
+/// A painted brand run: the ink it actually covers, plus the layout-box top it
+/// was drawn from. Runs that share a `box_top` share a baseline, which is how
+/// the edition badge stays level with `PLAYER` even though Hangul ink starts
+/// higher than Latin caps.
+#[derive(Clone, Copy)]
+struct BrandRun {
+    ink: egui::Rect,
+    box_top: f32,
+}
+
+/// Paint an already laid-out line so its ink's left edge lands on
+/// `ink_left`, from the given layout-box top.
+fn paint_brand_galley(
+    ui: &egui::Ui,
+    ink_left: f32,
+    box_top: f32,
+    galley: std::sync::Arc<egui::Galley>,
+    color: Color32,
+) -> BrandRun {
+    let ink = brand_title_ink(&galley);
+    ui.painter().galley(
+        egui::Pos2::new(ink_left - ink.left(), box_top),
+        galley,
+        color,
+    );
+    BrandRun {
+        ink: egui::Rect::from_min_size(
+            egui::Pos2::new(ink_left, box_top + ink.top()),
+            egui::Vec2::new(ink.width(), ink.height().max(1.0)),
+        ),
+        box_top,
+    }
+}
+
+/// Paint one brand run on an existing baseline, given that baseline's
+/// layout-box top.
+fn paint_brand_title_run(
+    ui: &egui::Ui,
+    box_left_top: egui::Pos2,
+    text_value: &str,
+    size: f32,
+    color: Color32,
+) -> BrandRun {
+    let galley = brand_title_galley(ui, text_value, size, color);
+    paint_brand_galley(ui, box_left_top.x, box_left_top.y, galley, color)
+}
+
+/// Paint one brand line so its ink, not its line box, starts at `ink_origin`.
+/// This is what packs SEGMA and PLAYER: the font's ascent and descent no longer
+/// separate the two lines.
+fn paint_brand_title_line(
+    ui: &egui::Ui,
+    ink_origin: egui::Pos2,
+    text_value: &str,
+    size: f32,
+    color: Color32,
+) -> BrandRun {
+    let galley = brand_title_galley(ui, text_value, size, color);
+    let box_top = ink_origin.y - brand_title_ink(&galley).top();
+    paint_brand_galley(ui, ink_origin.x, box_top, galley, color)
+}
+
+/// Packed height of the two-line block: glyph ink plus the single optical gap.
+fn brand_title_block_height(ui: &egui::Ui) -> f32 {
+    brand_title_glyph_height(ui, "SEGMA", text::HEADING_SM)
+        + BRAND_TITLE_LINE_GAP
+        + brand_title_glyph_height(ui, "PLAYER", text::LABEL_SM)
 }

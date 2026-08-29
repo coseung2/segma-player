@@ -32,18 +32,53 @@ const VOLUME_WIDTH: f32 = 84.0;
 const FULLSCREEN_CONTROL_HEIGHT: f32 = 42.0;
 const FULLSCREEN_CONTROL_MARGIN: f32 = 16.0;
 const FULLSCREEN_CONTROL_ALPHA: f32 = 0.86;
-const PREVIEW_SIZE: Vec2 = Vec2::new(192.0, 108.0);
+pub const SEEK_PREVIEW_WIDTH: f32 = 192.0;
+/// Native preview includes a 108px image and a 28px timecode strip.
+pub const SEEK_PREVIEW_HEIGHT: f32 = 136.0;
+const PREVIEW_SIZE: Vec2 = Vec2::new(SEEK_PREVIEW_WIDTH, SEEK_PREVIEW_HEIGHT);
 const PREVIEW_GAP: f32 = 20.0;
 const POSE_MARKER_HIT_RADIUS: f32 = 7.0;
 pub(crate) const POSE_MARKER_ACTIVE_TOLERANCE_SECONDS: f64 = 0.75;
 const UP_NEXT_COUNT: usize = 4;
 const SPEEDS: [f64; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+pub const PAGE_HEADER_HEIGHT: f32 = 64.0;
+/// Top-right page actions are icon-only: no card, no filled surface, no border.
+/// The icon sits directly on the page background and discloses its label on
+/// hover, which is the only affordance those controls need.
+pub const HEADER_ACTION_SIZE: f32 = metric::ICON_SM;
+
+/// One top-right page action. Every screen routes through this so no header
+/// grows its own wrapper, fill, or border, and every icon keeps a hover label
+/// plus its accessibility name.
+pub fn header_action(ui: &mut Ui, icon: Icon, label: &str) -> Response {
+    let size = Vec2::splat(HEADER_ACTION_SIZE);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hovering = response.hovered();
+    if hovering {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    icons::paint_centered(
+        ui,
+        icon,
+        rect,
+        HEADER_ACTION_SIZE,
+        if hovering {
+            color::TEXT_PRIMARY
+        } else {
+            color::TEXT_SECONDARY
+        },
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
+    response.on_hover_text(label)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HoverPreview {
     pub target: f64,
     /// Suggested top-left corner in logical egui points.
     pub placement: Pos2,
+    /// Final logical size owned by the surface that produced the hover.
+    pub size: Vec2,
 }
 
 #[derive(Debug)]
@@ -61,6 +96,7 @@ pub struct PlayerUiOutput {
     pub gif_requested: bool,
     pub pose_marker_toggle_requested: bool,
     pub rating_requested: Option<i32>,
+    pub pip_close_requested: bool,
 }
 
 impl Default for PlayerUiOutput {
@@ -76,6 +112,7 @@ impl Default for PlayerUiOutput {
             gif_requested: false,
             pose_marker_toggle_requested: false,
             rating_requested: None,
+            pip_close_requested: false,
         }
     }
 }
@@ -89,6 +126,7 @@ pub struct PlayerUiInput<'a> {
     pub pose_markers: &'a [f64],
     pub fullscreen: bool,
     pub shortcuts: PlayerShortcuts,
+    pub pro: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,8 +167,6 @@ pub fn player_view(ui: &mut Ui, input: PlayerUiInput<'_>) -> PlayerUiOutput {
         fullscreen_player(ui, snapshot, input.pose_markers, &mut output);
     } else {
         header(ui, snapshot, &mut output);
-        ui.add_space(space::X4);
-
         let available_width = ui.available_width();
         let video_height =
             (available_width / VIDEO_ASPECT).clamp(VIDEO_MIN_HEIGHT, VIDEO_MAX_HEIGHT);
@@ -149,7 +185,7 @@ pub fn player_view(ui: &mut Ui, input: PlayerUiInput<'_>) -> PlayerUiOutput {
         output.physical_video_rect = physical_rect(ui, video_rect);
 
         ui.add_space(space::X12);
-        control_bar(ui, snapshot, input.pose_markers, &mut output);
+        control_bar(ui, snapshot, input.pose_markers, input.pro, &mut output);
 
         ui.add_space(space::X16);
         up_next_row(ui, input.up_next, input.thumbnail_textures, &mut output);
@@ -277,62 +313,59 @@ fn fullscreen_control_fill(progress: f32) -> Color32 {
 }
 
 fn header(ui: &mut Ui, snapshot: &PlayerSnapshot, output: &mut PlayerUiOutput) {
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = space::X4;
-            let title = if snapshot.title.trim().is_empty() {
-                snapshot
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, PAGE_HEADER_HEIGHT),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = space::X4;
+                let title = if snapshot.title.trim().is_empty() {
+                    snapshot
+                        .loaded_path
+                        .as_deref()
+                        .and_then(|path| path.file_name())
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("재생할 파일 없음")
+                } else {
+                    snapshot.title.trim()
+                };
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(title)
+                            .size(text::HEADING_LG)
+                            .strong()
+                            .color(color::TEXT_PRIMARY),
+                    )
+                    .truncate(),
+                );
+
+                // The heading already resolves to the file name when no container
+                // title exists, so repeating it below would restate the same value.
+                let detail = snapshot
                     .loaded_path
                     .as_deref()
                     .and_then(|path| path.file_name())
                     .and_then(|value| value.to_str())
-                    .unwrap_or("재생할 파일 없음")
-            } else {
-                snapshot.title.trim()
-            };
-            ui.add(
-                egui::Label::new(
-                    RichText::new(title)
-                        .size(text::HEADING_LG)
-                        .strong()
-                        .color(color::TEXT_PRIMARY),
-                )
-                .truncate(),
-            );
-
-            // The heading already resolves to the file name when no container
-            // title exists, so repeating it below would restate the same value.
-            let detail = snapshot
-                .loaded_path
-                .as_deref()
-                .and_then(|path| path.file_name())
-                .and_then(|value| value.to_str())
-                .filter(|name| *name != title);
-            if let Some(detail) = detail {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(detail)
-                            .size(text::BODY_MD)
-                            .color(color::TEXT_MUTED),
-                    )
-                    .truncate(),
-                );
-            }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icon_button(
-                ui,
-                Icon::FolderOpen,
-                "폴더 열기",
-                ButtonStyle::Secondary,
-                true,
-            )
-            .clicked()
-            {
-                output.open_folder_requested = true;
-            }
-        });
-    });
+                    .filter(|name| *name != title);
+                if let Some(detail) = detail {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(detail)
+                                .size(text::BODY_MD)
+                                .color(color::TEXT_MUTED),
+                        )
+                        .truncate(),
+                    );
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if header_action(ui, Icon::FolderOpen, "폴더 열기").clicked() {
+                    output.open_folder_requested = true;
+                }
+            });
+        },
+    );
 }
 
 fn paint_video_surface(ui: &mut Ui, rect: Rect, response: &Response, snapshot: &PlayerSnapshot) {
@@ -367,6 +400,7 @@ fn control_bar(
     ui: &mut Ui,
     snapshot: &PlayerSnapshot,
     pose_markers: &[f64],
+    pro: bool,
     output: &mut PlayerUiOutput,
 ) {
     egui::Frame::new()
@@ -429,14 +463,16 @@ fn control_bar(
 
                 volume_slider(ui, snapshot, output);
 
-                if icon_button(ui, Icon::Fullscreen, "전체 화면", ButtonStyle::Quiet, true)
-                    .clicked()
-                {
-                    output.fullscreen_requested = true;
-                }
-                range_selector(ui, snapshot, output);
-                speed_selector(ui, snapshot, output);
-                subtitle_controls(ui, snapshot, output);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(ui, Icon::Fullscreen, "전체 화면", ButtonStyle::Quiet, true)
+                        .clicked()
+                    {
+                        output.fullscreen_requested = true;
+                    }
+                    range_selector(ui, snapshot, output);
+                    speed_selector(ui, snapshot, pro, output);
+                    subtitle_controls(ui, snapshot, output);
+                });
             });
 
             ui.add_space(space::X8);
@@ -630,6 +666,7 @@ fn scrubber(
             output.hover_preview = Some(HoverPreview {
                 target,
                 placement: seek_preview_placement(pointer.x, track, PREVIEW_SIZE, preview_origin),
+                size: PREVIEW_SIZE,
             });
 
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -843,20 +880,305 @@ fn language_chip(ui: &mut Ui, track: &SubtitleTrack, active: bool) -> Response {
     response
 }
 
-fn speed_selector(ui: &mut Ui, snapshot: &PlayerSnapshot, output: &mut PlayerUiOutput) {
+fn speed_selector(ui: &mut Ui, snapshot: &PlayerSnapshot, pro: bool, output: &mut PlayerUiOutput) {
     let active = !speed_matches(snapshot.speed, 1.0);
-    if pill_button(
+    let response = pill_button(
         ui,
         Some(Icon::Speed),
         &speed_label(snapshot.speed),
         "재생 속도",
-        snapshot.engine_available,
+        speed_control_enabled(pro, snapshot.engine_available),
         active,
+    );
+    if !pro {
+        response.on_hover_text("재생 속도 조절은 Pro 기능입니다. 설정에서 업그레이드하세요.");
+    } else if response.clicked() {
+        set_command(output, PlayerCommand::SetSpeed(next_speed(snapshot.speed)));
+    }
+}
+
+/// App Pro owns speed entitlement; the player engine being available is not
+/// sufficient. Keeping this pure makes the General disabled state explicit.
+pub(crate) const fn speed_control_enabled(pro: bool, engine_available: bool) -> bool {
+    pro && engine_available
+}
+
+/// Hover-control geometry inside the PiP video surface. Pure so the "controls
+/// stay inside the video, no separate window" rule is directly testable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PipControlLayout {
+    pub close: Rect,
+    pub return_to_tab: Rect,
+    pub rewind: Rect,
+    pub play: Rect,
+    pub forward: Rect,
+    pub seek: Rect,
+    pub time: Rect,
+}
+
+pub(crate) fn pip_control_layout(video: Rect) -> PipControlLayout {
+    let inset = space::X8;
+    let icon = metric::ICON_SM;
+    let row_y = video.top() + 34.0;
+    let close = Rect::from_min_size(
+        Pos2::new(video.right() - inset - icon, row_y - icon / 2.0),
+        Vec2::splat(icon),
+    );
+    let return_to_tab = Rect::from_min_size(
+        Pos2::new(close.left() - space::X8 - icon, close.top()),
+        Vec2::splat(icon),
+    );
+    let play = Rect::from_center_size(Pos2::new(video.left() + 48.0, row_y), Vec2::splat(32.0));
+    let rewind = Rect::from_center_size(Pos2::new(video.left() + 16.0, row_y), Vec2::splat(icon));
+    let forward = Rect::from_center_size(Pos2::new(video.left() + 80.0, row_y), Vec2::splat(icon));
+    let time = Rect::from_min_max(
+        Pos2::new(video.left() + 100.0, row_y - 10.0),
+        Pos2::new(return_to_tab.left() - space::X8, row_y + 10.0),
+    );
+    let seek = Rect::from_min_max(
+        Pos2::new(video.left() + inset, video.top() + space::X8),
+        Pos2::new(
+            video.right() - inset,
+            video.top() + space::X8 + metric::PROGRESS_HEIGHT,
+        ),
+    );
+    PipControlLayout {
+        close,
+        return_to_tab,
+        rewind,
+        play,
+        forward,
+        seek,
+        time,
+    }
+}
+
+/// Render compact PiP controls in a stable sibling bar below native video.
+///
+/// `rect` is the video surface itself and is passed in rather than read from the
+/// `Ui`: the host renders this inside a floating area whose own `max_rect`
+/// reaches the screen edge, which would place the controls below the video.
+pub(crate) fn pip_controls(
+    ui: &mut Ui,
+    rect: Rect,
+    snapshot: &PlayerSnapshot,
+    output: &mut PlayerUiOutput,
+    preview_size: Vec2,
+    preview_origin: Vec2,
+) {
+    ui.painter().rect_filled(rect, 0.0, color::BG_INVERSE);
+    let layout = pip_control_layout(rect);
+    if overlay_icon_button(ui, layout.close, Icon::Cancel, "PiP 닫기", true).clicked() {
+        output.pip_close_requested = true;
+    }
+    if overlay_icon_button(
+        ui,
+        layout.return_to_tab,
+        Icon::Fullscreen,
+        "탭으로 돌아가기",
+        true,
     )
     .clicked()
     {
-        set_command(output, PlayerCommand::SetSpeed(next_speed(snapshot.speed)));
+        output.fullscreen_requested = true;
     }
+    if overlay_icon_button(
+        ui,
+        layout.rewind,
+        Icon::StepBackward,
+        "10초 뒤로",
+        snapshot.engine_available,
+    )
+    .clicked()
+    {
+        set_command(output, PlayerCommand::SeekRelative(-10.0));
+    }
+    if overlay_icon_button(
+        ui,
+        layout.play,
+        if snapshot.paused {
+            Icon::Play
+        } else {
+            Icon::Pause
+        },
+        if snapshot.paused {
+            "재생"
+        } else {
+            "일시정지"
+        },
+        snapshot.engine_available,
+    )
+    .clicked()
+    {
+        set_command(output, PlayerCommand::TogglePause);
+    }
+    if overlay_icon_button(
+        ui,
+        layout.forward,
+        Icon::StepForward,
+        "10초 앞으로",
+        snapshot.engine_available,
+    )
+    .clicked()
+    {
+        set_command(output, PlayerCommand::SeekRelative(10.0));
+    }
+
+    paint_pip_seek_bar(
+        ui,
+        layout.seek,
+        snapshot,
+        output,
+        preview_size,
+        preview_origin,
+    );
+    ui.painter().text(
+        Pos2::new(layout.time.left(), layout.time.center().y),
+        Align2::LEFT_CENTER,
+        format!(
+            "{} / {}",
+            format_time(snapshot.position),
+            format_time(snapshot.duration)
+        ),
+        FontId::monospace(text::MONO_SM),
+        color::TEXT_INVERSE,
+    );
+}
+
+fn paint_pip_seek_bar(
+    ui: &mut Ui,
+    track: Rect,
+    snapshot: &PlayerSnapshot,
+    output: &mut PlayerUiOutput,
+    preview_size: Vec2,
+    preview_origin: Vec2,
+) {
+    let response = ui.interact(track, ui.id().with("pip-seek-bar"), Sense::click_and_drag());
+    ui.painter()
+        .rect_filled(track, corner(radius::FULL), Color32::from_white_alpha(70));
+    let played = seek_fraction(snapshot.position, snapshot.duration) as f32;
+    if played > 0.0 {
+        let fill = Rect::from_min_max(
+            track.min,
+            Pos2::new(track.left() + track.width() * played, track.bottom()),
+        );
+        ui.painter()
+            .rect_filled(fill, corner(radius::FULL), color::ACCENT);
+    }
+    if (response.hovered() || response.dragged()) && snapshot.duration > 0.0 {
+        if let Some(pointer) = response.hover_pos() {
+            let target = seek_fraction(
+                f64::from(pointer.x - track.left()),
+                f64::from(track.width()),
+            ) * snapshot.duration;
+            output.hover_preview = Some(HoverPreview {
+                target,
+                placement: seek_preview_placement(pointer.x, track, preview_size, preview_origin),
+                size: preview_size,
+            });
+        }
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    if (response.clicked() || response.drag_stopped()) && snapshot.duration > 0.0 {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let target = seek_fraction(
+                f64::from(pointer.x - track.left()),
+                f64::from(track.width()),
+            ) * snapshot.duration;
+            set_command(output, PlayerCommand::SeekAbsolute(target));
+        }
+    }
+}
+
+/// Compact control painted inside the stable bar below the native video.
+fn overlay_icon_button(
+    ui: &mut Ui,
+    rect: Rect,
+    icon: Icon,
+    accessible_label: &str,
+    enabled: bool,
+) -> Response {
+    let response = ui.interact(
+        rect,
+        ui.id().with(("pip-overlay-control", accessible_label)),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if enabled && response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    icons::paint_centered(
+        ui,
+        icon,
+        rect,
+        metric::ICON_SM,
+        if enabled {
+            color::TEXT_INVERSE
+        } else {
+            color::TEXT_INVERSE.gamma_multiply(0.45)
+        },
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, accessible_label));
+    response
+}
+
+/// Paint a decoded seek frame entirely in egui. The caller controls placement,
+/// so a PiP preview is part of the same movable/resizable area and a normal
+/// Player preview cannot create a competing native child window.
+pub(crate) fn paint_seek_preview(
+    ui: &Ui,
+    placement: Pos2,
+    size: Vec2,
+    texture: Option<&TextureHandle>,
+    timecode: &str,
+) {
+    let size = Vec2::new(size.x.max(1.0), size.y.max(1.0));
+    // `size` contains a 16:9 image plus its timecode strip. Deriving the strip
+    // from width keeps the image proportional at both 192x136 Player size and
+    // compact 128x92 PiP size.
+    let image_height = (size.x * 9.0 / 16.0).min(size.y);
+    let strip_height = (size.y - image_height).clamp(0.0, 28.0);
+    let rect = Rect::from_min_size(placement, size);
+    let image_rect = Rect::from_min_max(
+        rect.min,
+        Pos2::new(rect.right(), rect.bottom() - strip_height),
+    );
+    let strip_rect = Rect::from_min_max(Pos2::new(rect.left(), image_rect.bottom()), rect.max);
+    let rounding = corner(radius::MD);
+    ui.painter().rect_filled(rect, rounding, color::BG_INVERSE);
+    if let Some(texture) = texture {
+        ui.painter().image(
+            texture.id(),
+            image_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        ui.painter().text(
+            image_rect.center(),
+            Align2::CENTER_CENTER,
+            "미리보기 준비 중",
+            FontId::proportional((text::BODY_SM - 1.0).max(9.0)),
+            color::TEXT_MUTED,
+        );
+    }
+    ui.painter().rect_filled(strip_rect, 0.0, color::BG_INVERSE);
+    ui.painter().text(
+        strip_rect.center(),
+        Align2::CENTER_CENTER,
+        timecode,
+        FontId::monospace((text::MONO_SM - 1.0).max(9.0)),
+        color::TEXT_INVERSE,
+    );
+    ui.painter().rect_stroke(
+        rect,
+        rounding,
+        hairline(Color32::from_white_alpha(40)),
+        StrokeKind::Inside,
+    );
 }
 
 fn range_selector(ui: &mut Ui, snapshot: &PlayerSnapshot, output: &mut PlayerUiOutput) {
@@ -1281,7 +1603,7 @@ fn concise_feedback(snapshot: &PlayerSnapshot) -> Option<(String, Color32)> {
     None
 }
 
-fn physical_rect(ui: &Ui, logical: Rect) -> PhysicalVideoRect {
+pub(crate) fn physical_rect(ui: &Ui, logical: Rect) -> PhysicalVideoRect {
     let scale = ui.ctx().pixels_per_point();
     PhysicalVideoRect {
         x: (logical.left() * scale).round() as i32,
@@ -1411,6 +1733,109 @@ mod tests {
     use super::*;
 
     #[test]
+    fn speed_control_is_pro_only_but_engine_state_still_gates_it() {
+        assert!(!speed_control_enabled(false, true));
+        assert!(!speed_control_enabled(true, false));
+        assert!(speed_control_enabled(true, true));
+        assert_eq!(next_speed(1.0), 1.25);
+    }
+
+    #[test]
+    fn top_right_icon_actions_have_no_wrapper_and_keep_a_hover_label() {
+        // Keep the original 16px icon. Alignment comes from the header row, not
+        // from enlarging the glyph to the 24px title or the 32px control box.
+        assert_eq!(HEADER_ACTION_SIZE, metric::ICON_SM);
+        assert_ne!(HEADER_ACTION_SIZE, metric::CONTROL_HEIGHT);
+        assert_ne!(HEADER_ACTION_SIZE, text::HEADING_LG);
+
+        let source = include_str!("player_ui.rs");
+        let action = &source[source.find("pub fn header_action").unwrap()..];
+        let action = &action[..action.find("\n}").unwrap()];
+        assert!(action.contains("HEADER_ACTION_SIZE"));
+        assert!(!action.contains("icon_button"));
+        assert!(!action.contains("ButtonStyle"));
+        assert!(!action.contains("rect_filled"));
+        // Hover disclosure replaces the visible chrome that was removed.
+        assert!(action.contains("on_hover_text(label)"));
+
+        // Every header action routes through the helper: no page may re-introduce
+        // a filled or bordered wrapper for its top-right icons.
+        let app = include_str!("app.rs");
+        assert!(!app.contains("actions: &[(Icon, &str, ButtonStyle)]"));
+        let shared_header = &app[app.find("fn header(").unwrap()..app.find("fn filters(").unwrap()];
+        assert!(shared_header.contains("player_ui::header_action(ui, *icon, label)"));
+        assert!(!shared_header.contains("ButtonStyle"));
+        assert!(shared_header.contains("egui::Align::Min"));
+
+        // The Library screen builds its own header row; its right-side actions
+        // must use the same unwrapped control.
+        let library =
+            &app[app.find("fn library_view").unwrap()..app.find("fn folder_chip").unwrap()];
+        let right_side = &library
+            [library.find("Layout::right_to_left").unwrap()..library.find("search_field").unwrap()];
+        assert_eq!(right_side.matches("player_ui::header_action").count(), 4);
+        assert!(!right_side.contains("ButtonStyle"));
+    }
+
+    #[test]
+    fn pip_controls_stay_inside_the_stable_sibling_bar() {
+        let bar = Rect::from_min_size(Pos2::new(20.0, 220.0), Vec2::new(320.0, 56.0));
+        let layout = pip_control_layout(bar);
+        for part in [
+            layout.close,
+            layout.return_to_tab,
+            layout.rewind,
+            layout.play,
+            layout.forward,
+            layout.seek,
+            layout.time,
+        ] {
+            assert!(bar.contains_rect(part), "{part:?} escaped {bar:?}");
+        }
+        assert_eq!(layout.close.right(), bar.right() - space::X8);
+        assert_eq!(
+            layout.return_to_tab.right(),
+            layout.close.left() - space::X8
+        );
+        assert!(layout.rewind.right() < layout.play.left());
+        assert!(layout.play.right() < layout.forward.left());
+        assert_eq!(layout.time.left(), bar.left() + 100.0);
+        assert_eq!(layout.seek.top(), bar.top() + space::X8);
+        assert_eq!(layout.seek.height(), metric::PROGRESS_HEIGHT);
+        assert!(layout.seek.bottom() < layout.time.top());
+
+        let moved = pip_control_layout(bar.translate(Vec2::new(-120.0, 40.0)));
+        assert_ne!(moved.close, layout.close);
+        assert_eq!(moved.close.size(), layout.close.size());
+    }
+
+    #[test]
+    fn pip_controls_are_always_perceptible_and_do_not_depend_on_hover() {
+        let source = include_str!("player_ui.rs");
+        let controls = &source[source.find("pub(crate) fn pip_controls").unwrap()
+            ..source.find("fn overlay_icon_button").unwrap()];
+        assert!(controls.contains("BG_INVERSE"));
+        assert!(!controls.contains("if !hovered"));
+        assert!(controls.contains("paint_pip_seek_bar"));
+        assert!(controls.contains("탭으로 돌아가기"));
+        assert!(controls.contains("10초 뒤로"));
+        assert!(controls.contains("10초 앞으로"));
+        assert!(!controls.contains("on_hover_text"));
+        assert!(controls.contains("output.hover_preview = Some(HoverPreview"));
+        assert!(!controls.contains("scrubber("));
+
+        let overlay_start = source.find("fn overlay_icon_button").unwrap();
+        let overlay = &source[overlay_start
+            ..source[overlay_start..]
+                .find("\n}")
+                .map(|offset| overlay_start + offset + 2)
+                .unwrap()];
+        assert!(!overlay.contains("rect_filled"));
+        assert!(!overlay.contains("from_black_alpha"));
+        assert!(!overlay.contains("egui::Frame"));
+    }
+
+    #[test]
     fn time_formatting_handles_short_long_and_invalid_values() {
         assert_eq!(format_time(0.0), "00:00");
         assert_eq!(format_time(197.9), "03:17");
@@ -1507,7 +1932,7 @@ mod tests {
     fn seek_preview_floats_above_the_track_in_parent_coordinates() {
         let windowed_track = Rect::from_min_max(Pos2::new(20.0, 700.0), Pos2::new(1_020.0, 704.0));
         let windowed = seek_preview_placement(520.0, windowed_track, PREVIEW_SIZE, Vec2::ZERO);
-        assert_eq!(windowed, Pos2::new(424.0, 572.0));
+        assert_eq!(windowed, Pos2::new(424.0, 544.0));
         assert_eq!(
             windowed.y + PREVIEW_SIZE.y + PREVIEW_GAP,
             windowed_track.top()
@@ -1516,7 +1941,7 @@ mod tests {
         let overlay_track = Rect::from_min_max(Pos2::new(12.0, 19.0), Pos2::new(1_868.0, 23.0));
         let overlay_origin = Vec2::new(16.0, 1_022.0);
         let fullscreen = seek_preview_placement(940.0, overlay_track, PREVIEW_SIZE, overlay_origin);
-        assert_eq!(fullscreen, Pos2::new(860.0, 913.0));
+        assert_eq!(fullscreen, Pos2::new(860.0, 885.0));
         assert_eq!(
             fullscreen.y + PREVIEW_SIZE.y + PREVIEW_GAP,
             overlay_track.top() + overlay_origin.y

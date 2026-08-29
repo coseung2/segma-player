@@ -9,6 +9,8 @@ const MEDIA_DOWNLOAD_TIMEOUT_MS = 10_000;
 const MAX_MEDIA_DOWNLOAD_URL_BYTES = 4_096;
 const MAX_MEDIA_DOWNLOAD_TITLE_BYTES = 512;
 const MAX_MEDIA_DOWNLOAD_ID_BYTES = 128;
+const MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES = 512;
+const MAX_MEDIA_DOWNLOAD_ACCEPT_LANGUAGE_BYTES = 256;
 const SUBTITLE_TIMEOUT_MS = 10_000;
 const MAX_SUBTITLE_URL_BYTES = 4_096;
 const MAX_SUBTITLE_TITLE_BYTES = 512;
@@ -18,9 +20,13 @@ const SAFE_SUBTITLE_TOKEN = /^[A-Za-z0-9_-]+$/;
 const SUBTITLE_INPUT_KEYS = new Set(["candidateId", "sourceLanguage", "media", "sourceContext"]);
 const SUBTITLE_MEDIA_KEYS = new Set(["type", "title", "pageUrl", "resourceUrl", "audioRenditionUrl"]);
 const SUBTITLE_CONTEXT_KEYS = new Set(["tabId", "frameId", "contextLeaseId"]);
-const MEDIA_DOWNLOAD_INPUT_KEYS = new Set(["jobId", "candidateId", "url", "referrer", "title", "inputKind"]);
+const MEDIA_DOWNLOAD_INPUT_KEYS = new Set([
+  "jobId", "candidateId", "url", "referrer", "title", "inputKind", "userAgent", "acceptLanguage",
+]);
 const MEDIA_DOWNLOAD_INPUT_KINDS = new Set(["PROGRESSIVE", "HLS_MASTER", "HLS_MEDIA", "DASH"]);
 const SAFE_MEDIA_DOWNLOAD_ID = /^[A-Za-z0-9_-]+$/;
+const SAFE_BROWSER_LANGUAGE = /^[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*$/;
+const SAFE_ACCEPT_LANGUAGE = /^[A-Za-z0-9,.;= -]+$/;
 let activePort = null;
 let activeCapabilities = new Set();
 let connectPromise = null;
@@ -46,6 +52,41 @@ function utf8Length(value) {
 
 function hasControlCharacter(value) {
   return /[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
+
+function validBrowserMetadata(value, maximum, pattern = null) {
+  return typeof value === "string"
+    && value.length > 0
+    && utf8Length(value) <= maximum
+    && !hasControlCharacter(value)
+    && (!pattern || pattern.test(value));
+}
+
+export function mediaDownloadBrowserContext(navigatorLike = globalThis.navigator) {
+  const userAgent = typeof navigatorLike?.userAgent === "string" ? navigatorLike.userAgent.trim() : "";
+  const sourceLanguages = Array.isArray(navigatorLike?.languages)
+    ? navigatorLike.languages
+    : [navigatorLike?.language];
+  const languages = [];
+  const seen = new Set();
+  for (const value of sourceLanguages) {
+    const language = typeof value === "string" ? value.trim() : "";
+    const key = language.toLowerCase();
+    if (!SAFE_BROWSER_LANGUAGE.test(language) || seen.has(key)) continue;
+    seen.add(key);
+    languages.push(language);
+    if (languages.length >= 10) break;
+  }
+  const acceptLanguage = languages.map((language, index) => {
+    if (index === 0) return language;
+    return `${language};q=${Math.max(0.1, 1 - index * 0.1).toFixed(1)}`;
+  }).join(",");
+  return {
+    ...(validBrowserMetadata(userAgent, MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES) ? { userAgent } : {}),
+    ...(validBrowserMetadata(acceptLanguage, MAX_MEDIA_DOWNLOAD_ACCEPT_LANGUAGE_BYTES, SAFE_ACCEPT_LANGUAGE)
+      ? { acceptLanguage }
+      : {}),
+  };
 }
 
 function containsForbiddenMediaDownloadInput(value, visited = new WeakSet()) {
@@ -122,10 +163,18 @@ function mediaDownloadPayload(input) {
     && SAFE_MEDIA_DOWNLOAD_ID.test(value);
   const url = canonicalPublicHttpUrl(input.url, { required: true });
   const referrer = canonicalPublicHttpUrl(input.referrer ?? "");
+  const userAgent = input.userAgent ?? "";
+  const acceptLanguage = input.acceptLanguage ?? "";
   if (!validId(input.jobId) || !validId(input.candidateId)
     || !url || referrer === null
     || !validBoundedText(input.title, MAX_MEDIA_DOWNLOAD_TITLE_BYTES, { required: true })
-    || !MEDIA_DOWNLOAD_INPUT_KINDS.has(input.inputKind)) {
+    || !MEDIA_DOWNLOAD_INPUT_KINDS.has(input.inputKind)
+    || (userAgent && !validBrowserMetadata(userAgent, MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES))
+    || (acceptLanguage && !validBrowserMetadata(
+      acceptLanguage,
+      MAX_MEDIA_DOWNLOAD_ACCEPT_LANGUAGE_BYTES,
+      SAFE_ACCEPT_LANGUAGE,
+    ))) {
     throw companionError("미디어 다운로드 요청 또는 공개 URL이 올바르지 않습니다.", "invalid-media-download-command");
   }
   return {
@@ -136,6 +185,8 @@ function mediaDownloadPayload(input) {
     ...(referrer ? { referrer } : {}),
     title: input.title,
     inputKind: input.inputKind,
+    ...(userAgent ? { userAgent } : {}),
+    ...(acceptLanguage ? { acceptLanguage } : {}),
   };
 }
 

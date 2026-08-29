@@ -12,10 +12,9 @@ copy as current product documentation.
 
 ## Product direction
 
-- **Browser extension:** primary browser interaction surface for detected media,
-  page subtitle tracks, link input, Download, Play, and Subtitle commands. It is
-  plan-neutral and performs no download, playback, subtitle processing, or file
-  management in the target product.
+- **Browser extension:** free, plan-neutral media detection and link handoff.
+  It performs no entitlement checks, download execution, playback, subtitle
+  processing, or file management.
 - **Companion:** execution engine for downloads and playback, plus persistent
   jobs, subtitle generation/translation/storage, media and subtitle folders,
   local tools, settings, diagnostics, application lifecycle, General/Pro
@@ -42,8 +41,9 @@ one download folder both entry points use.
 | --- | --- |
 | Cancel, pause, resume, retry | Marker files and the host's `--run-job` |
 | Library | Media files listed from the download folder |
-| Download folder | `settings.json`, written by either entry point |
+| Download folder | `settings.json`, written by the app |
 | Playback | System default player; an embedded engine is not built yet |
+| General/Pro authentication | App settings; verified against `/api/license` |
 
 [companion-ui](companion-ui/README.md) is an earlier HTML prototype of the same
 screens. It is reference material only and is not wired into any runtime.
@@ -59,6 +59,7 @@ the browser connector does not contain General/Pro product logic.
 | Concurrent media jobs | 1 | Unlimited |
 | Per-download byte limit | 1 GiB | No artificial cap |
 | YouTube tab | Not included in the store General edition | Direct Pro distribution only |
+| AI subtitle generation | Not included | Included |
 
 The development checkout currently uses the Pro profile in `edition.js`, and
 the Chrome Web Store packager replaces it with the audited General profile.

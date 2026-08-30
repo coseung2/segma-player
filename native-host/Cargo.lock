@@ -9,9 +9,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "aura-media-companion"
-version = "0.4.56"
+name = "aura-companion-contract"
+version = "0.4.57"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "aura-media-companion"
+version = "0.4.57"
+dependencies = [
+ "aura-companion-contract",
  "base64",
  "reqwest",
  "serde",

@@ -332,6 +332,32 @@ tests cover both callers.
 Exit gate: host and GUI consume the same disk-contract implementation, older
 state fixtures still load, and both Cargo suites pass.
 
+#### Phase 3 result — 2026-08-30
+
+Completed at development version `0.4.57` with a dependency-only shared crate,
+`companion-contract`:
+
+- `JobState`, its forward/legacy-compatible serde model, job-ID validation,
+  Companion root/jobs/settings paths, every job/marker/subtitle path, download
+  folder validation, JSON reads, and newest-first bounded state listing now
+  have one implementation.
+- `native-host` remains the writer and wraps only its host-specific atomic
+  persistence. `companion-gui` remains the reader/action initiator and keeps
+  settings presentation, marker writes, restart process launch, and library
+  behavior outside the contract crate.
+- Both consumers use the same local path dependency and the same `0.4.57`
+  contract version. The shared fixture tests cover current, future-field, and
+  legacy state files plus every disk ABI filename including subtitle requests.
+- Restart/resume launch remains GUI-owned because it resolves and launches the
+  installed host executable; only its stable request/marker path inputs were
+  unified.
+
+Validation at this checkpoint: shared contract 2 passed; native host 53
+passed; focused manager jobs 38 passed and full manager 185 passed; Rust format
+checks passed; manager Cargo check retained only three pre-existing
+unused-method warnings; development staging refreshed with 54 files at
+`0.4.57`.
+
 ### Phase 4 — simplify and split the shipped extension
 
 Only files reachable from `STORE_RUNTIME_FILES` are refactored in this phase.

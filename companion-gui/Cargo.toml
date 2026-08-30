@@ -1,6 +1,6 @@
 [package]
 name = "aura-media-manager"
-version = "0.4.55"
+version = "0.4.57"
 edition = "2021"
 rust-version = "1.95"
 build = "build.rs"
@@ -12,6 +12,7 @@ build = "build.rs"
 # This binary is launched by `--manager` and owns the window.
 
 [dependencies]
+aura-companion-contract = { path = "../companion-contract" }
 eframe = { version = "=0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 egui_extras = { version = "=0.36.1", default-features = false, features = ["image", "svg"] }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }

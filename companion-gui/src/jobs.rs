@@ -7,7 +7,8 @@
 //! Field names mirror the host's `JobState` serde renames. Unknown fields are
 //! ignored on purpose: a newer host must not break an older manager window.
 
-use serde::Deserialize;
+use aura_companion_contract as contract;
+pub use aura_companion_contract::JobState;
 use std::collections::{BTreeSet, HashSet};
 use std::env;
 use std::fs;
@@ -19,60 +20,16 @@ use serde_json::{json, Value};
 
 use crate::shortcuts::PlayerShortcuts;
 
-/// Matches the host's cap so a long history cannot grow the window without
-/// bound. The host already truncates to 100 when it serializes.
-const MAX_JOBS: usize = 100;
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct JobState {
-    #[serde(rename = "jobId")]
-    pub job_id: String,
-    #[serde(rename = "jobType", default)]
-    pub job_type: Option<String>,
-    #[serde(rename = "inputKind", default)]
-    pub input_kind: Option<String>,
-    #[serde(rename = "outputFormat", default)]
-    pub output_format: Option<String>,
-    #[serde(rename = "sourceLanguage", default)]
-    pub source_language: Option<String>,
-    #[serde(rename = "targetLanguage", default)]
-    pub target_language: Option<String>,
-    #[serde(default)]
-    pub phase: Option<String>,
-    #[serde(default)]
-    pub completed: Option<u64>,
-    #[serde(default)]
-    pub total: Option<u64>,
-    #[serde(default)]
-    pub status: String,
-    #[serde(rename = "statusText", default)]
-    pub status_text: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
-    #[serde(default)]
-    pub progress: Option<u8>,
-    #[serde(rename = "fileName", default)]
-    pub file_name: Option<String>,
-    #[serde(rename = "updatedAt", default)]
-    pub updated_at: u64,
-}
-
 pub fn companion_root() -> io::Result<PathBuf> {
-    if let Some(local) = env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(local).join("Aura Media").join("Companion"));
-    }
-    let executable = env::current_exe()?;
-    Ok(executable.parent().unwrap_or(Path::new(".")).to_path_buf())
+    contract::companion_root()
 }
 
 pub fn jobs_dir() -> io::Result<PathBuf> {
-    Ok(companion_root()?.join("jobs"))
+    contract::jobs_dir()
 }
 
 pub fn settings_path(root: &Path) -> PathBuf {
-    root.join("settings.json")
+    contract::settings_path(root)
 }
 
 /// Largest settings file the manager will parse, matching the host's own cap.
@@ -87,24 +44,7 @@ pub fn default_downloads_dir() -> io::Result<PathBuf> {
 /// Same rule the host applies: absolute, no traversal, no control characters.
 /// Both sides validate independently so neither trusts the other's writes.
 pub fn valid_download_folder(value: &str) -> Option<PathBuf> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() > 32_767 {
-        return None;
-    }
-    if trimmed.chars().any(char::is_control) {
-        return None;
-    }
-    let path = Path::new(trimmed);
-    if !path.is_absolute() {
-        return None;
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return None;
-    }
-    Some(path.to_path_buf())
+    contract::valid_download_folder(value)
 }
 
 pub fn read_download_folder_in(root: &Path) -> Option<PathBuf> {
@@ -227,66 +167,20 @@ pub fn write_download_folder(folder: &Path) -> io::Result<PathBuf> {
     write_download_folder_in(&companion_root()?, folder)
 }
 
-/// Same character rule the host uses, so a job id that the host would reject
-/// can never be turned into a path here either.
-pub fn safe_id(value: &str) -> Option<String> {
-    if value.is_empty() || value.len() > 128 {
-        return None;
-    }
-    if value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        Some(value.to_string())
-    } else {
-        None
-    }
-}
-
 pub fn cancel_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(directory.join(format!("{safe}.cancel")))
+    contract::cancel_path_in(directory, job_id)
 }
 
 pub fn pause_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(directory.join(format!("{safe}.pause")))
+    contract::pause_path_in(directory, job_id)
 }
 
 pub fn request_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(directory.join(format!("{safe}.request.json")))
+    contract::request_path_in(directory, job_id)
 }
 
 pub fn read_jobs_in(directory: &Path) -> io::Result<Vec<JobState>> {
-    let mut states = Vec::new();
-    for entry in fs::read_dir(directory)? {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
-        if !name.ends_with(".state.json") {
-            continue;
-        }
-        // A partially written state file is expected: the host writes
-        // atomically, but a reader can still catch a rename in flight. Skip it
-        // and pick it up on the next poll instead of failing the whole list.
-        if let Ok(bytes) = fs::read(&path) {
-            if let Ok(state) = serde_json::from_slice::<JobState>(&bytes) {
-                if !state.job_id.is_empty() {
-                    states.push(state);
-                }
-            }
-        }
-    }
-    states.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    states.truncate(MAX_JOBS);
-    Ok(states)
+    contract::list_job_states_in(directory)
 }
 
 /// Missing folder means the companion has simply never run a job, which is an
@@ -547,9 +441,7 @@ pub fn mark_queued_in(directory: &Path, job_id: &str, status_text: &str) -> io::
 }
 
 pub fn state_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(directory.join(format!("{safe}.state.json")))
+    contract::state_path_in(directory, job_id)
 }
 
 /// Job ids whose `.request.json` still exists, so a restart has something to
@@ -1998,6 +1890,10 @@ mod tests {
             ("state", state_path_in(&directory, job_id).unwrap()),
             ("cancel", cancel_path_in(&directory, job_id).unwrap()),
             ("pause", pause_path_in(&directory, job_id).unwrap()),
+            (
+                "subtitleRequest",
+                contract::subtitle_request_path_in(&directory, job_id).unwrap(),
+            ),
         ] {
             assert_eq!(
                 path.file_name().and_then(|value| value.to_str()),
@@ -2098,7 +1994,7 @@ mod tests {
                 "job id {bad:?} must be rejected"
             );
         }
-        assert!(safe_id("valid-id_09").is_some());
+        assert!(contract::safe_id("valid-id_09").is_some());
         fs::remove_dir_all(directory).expect("temp directory removes");
     }
 
@@ -2112,7 +2008,10 @@ mod tests {
                 &format!(r#"{{"jobId":"job{index}","status":"completed","updatedAt":{index}}}"#),
             );
         }
-        assert_eq!(read_jobs_in(&directory).expect("jobs read").len(), MAX_JOBS);
+        assert_eq!(
+            read_jobs_in(&directory).expect("jobs read").len(),
+            contract::MAX_JOB_STATES
+        );
         fs::remove_dir_all(directory).expect("temp directory removes");
     }
 

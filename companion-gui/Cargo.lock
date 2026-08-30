@@ -372,9 +372,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "aura-media-manager"
-version = "0.4.55"
+name = "aura-companion-contract"
+version = "0.4.57"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "aura-media-manager"
+version = "0.4.57"
+dependencies = [
+ "aura-companion-contract",
  "eframe",
  "egui_extras",
  "image",

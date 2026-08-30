@@ -2,8 +2,8 @@
 
 ## Status
 
-**IN PROGRESS — phases 0 through 6 are complete. Phase 7 integrated validation
-and handoff is the remaining phase.**
+**COMPLETE — phases 0 through 7 are complete. The refactor is handed off at
+development version `0.4.61`.**
 
 This is the current refactoring roadmap for the Companion-first product. It
 supersedes `MEDIA_MODULE_REFACTOR.md` as a roadmap; that file remains a
@@ -37,8 +37,8 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | 3. Shared host/GUI disk contract | Complete | `a20b46c`; shared crate and both Cargo suites |
 | 4. Shipped extension split | Complete | `0.4.58`; module boundaries and validation below |
 | 5. Packaging and retired runtime | Complete | `0.4.59`; shared graph and closure validation below |
-| 6. Native manager split | Complete | `0.4.60`; controller boundaries and validation below |
-| 7. Integrated validation and handoff | Pending | Pending |
+| 6. Native manager split | Complete | `cfa3d9f`; `0.4.60`; controller boundaries and validation below |
+| 7. Integrated validation and handoff | Complete | `0.4.61`; all deterministic suites and staging audit passed |
 
 ## Goal
 
@@ -499,7 +499,7 @@ as live evidence rather than inferred from unit tests or screenshots.
 
 #### Phase 6 result — 2026-08-31
 
-Completed at development version `0.4.60`:
+Completed in `cfa3d9f` at development version `0.4.60`:
 
 - `ManagerApp` now holds eight explicit top-level owners instead of the former
   flat state bag: disk polling snapshot, queue state, library state, player
@@ -567,6 +567,28 @@ installer, playback, or PiP behavior changes. Record these independently:
 Fixture success never implies a live site result. Detection never implies
 download. Untested surfaces remain `NOT_RUN`; code-only bug fixes remain
 `CODE-FIXED / LIVE-UNVERIFIED` until the actual user path is retested.
+
+#### Phase 7 result — 2026-08-31
+
+Completed at development handoff version `0.4.61`:
+
+- media-site suite: 48 passed;
+- full Node suite: 528 passed and 22 explicitly skipped;
+- shared Companion contract: 2 passed;
+- native host: 53 passed, with Rust formatting clean;
+- Companion GUI: 198 passed, with Rust formatting clean;
+- packaged runtime graph and exact staging closure: passed as part of the full
+  Node suite and the final development staging audit;
+- `git diff --check`: passed.
+
+The Pro development staging directory was rebuilt from the `0.4.61` source
+manifest and audited as the exact 57-file runtime graph. No development ZIP was
+created. This final phase changed only the handoff version and plan status after
+the integrated checks; it did not change runtime behavior.
+
+No installed Companion window, Chrome, Whale, PiP interaction, or live-site
+surface was exercised during the refactor handoff. Those surfaces remain
+`NOT_RUN`; no `INCIDENTS.md` or `SITE_QA_LOG.md` claim was added.
 
 ## Stop conditions
 

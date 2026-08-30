@@ -2,8 +2,8 @@
 
 ## Status
 
-**COMPLETE — phases 0 through 7 are complete. The refactor is handed off at
-development version `0.4.61`.**
+**REOPENED — the 2026-08-31 completion audit found unmet exit-gate details in
+phases 1 through 6. Remediation and a fresh Phase 7 handoff are in progress.**
 
 This is the current refactoring roadmap for the Companion-first product. It
 supersedes `MEDIA_MODULE_REFACTOR.md` as a roadmap; that file remains a
@@ -32,13 +32,35 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | Phase | Status | Completion evidence |
 | --- | --- | --- |
 | 0. Stable baseline | Complete | 2026-08-30 baseline plus committed PiP result |
-| 1. Trustworthy tests and frozen contracts | Complete | Shared protocol/disk fixtures; 2026-08-30 checks below |
-| 2. Native-host module split | Complete | `5834205`; 52 host tests and focused contract checks |
-| 3. Shared host/GUI disk contract | Complete | `a20b46c`; shared crate and both Cargo suites |
-| 4. Shipped extension split | Complete | `0.4.58`; module boundaries and validation below |
-| 5. Packaging and retired runtime | Complete | `0.4.59`; shared graph and closure validation below |
-| 6. Native manager split | Complete | `cfa3d9f`; `0.4.60`; controller boundaries and validation below |
-| 7. Integrated validation and handoff | Complete | `0.4.61`; all deterministic suites and staging audit passed |
+| 1. Trustworthy tests and frozen contracts | Reopened | Complete missing status/rejection/folder/diagnostic fixtures and test categorization |
+| 2. Native-host module split | Reopened | Move remaining media/subtitle execution out of `main.rs` |
+| 3. Shared host/GUI disk contract | Reopened | Restore host-only durable `JobState` writer ownership |
+| 4. Shipped extension split | Reopened | Replace route source slicing with handoff behavior tests |
+| 5. Packaging and retired runtime | Reopened | Physically quarantine retained legacy extension source and tests |
+| 6. Native manager split | Reopened | Finish player/PiP module boundary and re-audit native ownership |
+| 7. Integrated validation and handoff | Reopened | Pending remediation, version reconciliation, staging, and fresh audit |
+
+### Completion audit reopening — 2026-08-31
+
+The first Phase 7 pass proved the deterministic suites and package graph, but a
+requirement-by-requirement independent audit found that several written exit
+gates were broader than the implementation evidence. The prior `COMPLETE`
+label is therefore withdrawn until all of these items are closed:
+
+- freeze the missing status, rejected-command, download-folder, and redacted
+  diagnostic contracts; replace route source slicing with behavior tests and
+  expose shipped-versus-legacy test categories;
+- finish the native-host split so media execution and subtitle transport/state
+  orchestration no longer remain in the composition root;
+- make the host the only durable `JobState` writer while the manager writes
+  only command/request markers and keeps transient feedback in memory;
+- move retained extension-primary engines and their tests into an explicit
+  compatibility area without allowing them into the 57-file shipped graph;
+- finish the manager player/PiP module boundary and reconcile all product
+  component versions before rebuilding staging.
+
+Installed Chrome, Whale, Companion-window, PiP, and live-site validation remains
+`NOT_RUN`; this reopening does not change any incident or site-QA claim.
 
 ## Goal
 

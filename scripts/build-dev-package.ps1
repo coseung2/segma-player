@@ -29,48 +29,14 @@ try {
     -OutputDirectory $storeOut -Edition $Edition -Version $repoVersion | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Store package build failed.' }
 
-  # 2) Unpack and add the dev-only playback popup surface.
+  # 2) Unpack the exact Companion-first runtime. Development packages must not
+  # resurrect the quarantined extension-primary player or subtitle surfaces.
   $storeZip = Join-Path $storeOut $archiveName
   if (-not (Test-Path -LiteralPath $storeZip -PathType Leaf)) {
     throw "Store package not found: $storeZip"
   }
   $stage = Join-Path $tempRoot 'stage'
   Expand-Archive -LiteralPath $storeZip -DestinationPath $stage
-
-  foreach ($relative in @(
-    'popup-play.html',
-    'playback-addon.js',
-    'contextual-hls-loader.js',
-    'hls-playback-recovery.js',
-    'collection.js',
-    'player.html',
-    'player.js',
-    'player-subtitle.js',
-    'subtitle-generation.js',
-    'subtitle-folder.html',
-    'subtitle-folder.js',
-    'vendor/hls.min.mjs'
-  )) {
-    $source = Join-Path $ProjectRoot $relative
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-      throw "Dev package file missing: $relative"
-    }
-    $destination = Join-Path $stage $relative
-    New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($destination)) -Force | Out-Null
-    Copy-Item -LiteralPath $source -Destination $destination -Force
-  }
-
-  $manifestPath = Join-Path $stage 'manifest.json'
-  $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-  $manifest.action.default_popup = 'popup-play.html'
-  $permissions = @($manifest.permissions)
-  if ($permissions -notcontains 'bookmarks') {
-    $manifest.permissions = @($permissions + 'bookmarks' | Sort-Object)
-  }
-  [System.IO.File]::WriteAllText(
-    $manifestPath,
-    ($manifest | ConvertTo-Json -Depth 12),
-    (New-Object System.Text.UTF8Encoding($false)))
 
   # 3) Re-zip deterministically into site/downloads (what the site serves).
   $outputZip = Join-Path $ProjectRoot "site\downloads\$archiveName"

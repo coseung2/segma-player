@@ -1,6 +1,6 @@
 import { createDashDownloader } from "./dash.js";
 import { createHlsDownloader } from "./hls.js";
-import { downloaderIdForMediaType, DOWNLOADER_IDS } from "./ids.js";
+import { downloaderIdForMediaType, DOWNLOADER_IDS } from "../../../downloaders/ids.js";
 import { createProgressiveDownloader } from "./progressive.js";
 
 const PREPARED_TYPE_TO_ID = Object.freeze({

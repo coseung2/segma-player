@@ -3,7 +3,9 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "test:media-sites": "node --test sites/registry.test.mjs downloaders/registry.test.mjs download-policy.test.mjs candidate-ranking.test.mjs site-regression.test.mjs",
+    "test:shipped": "node scripts/run-node-test-category.mjs shipped",
+    "test:legacy": "node scripts/run-node-test-category.mjs legacy",
+    "test:media-sites": "node --test sites/registry.test.mjs download-policy.test.mjs candidate-ranking.test.mjs site-regression.test.mjs",
     "monitor:media-sites": "node scripts/live-media-smoke.mjs",
     "build:dev-staging": "node scripts/build-dev-staging.mjs --edition=pro",
     "deploy": "wrangler deploy",

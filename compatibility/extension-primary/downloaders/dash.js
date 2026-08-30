@@ -1,5 +1,5 @@
 import { DASH_ERROR_CODES, DashParseError, parseDashManifest } from "../dash.js";
-import { DOWNLOADER_IDS } from "./ids.js";
+import { DOWNLOADER_IDS } from "../../../downloaders/ids.js";
 
 function safeFilename(title, extension) {
   const safe = String(title || "DASH 영상")

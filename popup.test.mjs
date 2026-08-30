@@ -13,8 +13,8 @@ const OWNED = {
   popupHtml: new URL("./popup.html", import.meta.url),
   popupJs: new URL("./popup.js", import.meta.url),
   popupCss: new URL("./popup.css", import.meta.url),
-  optionsHtml: new URL("./options.html", import.meta.url),
-  optionsJs: new URL("./options.js", import.meta.url),
+  optionsHtml: new URL("./compatibility/extension-primary/options.html", import.meta.url),
+  optionsJs: new URL("./compatibility/extension-primary/options.js", import.meta.url),
 };
 
 async function readOwned() {

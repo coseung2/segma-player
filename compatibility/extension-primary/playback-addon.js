@@ -1,7 +1,7 @@
 import { decodeSubtitleBytes, findSubtitleFile } from "./player-subtitle.js";
 import { getStoredSubtitleDirectory, storeSubtitleDirectory } from "./subtitle-folder.js";
 import { resolveEdition } from "./license.js";
-import { loadLocale } from "./i18n.js";
+import { loadLocale } from "../../i18n.js";
 
 const MESSAGES = {
   ko: {

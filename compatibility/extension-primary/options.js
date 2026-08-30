@@ -1,11 +1,11 @@
-import { COMPANION_INSTALL_URL } from "./edition.js";
+import { COMPANION_INSTALL_URL } from "../../edition.js";
 import {
   LOCALE_STORAGE_KEY,
   applyStaticTranslations,
   loadLocale,
   normalizeLocale,
   translator,
-} from "./i18n.js";
+} from "../../i18n.js";
 
 const MEDIA_DOWNLOAD_CAPABILITY = "media-download-v1";
 

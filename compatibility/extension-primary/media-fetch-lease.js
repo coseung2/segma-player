@@ -1,4 +1,4 @@
-import { canonicalHttpUrl } from "./candidate.js";
+import { canonicalHttpUrl } from "../../candidate.js";
 
 export const MEDIA_FETCH_RESOURCE_TYPES = Object.freeze(["xmlhttprequest", "other", "media"]);
 export const MEDIA_FETCH_RULE_ID_START = 1_000_000_000;

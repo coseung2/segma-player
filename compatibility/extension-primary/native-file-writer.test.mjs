@@ -16,10 +16,10 @@ test("native file chunks stay below Chrome native-message limits and round-trip"
 test("the retired native writer stays unreachable from the thin extension runtime", async () => {
   const [writer, background, companion, downloader, staging] = await Promise.all([
     readFile(new URL("./native-file-writer.js", import.meta.url), "utf8"),
-    readFile(new URL("./background.js", import.meta.url), "utf8"),
-    readFile(new URL("./companion-client.js", import.meta.url), "utf8"),
+    readFile(new URL("../../background.js", import.meta.url), "utf8"),
+    readFile(new URL("../../companion-client.js", import.meta.url), "utf8"),
     readFile(new URL("./hls-download.js", import.meta.url), "utf8"),
-    readFile(new URL("./scripts/build-dev-staging.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../../scripts/build-dev-staging.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(writer, /native-file-writer/);
   assert.doesNotMatch(background, /connectNative|native-file-writer|getStoredSaveDirectory/);

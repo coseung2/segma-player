@@ -7,7 +7,7 @@ import {
 } from "./hls-download.js";
 import { parallelDownload } from "./parallel-download.js";
 import { createDownloadScheduler } from "./download-scheduler.js";
-import { PRODUCT_EDITION } from "./edition.js";
+import { PRODUCT_EDITION } from "../../edition.js";
 import { resolvePlan } from "./license.js";
 import { productPlan } from "./product-plan.js";
 import {

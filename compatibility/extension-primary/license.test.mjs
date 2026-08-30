@@ -80,7 +80,7 @@ test("pending keys are reported without storing Pro", async () => {
   assert.equal(result.error, "license-pending");
   await delay();
   assert.equal(env.storage.has("auraLicense"), false);
-  assert.equal(await mod.resolveEdition(), (await import("./edition.js")).PRODUCT_EDITION);
+  assert.equal(await mod.resolveEdition(), (await import("../../edition.js")).PRODUCT_EDITION);
 });
 
 test("invalid keys and unreachable servers fail closed to the packaged edition", async () => {
@@ -92,7 +92,7 @@ test("invalid keys and unreachable servers fail closed to the packaged edition",
   const unreachable = await mod.activateLicense("am-abcdef0123456789");
   assert.equal(unreachable.error, "license-server-unreachable");
   await delay();
-  assert.equal(await mod.resolveEdition(), (await import("./edition.js")).PRODUCT_EDITION);
+  assert.equal(await mod.resolveEdition(), (await import("../../edition.js")).PRODUCT_EDITION);
 });
 
 test("refreshLicense keeps Pro only while the server still approves the key", async () => {

@@ -1,4 +1,4 @@
-import { localizeStatusText, translator } from "./i18n.js";
+import { localizeStatusText, translator } from "../../i18n.js";
 
 const STATUS_KEYS = Object.freeze({
   queued: "status.queued",

@@ -1,4 +1,4 @@
-import { canonicalHttpUrl } from "./candidate.js";
+import { canonicalHttpUrl } from "../../candidate.js";
 
 export const PLAYBACK_SESSION_LIMITS = Object.freeze({
   maxEntries: 24,

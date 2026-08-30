@@ -1,4 +1,4 @@
-import { DOWNLOADER_IDS } from "./ids.js";
+import { DOWNLOADER_IDS } from "../../../downloaders/ids.js";
 
 export function createProgressiveDownloader(deps) {
   return Object.freeze({

@@ -6,9 +6,9 @@ const [addon, player, playerHtml, background, content, manifest] = await Promise
   readFile(new URL("./playback-addon.js", import.meta.url), "utf8"),
   readFile(new URL("./player.js", import.meta.url), "utf8"),
   readFile(new URL("./player.html", import.meta.url), "utf8"),
-  readFile(new URL("./background.js", import.meta.url), "utf8"),
-  readFile(new URL("./content.js", import.meta.url), "utf8"),
-  readFile(new URL("./manifest.json", import.meta.url), "utf8").then(JSON.parse),
+  readFile(new URL("../../background.js", import.meta.url), "utf8"),
+  readFile(new URL("../../content.js", import.meta.url), "utf8"),
+  readFile(new URL("../../manifest.json", import.meta.url), "utf8").then(JSON.parse),
 ]);
 
 test.skip("browser playback launches with an opaque session id instead of a token URL", () => {

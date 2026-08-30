@@ -1,5 +1,5 @@
 import { hlsFileExtension } from "../hls.js";
-import { DOWNLOADER_IDS } from "./ids.js";
+import { DOWNLOADER_IDS } from "../../../downloaders/ids.js";
 
 export function createHlsDownloader(deps) {
   return Object.freeze({

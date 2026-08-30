@@ -1,4 +1,4 @@
-import { canonicalHttpUrl, normalizeOriginPath } from "./candidate.js";
+import { canonicalHttpUrl, normalizeOriginPath } from "../../candidate.js";
 
 export const REQUEST_HEADER_STORE_LIMITS = Object.freeze({
   maxEntries: 256,

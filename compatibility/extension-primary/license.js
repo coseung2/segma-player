@@ -1,4 +1,4 @@
-import { PRODUCT_EDITION } from "./edition.js";
+import { PRODUCT_EDITION } from "../../edition.js";
 import { productPlan } from "./product-plan.js";
 
 export const LICENSE_STORAGE_KEY = "auraLicense";

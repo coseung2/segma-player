@@ -1,4 +1,4 @@
-import { canonicalHttpUrl, normalizeOriginPath } from "./candidate.js";
+import { canonicalHttpUrl, normalizeOriginPath } from "../../candidate.js";
 import {
   activeKeyForSegment,
   chooseHlsAudioRendition,
@@ -11,14 +11,14 @@ import {
 } from "./hls.js";
 import { chooseDashRepresentation, dashTracksForPlan } from "./downloaders/dash.js";
 import { createDownloaderRegistry } from "./downloaders/registry.js";
-import { filenameForDownload } from "./download.js";
+import { filenameForDownload } from "../../download.js";
 import {
   DEFAULT_FILENAME_TEMPLATE,
   FILENAME_TEMPLATE_STORAGE_KEY,
   formatFilenameTemplate,
 } from "./filename-template.js";
-import { PRODUCT_EDITION } from "./edition.js";
-import { level5KeyErrorMessage, normalizeLevel5KeyError } from "./level5-key-error.js";
+import { PRODUCT_EDITION } from "../../edition.js";
+import { level5KeyErrorMessage, normalizeLevel5KeyError } from "../../level5-key-error.js";
 import { parallelDownload } from "./parallel-download.js";
 import { progressiveDownloadErrorMessage, replayableRecordedHeaders } from "./progressive-redirect.js";
 import { productPlan } from "./product-plan.js";
@@ -29,7 +29,7 @@ import {
 } from "./download-checkpoint.js";
 import { createUniqueFile, getStoredSaveDirectory, hasReadWritePermission } from "./save-directory.js";
 import { createNativeFileWriter } from "./native-file-writer.js";
-import { downloadPolicyForCandidate } from "./download-policy.js";
+import { downloadPolicyForCandidate } from "../../download-policy.js";
 
 export const MAX_HLS_SEGMENTS = 10_000;
 const SUPPORTED_KEY_METHODS = new Set(["AES-128", "AES-256"]);

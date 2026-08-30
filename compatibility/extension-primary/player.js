@@ -11,7 +11,7 @@ import {
   replaceInCollection,
 } from "./collection.js";
 import { resolveEdition } from "./license.js";
-import { loadLocale } from "./i18n.js";
+import { loadLocale } from "../../i18n.js";
 import { loadGeneratedSubtitle } from "./subtitle-generation.js";
 
 const NO_SUBTITLE_MESSAGES = {

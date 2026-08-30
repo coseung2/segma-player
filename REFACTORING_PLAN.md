@@ -32,11 +32,11 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | Phase | Status | Completion evidence |
 | --- | --- | --- |
 | 0. Stable baseline | Complete | 2026-08-30 baseline plus committed PiP result |
-| 1. Trustworthy tests and frozen contracts | In progress | Missing status/rejection/folder/diagnostic fixtures are frozen; test categorization remains |
+| 1. Trustworthy tests and frozen contracts | Complete | Frozen cross-process fixtures plus non-empty, disjoint shipped/legacy commands |
 | 2. Native-host module split | Complete | Media execution and subtitle transport/state orchestration moved out of `main.rs`; native host 58 passed |
 | 3. Shared host/GUI disk contract | Complete | Host is the only durable `JobState` writer; manager writes markers and transient notices only |
 | 4. Shipped extension split | Complete | Ranked-candidate and pasted-link routes share one behavior-tested Companion router |
-| 5. Packaging and retired runtime | Reopened | Physically quarantine retained legacy extension source and tests |
+| 5. Packaging and retired runtime | Complete | 73 extension-primary files quarantined; 58-file shipped graph and dev tooling reject re-entry |
 | 6. Native manager split | Complete | Player/PiP state, HWND lifecycle, geometry, and orchestration have explicit owners; GUI 202 passed |
 | 7. Integrated validation and handoff | Reopened | Pending remediation, version reconciliation, staging, and fresh audit |
 
@@ -533,6 +533,25 @@ passed; full Node suite 528 passed and 22 explicitly skipped; shared contract 2
 passed; native host 53 passed; Companion GUI 185 passed; both Rust format checks
 and `git diff --check` passed. No live browser or installed Companion check is
 claimed for packaging-only changes; live validation is `NOT_RUN`.
+
+#### Phase 5 remediation — 2026-08-31
+
+- Moved 44 retained extension-primary source/assets and their 29 tests under
+  `compatibility/extension-primary/`. The compatibility closure shares only 38
+  modules that are independently reachable from the 58-file shipped graph;
+  there are no missing or outside-runtime import edges.
+- Added centralized `npm run test:shipped` and `npm run test:legacy` commands.
+  The categories are non-empty, disjoint, exhaustive, and still compose to the
+  broad automatic `npm test` discovery run.
+- Runtime/source hygiene tests prevent shipped imports or allowlist entries
+  from pointing into compatibility. Development ZIP tooling now packages the
+  same Companion-first graph and cannot re-add the retired popup/player,
+  subtitle pages, or bookmarks permission.
+- Compatibility validation after the development-tooling guard: shipped Node
+  category 357 total/340 passed/17 skipped; legacy category 203 total/198
+  passed/5 skipped; broad Node suite 560 total/538 passed/22 skipped;
+  media-site suite 46 passed; focused package graph suite 32 passed. Live
+  browser behavior remains `NOT_RUN`.
 
 ### Phase 6 — split the native manager after PiP work lands
 

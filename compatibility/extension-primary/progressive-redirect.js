@@ -1,4 +1,4 @@
-import { canonicalHttpUrl } from "./candidate.js";
+import { canonicalHttpUrl } from "../../candidate.js";
 
 export const PROGRESSIVE_REDIRECT_CACHE_TTL_MS = 60_000;
 export const PROGRESSIVE_REDIRECT_MAX_HOPS = 10;

@@ -1,0 +1,16 @@
+{
+  "jobId": "job-state-fixture",
+  "jobType": "media",
+  "requestId": "fixture-request-123",
+  "candidateId": "candidate-123",
+  "inputKind": "HLS_MASTER",
+  "executionStatus": "running",
+  "status": "running",
+  "statusText": "다운로드 중…",
+  "title": "Fixture media",
+  "progress": 42,
+  "fileName": "Fixture media.mp4",
+  "createdAt": 100,
+  "updatedAt": 200,
+  "futureField": "ignored-by-manager"
+}

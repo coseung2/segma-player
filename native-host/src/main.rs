@@ -5709,27 +5709,18 @@ mod tests {
     }
 
     fn sample_media_download_command() -> Value {
-        json!({
-            "type": "media-download",
-            "protocolVersion": 1,
-            "requestId": "request-123",
-            "jobId": "media-job-123",
-            "candidateId": "candidate-123",
-            "url": "https://cdn.example.com/video/master.m3u8?token=public",
-            "referrer": "https://player.example.com/watch/123",
-            "title": "Sample media",
-            "inputKind": "HLS_MASTER",
-            "userAgent": "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36",
-            "acceptLanguage": "ko,en-US;q=0.9,en;q=0.8"
-        })
+        serde_json::from_str(include_str!(
+            "../../test-fixtures/companion/media-download-v1.json"
+        ))
+        .expect("shared media-download fixture parses")
     }
 
     #[test]
     fn media_download_v1_accepts_only_the_bounded_public_contract() {
         let bytes = serde_json::to_vec(&sample_media_download_command()).unwrap();
         let command = parse_media_download_command_bytes(&bytes).expect("valid command parses");
-        assert_eq!(command.job_id, "media-job-123");
-        assert_eq!(command.request_id, "request-123");
+        assert_eq!(command.job_id, "job-123");
+        assert_eq!(command.request_id, "fixture-request-123");
         assert_eq!(command.input_kind, "HLS_MASTER");
         assert_eq!(command.accept_language, "ko,en-US;q=0.9,en;q=0.8");
 
@@ -5828,7 +5819,7 @@ mod tests {
         assert_eq!(state.job_type.as_deref(), Some("media"));
         assert_eq!(state.candidate_id.as_deref(), Some("candidate-123"));
         assert_eq!(state.input_kind.as_deref(), Some("HLS_MASTER"));
-        assert_eq!(state.title.as_deref(), Some("Sample media"));
+        assert_eq!(state.title.as_deref(), Some("Sample video"));
 
         let mut process = Command::new("yt-dlp.exe");
         configure_media_download_command(
@@ -5849,13 +5840,13 @@ mod tests {
         );
         assert!(arguments
             .windows(2)
-            .any(|window| { window == ["--referer", "https://player.example.com/watch/123"] }));
-        assert!(arguments.windows(2).any(|window| {
-            window == ["--user-agent", "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36"]
-        }));
+            .any(|window| { window == ["--referer", "https://page.example/watch?id=7"] }));
         assert!(arguments
             .windows(2)
-            .any(|window| { window == ["--add-headers", "Origin:https://player.example.com"] }));
+            .any(|window| { window == ["--user-agent", "Mozilla/5.0 TestBrowser/151.0"] }));
+        assert!(arguments
+            .windows(2)
+            .any(|window| { window == ["--add-headers", "Origin:https://page.example"] }));
         assert!(arguments.windows(2).any(|window| {
             window == ["--add-headers", "Accept-Language:ko,en-US;q=0.9,en;q=0.8"]
         }));
@@ -5973,23 +5964,17 @@ mod tests {
 
     #[test]
     fn the_hello_reply_advertises_the_new_commands() {
-        // The extension decides which controls to show from this list, so a
-        // command added to the dispatch must appear here too.
-        let source = include_str!("main.rs");
-        for capability in [
-            "pause",
-            "resume",
-            "retry",
-            "set-download-folder",
-            "play-file",
-            "media-download-v1",
-        ] {
-            assert!(
-                source.contains(&format!("\"{capability}\"")),
-                "capability {capability} is missing from the hello reply"
-            );
-        }
-        assert!(companion_capabilities().contains(&"media-download-v1"));
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../test-fixtures/companion/hello-v2.json"))
+                .expect("shared hello fixture parses");
+        assert_eq!(fixture["protocol"], PROTOCOL_VERSION);
+        let expected = fixture["capabilities"]
+            .as_array()
+            .expect("capabilities are an array")
+            .iter()
+            .map(|value| value.as_str().expect("capability is text"))
+            .collect::<Vec<_>>();
+        assert_eq!(companion_capabilities(), expected.as_slice());
     }
 
     #[test]

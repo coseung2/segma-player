@@ -1,0 +1,9 @@
+{
+  "jobId": "job-abc",
+  "request": "job-abc.request.json",
+  "state": "job-abc.state.json",
+  "cancel": "job-abc.cancel",
+  "pause": "job-abc.pause",
+  "subtitleRequest": "job-abc.subtitle.request.json",
+  "settings": "settings.json"
+}

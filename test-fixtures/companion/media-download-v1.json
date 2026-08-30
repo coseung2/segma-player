@@ -1,0 +1,13 @@
+{
+  "type": "media-download",
+  "protocolVersion": 1,
+  "requestId": "fixture-request-123",
+  "jobId": "job-123",
+  "candidateId": "candidate-123",
+  "url": "https://media.example/video/master.m3u8",
+  "referrer": "https://page.example/watch?id=7",
+  "title": "Sample video",
+  "inputKind": "HLS_MASTER",
+  "userAgent": "Mozilla/5.0 TestBrowser/151.0",
+  "acceptLanguage": "ko,en-US;q=0.9,en;q=0.8"
+}

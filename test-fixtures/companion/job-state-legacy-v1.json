@@ -1,0 +1,7 @@
+{
+  "jobId": "legacy-job-fixture",
+  "status": "completed",
+  "statusText": "완료",
+  "fileName": "legacy.mp4",
+  "updatedAt": 50
+}

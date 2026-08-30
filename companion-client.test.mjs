@@ -1,5 +1,6 @@
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
   MEDIA_COMPANION_NATIVE_HOST,
   MEDIA_COMPANION_PROTOCOL,
@@ -13,6 +14,15 @@ import {
   startCompanionMediaDownload,
   startCompanionSubtitleJob,
 } from "./companion-client.js";
+
+const helloContract = JSON.parse(await readFile(
+  new URL("./test-fixtures/companion/hello-v2.json", import.meta.url),
+  "utf8",
+));
+const mediaDownloadContract = JSON.parse(await readFile(
+  new URL("./test-fixtures/companion/media-download-v1.json", import.meta.url),
+  "utf8",
+));
 
 class FakeEvent {
   constructor() {
@@ -87,15 +97,16 @@ function installFakeChrome(onPost = null, { capabilities = [] } = {}) {
 }
 
 function sampleMediaDownloadInput() {
+  const {
+    type: _type,
+    protocolVersion: _protocolVersion,
+    requestId: _requestId,
+    ...input
+  } = mediaDownloadContract;
   return {
-    jobId: "job-123",
-    candidateId: "candidate-123",
-    url: "https://media.example:443/video/master.m3u8#fragment",
-    referrer: "https://page.example:443/watch?id=7#player",
-    title: "Sample video",
-    inputKind: "HLS_MASTER",
-    userAgent: "Mozilla/5.0 TestBrowser/151.0",
-    acceptLanguage: "ko,en-US;q=0.9,en;q=0.8",
+    ...input,
+    url: `${input.url}#fragment`,
+    referrer: `${input.referrer}#player`,
   };
 }
 
@@ -139,24 +150,21 @@ test("media-download v1 sends only the allowlisted canonical handoff payload", a
   assert.equal(response.accepted, true);
   const [hello, download] = fake.ports[0].messages;
   assert.deepEqual(hello.capabilities, undefined);
-  assert.deepEqual(download, {
-    protocolVersion: MEDIA_DOWNLOAD_PROTOCOL,
-    jobId: "job-123",
-    candidateId: "candidate-123",
-    url: "https://media.example/video/master.m3u8",
-    referrer: "https://page.example/watch?id=7",
-    title: "Sample video",
-    inputKind: "HLS_MASTER",
-    userAgent: "Mozilla/5.0 TestBrowser/151.0",
-    acceptLanguage: "ko,en-US;q=0.9,en;q=0.8",
-    type: "media-download",
-    requestId: download.requestId,
-  });
+  assert.deepEqual(
+    { ...download, requestId: mediaDownloadContract.requestId },
+    mediaDownloadContract,
+  );
   assert.deepEqual(
     Object.keys(download).sort(),
     ["acceptLanguage", "candidateId", "inputKind", "jobId", "protocolVersion", "referrer", "requestId", "title", "type", "url", "userAgent"].sort(),
   );
   assert.equal(JSON.stringify(download).match(/cookie|authorization|header|license|bytes|path/gi), null);
+});
+
+test("hello constants match the shared native-host contract fixture", () => {
+  assert.equal(MEDIA_COMPANION_PROTOCOL, helloContract.protocol);
+  assert.ok(helloContract.capabilities.includes(MEDIA_DOWNLOAD_CAPABILITY));
+  assert.equal(MEDIA_DOWNLOAD_PROTOCOL, mediaDownloadContract.protocolVersion);
 });
 
 test("media-download derives bounded non-secret browser request metadata", () => {

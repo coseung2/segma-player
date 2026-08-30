@@ -1900,6 +1900,15 @@ mod tests {
         fs::write(directory.join(format!("{job_id}.state.json")), body).expect("state file writes");
     }
 
+    fn shared_fixture(name: &str) -> &'static str {
+        match name {
+            "current" => include_str!("../../test-fixtures/companion/job-state-v1.json"),
+            "legacy" => include_str!("../../test-fixtures/companion/job-state-legacy-v1.json"),
+            "disk" => include_str!("../../test-fixtures/companion/disk-abi-v1.json"),
+            _ => panic!("unknown shared fixture: {name}"),
+        }
+    }
+
     #[test]
     fn reads_states_newest_first_and_ignores_other_files() {
         let directory = temp_dir("read");
@@ -1952,6 +1961,56 @@ mod tests {
         );
         let jobs = read_jobs_in(&directory).expect("jobs read");
         assert_eq!(jobs.len(), 1);
+        fs::remove_dir_all(directory).expect("temp directory removes");
+    }
+
+    #[test]
+    fn shared_host_job_state_fixtures_remain_readable() {
+        let directory = temp_dir("shared-state");
+        write_state(&directory, "job-state-fixture", shared_fixture("current"));
+        write_state(&directory, "legacy-job-fixture", shared_fixture("legacy"));
+
+        let jobs = read_jobs_in(&directory).expect("shared job states read");
+        assert_eq!(jobs.len(), 2);
+        let current = jobs
+            .iter()
+            .find(|job| job.job_id == "job-state-fixture")
+            .expect("current fixture is present");
+        assert_eq!(current.input_kind.as_deref(), Some("HLS_MASTER"));
+        assert_eq!(current.progress, Some(42));
+        let legacy = jobs
+            .iter()
+            .find(|job| job.job_id == "legacy-job-fixture")
+            .expect("legacy fixture is present");
+        assert_eq!(legacy.status, "completed");
+        assert_eq!(legacy.file_name.as_deref(), Some("legacy.mp4"));
+
+        fs::remove_dir_all(directory).expect("temp directory removes");
+    }
+
+    #[test]
+    fn shared_disk_abi_fixture_matches_manager_paths() {
+        let directory = temp_dir("shared-disk-abi");
+        let fixture: Value = serde_json::from_str(shared_fixture("disk")).expect("fixture parses");
+        let job_id = fixture["jobId"].as_str().expect("job id is present");
+        for (key, path) in [
+            ("request", request_path_in(&directory, job_id).unwrap()),
+            ("state", state_path_in(&directory, job_id).unwrap()),
+            ("cancel", cancel_path_in(&directory, job_id).unwrap()),
+            ("pause", pause_path_in(&directory, job_id).unwrap()),
+        ] {
+            assert_eq!(
+                path.file_name().and_then(|value| value.to_str()),
+                fixture[key].as_str(),
+                "{key} path drifted from the shared disk ABI"
+            );
+        }
+        assert_eq!(
+            settings_path(&directory)
+                .file_name()
+                .and_then(|value| value.to_str()),
+            fixture["settings"].as_str()
+        );
         fs::remove_dir_all(directory).expect("temp directory removes");
     }
 

@@ -33,7 +33,7 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | Phase | Status | Completion evidence |
 | --- | --- | --- |
 | 0. Stable baseline | Complete for non-GUI scope | 2026-08-30 baseline below; GUI baseline deferred |
-| 1. Trustworthy tests and frozen contracts | In progress | Windows path fix complete; cross-process fixtures pending |
+| 1. Trustworthy tests and frozen contracts | Complete | Shared protocol/disk fixtures; 2026-08-30 checks below |
 | 2. Native-host module split | Pending | Pending |
 | 3. Shared host/GUI disk contract | Pending | Pending |
 | 4. Shipped extension split | Pending | Pending |
@@ -237,6 +237,27 @@ Before moving production code:
 Exit gate: `npm test` is genuinely green on the local Windows path without
 skipping the repaired checks, both Cargo suites pass, and frozen contracts have
 cross-process fixtures.
+
+#### Phase 1 result — 2026-08-30
+
+- Replaced all three URL-`.pathname` repository-root calculations with
+  `fileURLToPath`; the local full Node suite now passes on the spaced Windows
+  workspace path.
+- Added shared fixtures under `test-fixtures/companion/` for protocol 2 hello
+  capabilities, `media-download-v1`, current and legacy job-state JSON, and the
+  disk filename ABI.
+- `companion-client.test.mjs` and native-host tests consume the same hello/media
+  fixtures, covering protocol constants, allowlisted fields, `requestId`, and
+  command validation without copying separate expected envelopes.
+- Manager job tests consume the shared current/legacy state fixtures and disk
+  path fixture. The current fixture includes an unknown future field to preserve
+  the older-manager/newer-host compatibility rule.
+- Focused Companion client: 14 passed, 0 failed.
+- Native host: 45 passed, 0 failed.
+- Companion GUI after PiP completion: 185 passed, 0 failed. Only
+  `companion-gui/src/jobs.rs` was changed by this phase; the completed PiP diff
+  was treated as baseline and not rewritten.
+- Both Rust format checks and `git diff --check` pass after formatting.
 
 ### Phase 2 — split the native host inside the existing crate
 

@@ -13,6 +13,7 @@ import {
 } from "./candidate.js";
 import { createCandidateRepository } from "./background-candidate-repository.js";
 import { createCompanionHandoff, isYouTubeDetectionCandidate } from "./background-companion-handoff.js";
+import { createDownloadRouter } from "./background-download-router.js";
 import { createPlayerResolutionCoordinator } from "./background-player-resolution.js";
 import { createProgressiveRedirectStore, createQaRequestTraceStore } from "./background-request-evidence.js";
 import { DOWNLOAD_MENU_ID } from "./download.js";
@@ -293,6 +294,13 @@ const {
   beginCandidateDownload,
   startYouTubeDownload,
 } = createCompanionHandoff({ resolveCandidate: resolvePlayerCandidate });
+const downloadRouter = createDownloadRouter({
+  candidates,
+  ensureDirectMediaAccess,
+  playerGraphResolver,
+  observeResource,
+  beginCandidateDownload,
+});
 
 chrome.webRequest.onCompleted?.addListener(
   (details) => {
@@ -606,22 +614,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 
   if (message?.type === "download-candidate" && isExtensionUiSender(sender)) {
-    const candidate = [...candidates.values()].find((item) => item.id === message.candidateId);
-    if (!candidate) {
-      sendResponse({
-        type: "download-result",
-        candidateId: message.candidateId,
-        ok: false,
-        error: "candidate-not-found",
-      });
-      return false;
-    }
-
-    Promise.resolve(beginCandidateDownload(candidate)).then(
-      (result) => sendResponse({ type: "download-result", candidateId: candidate.id, ok: true, ...result }),
+    Promise.resolve(downloadRouter.downloadCandidate(message.candidateId)).then(
+      ({ candidate, result }) => sendResponse({ type: "download-result", candidateId: candidate.id, ok: true, ...result }),
       (error) => sendResponse({
         type: "download-result",
-        candidateId: candidate.id,
+        candidateId: error?.candidateId || message.candidateId,
         ok: false,
         error: error?.code || candidateDownloadErrorCode(error),
         message: error?.message || "",
@@ -646,81 +643,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 
   if (message?.type === "download-url" && isExtensionUiSender(sender)) {
-    const resourceUrl = canonicalHttpUrl(message.url);
-    if (!resourceUrl) {
-      sendResponse({ type: "download-result", candidateId: null, ok: false, error: "invalid-url" });
-      return false;
-    }
-    (async () => {
-      await ensureDirectMediaAccess([resourceUrl.href]);
-      let targetUrl = resourceUrl.href;
-      let pageReferrer = resourceUrl.href;
-      let progressive = false;
-      let hls = false;
-      let dash = false;
-      if (looksLikePlayerPage(targetUrl)) {
-        // The pasted URL is likely a player page (playmogo /d/ or /e/, dood.to,
-        // etc.). Resolve the embedded direct stream automatically.
-        const resolved = await playerGraphResolver.resolve(targetUrl);
-        if (resolved?.url) {
-          targetUrl = resolved.url;
-          if (resolved.type === "hls") hls = true;
-          else progressive = true;
-          pageReferrer = resolved.referrer || pageReferrer;
-        } else {
-          sendResponse({
-            type: "download-result",
-            candidateId: null,
-            ok: false,
-            error: "player-page-unresolved",
-          });
-          return;
-        }
-      } else {
-        const initialType = mediaTypeForResource(resourceUrl.href);
-        progressive = initialType === MEDIA_TYPES.PROGRESSIVE;
-        hls = initialType === MEDIA_TYPES.HLS_MASTER || initialType === MEDIA_TYPES.HLS_MEDIA;
-        dash = initialType === MEDIA_TYPES.DASH;
-        if (!progressive && !hls && !dash) {
-          progressive = /\.(?:mp4|webm|m4v|mp3|m4a)(?:$|[?#])/i.test(targetUrl)
-            || /getfile|download|stream/i.test(targetUrl);
-        }
-      }
-      const canonicalTarget = canonicalHttpUrl(targetUrl);
-      if (!canonicalTarget) {
-        sendResponse({ type: "download-result", candidateId: null, ok: false, error: "invalid-url" });
-        return;
-      }
-      await ensureDirectMediaAccess([resourceUrl.href, pageReferrer, canonicalTarget.href]);
-      const candidate = observeResource({
-        pageTitle: "직접 입력한 주소",
-        pageUrl: pageReferrer,
-        resourceUrl: canonicalTarget.href,
-        contentType: progressive ? "video/mp4"
-          : dash ? "application/dash+xml" : "application/vnd.apple.mpegurl",
-      });
-      if (!candidate) {
-        sendResponse({ type: "download-result", candidateId: null, ok: false, error: "invalid-url" });
-        return;
-      }
-      Promise.resolve(beginCandidateDownload(candidate)).then(
-        (result) => sendResponse({ type: "download-result", candidateId: candidate.id, ok: true, ...result }),
-        (error) => sendResponse({
-          type: "download-result",
-          candidateId: candidate.id,
-          ok: false,
-          error: error?.code || "unsupported-media",
-          message: error?.message || "",
-        }),
-      );
-    })().catch((error) => {
-      sendResponse({
+    Promise.resolve(downloadRouter.downloadUrl(message.url)).then(
+      ({ candidate, result }) => sendResponse({ type: "download-result", candidateId: candidate.id, ok: true, ...result }),
+      (error) => sendResponse({
         type: "download-result",
         candidateId: null,
         ok: false,
         error: error?.code || "route-preparation-failed",
-      });
-    });
+        message: error?.message || "",
+      }),
+    );
     return true;
   }
 

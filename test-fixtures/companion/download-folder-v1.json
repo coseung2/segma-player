@@ -1,0 +1,41 @@
+{
+  "accepted": [
+    {
+      "folder": "  C:\\Media\\Aura  ",
+      "response": {
+        "ok": true,
+        "requestId": "fixture-folder-accepted-request-123",
+        "downloadsFolder": "C:\\Media\\Aura"
+      }
+    }
+  ],
+  "rejected": [
+    {
+      "folder": "relative\\media",
+      "response": {
+        "ok": false,
+        "requestId": "fixture-folder-relative-request-123",
+        "errorCode": "download-folder-rejected",
+        "error": "invalid-download-folder"
+      }
+    },
+    {
+      "folder": "C:\\Media\\..\\Windows",
+      "response": {
+        "ok": false,
+        "requestId": "fixture-folder-traversal-request-123",
+        "errorCode": "download-folder-rejected",
+        "error": "invalid-download-folder"
+      }
+    },
+    {
+      "folder": "C:\\Media\\Aura\u0000",
+      "response": {
+        "ok": false,
+        "requestId": "fixture-folder-control-request-123",
+        "errorCode": "download-folder-rejected",
+        "error": "invalid-download-folder"
+      }
+    }
+  ]
+}

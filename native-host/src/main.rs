@@ -5092,6 +5092,76 @@ mod tests {
         .expect("shared media-download fixture parses")
     }
 
+    fn shared_fixture(name: &str) -> Value {
+        let source = match name {
+            "status" => include_str!("../../test-fixtures/companion/status-v2.json"),
+            "media-rejections" => {
+                include_str!("../../test-fixtures/companion/media-download-v1-rejections.json")
+            }
+            "download-folder" => {
+                include_str!("../../test-fixtures/companion/download-folder-v1.json")
+            }
+            _ => panic!("unknown shared fixture: {name}"),
+        };
+        serde_json::from_str(source).expect("shared fixture parses")
+    }
+
+    #[test]
+    fn status_fixture_matches_the_native_status_projection() {
+        let expected = shared_fixture("status");
+        assert_eq!(expected["protocol"], json!(PROTOCOL_VERSION));
+        assert_eq!(expected["version"], json!(env!("CARGO_PKG_VERSION")));
+        assert_eq!(expected["entitlementOwner"], json!("companion"));
+        assert_eq!(expected["capabilities"], json!(companion_capabilities()));
+        assert_eq!(expected["requestId"], json!("fixture-status-request-123"));
+    }
+
+    #[test]
+    fn shared_media_rejection_fixture_matches_host_validation_codes() {
+        let contracts = shared_fixture("media-rejections");
+        let cases = contracts.as_array().expect("rejection cases are an array");
+        let mut secret = sample_media_download_command();
+        secret["headers"] = json!({ "authorization": "Bearer secret" });
+        let mut private_url = sample_media_download_command();
+        private_url["url"] = json!("http://127.0.0.1/video.mp4");
+        let mut unsupported = sample_media_download_command();
+        unsupported["inputKind"] = json!("HLS_WITH_HEADERS");
+        for (contract, raw) in cases.iter().zip([secret, private_url, unsupported]) {
+            let encoded = serde_json::to_vec(&raw).expect("command serializes");
+            let error = parse_media_download_command_bytes(&encoded)
+                .expect_err("fixture command must reject");
+            assert_eq!(contract["response"]["errorCode"], json!(error.code));
+            assert_eq!(contract["response"]["error"], json!(error.message));
+        }
+    }
+
+    #[test]
+    fn shared_download_folder_fixture_matches_host_validation() {
+        let contracts = shared_fixture("download-folder");
+        for contract in contracts["accepted"]
+            .as_array()
+            .expect("accepted cases are an array")
+        {
+            let folder = contract["folder"].as_str().expect("folder exists");
+            let path = valid_download_folder(folder).expect("folder accepts");
+            assert_eq!(
+                contract["response"]["downloadsFolder"],
+                json!(path.to_string_lossy())
+            );
+        }
+        for contract in contracts["rejected"]
+            .as_array()
+            .expect("rejected cases are an array")
+        {
+            let folder = contract["folder"].as_str().expect("folder exists");
+            assert!(valid_download_folder(folder).is_none());
+            assert_eq!(
+                contract["response"]["errorCode"],
+                json!("download-folder-rejected")
+            );
+        }
+    }
+
     #[test]
     fn media_download_v1_accepts_only_the_bounded_public_contract() {
         let bytes = serde_json::to_vec(&sample_media_download_command()).unwrap();

@@ -1,0 +1,29 @@
+[
+  {
+    "name": "secret fields",
+    "response": {
+      "ok": false,
+      "requestId": "fixture-media-secret-request-123",
+      "errorCode": "media-download-secret-rejected",
+      "error": "cookies, authorization, and arbitrary headers are not accepted"
+    }
+  },
+  {
+    "name": "non-public URL",
+    "response": {
+      "ok": false,
+      "requestId": "fixture-media-url-request-123",
+      "errorCode": "invalid-media-download-url",
+      "error": "media URL and referrer must be public HTTP or HTTPS URLs"
+    }
+  },
+  {
+    "name": "unsupported input kind",
+    "response": {
+      "ok": false,
+      "requestId": "fixture-media-kind-request-123",
+      "errorCode": "unsupported-media-download-kind",
+      "error": "media input kind is unsupported"
+    }
+  }
+]

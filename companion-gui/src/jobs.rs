@@ -1,8 +1,9 @@
-//! Reads companion job state and issues the two actions the protocol supports.
+//! Reads companion job state and sends manager requests to the native host.
 //!
 //! The manager runs as a separate process from the native messaging host, but
 //! both share `%LOCALAPPDATA%\Aura Media\Companion\jobs`. State files are the
-//! interface, so nothing here talks to the host process.
+//! host-written read model; cancel and pause use marker files, while restarts
+//! and library subtitle creation launch or submit to the host-owned runners.
 //!
 //! Field names mirror the host's `JobState` serde renames. Unknown fields are
 //! ignored on purpose: a newer host must not break an older manager window.
@@ -12,7 +13,7 @@ pub use aura_companion_contract::JobState;
 use std::collections::{BTreeSet, HashSet};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -199,40 +200,7 @@ pub fn read_jobs() -> io::Result<Vec<JobState>> {
 pub fn request_cancel_in(directory: &Path, job_id: &str) -> io::Result<()> {
     let path = cancel_path_in(directory, job_id)?;
     fs::create_dir_all(directory)?;
-    fs::write(path, b"cancel")?;
-
-    // The marker is the stop contract. Update the shared state only after it
-    // exists, so the manager never reports cancellation before the writer has
-    // a stop signal waiting for it.
-    let state_path = state_path_in(directory, job_id)?;
-    if state_path.is_file() {
-        let bytes = fs::read(&state_path)?;
-        let mut document: Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        if !document.is_object() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "job state is not an object",
-            ));
-        }
-        document["statusText"] = Value::String("취소 처리 중…".into());
-        document["updatedAt"] = Value::from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-        );
-        document
-            .as_object_mut()
-            .expect("checked above")
-            .remove("error");
-        let temporary = state_path.with_extension("json.tmp");
-        fs::write(
-            &temporary,
-            serde_json::to_vec(&document).map_err(io::Error::other)?,
-        )?;
-        fs::rename(temporary, state_path)?;
-    }
-    Ok(())
+    fs::write(path, b"cancel")
 }
 
 pub fn request_cancel(job_id: &str) -> io::Result<()> {
@@ -281,44 +249,11 @@ pub fn clear_terminal_history() -> io::Result<usize> {
 pub fn request_pause_in(directory: &Path, job_id: &str) -> io::Result<()> {
     let path = pause_path_in(directory, job_id)?;
     fs::create_dir_all(directory)?;
-    fs::write(path, b"pause")?;
-    set_job_status_text_in(directory, job_id, "일시정지를 처리하는 중…")
+    fs::write(path, b"pause")
 }
 
 pub fn request_pause(job_id: &str) -> io::Result<()> {
     request_pause_in(&jobs_dir()?, job_id)
-}
-
-pub fn set_job_status_text_in(directory: &Path, job_id: &str, message: &str) -> io::Result<()> {
-    let path = state_path_in(directory, job_id)?;
-    if !path.is_file() {
-        return Ok(());
-    }
-    let bytes = fs::read(&path)?;
-    let mut document: Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-    if !document.is_object() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "job state is not an object",
-        ));
-    }
-    document["statusText"] = Value::String(message.to_string());
-    document["updatedAt"] = Value::from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
-    );
-    let temporary = path.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec(&document).map_err(io::Error::other)?,
-    )?;
-    fs::rename(temporary, path)
-}
-
-pub fn set_job_status_text(job_id: &str, message: &str) -> io::Result<()> {
-    set_job_status_text_in(&jobs_dir()?, job_id, message)
 }
 
 /// Prepares a stopped job to run again, which is what both resume and retry do.
@@ -411,33 +346,6 @@ pub fn spawn_job_runner(_request_path: &Path) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "restarting a job is Windows only",
     ))
-}
-
-/// Marks a job queued so the row updates before the runner reports in.
-pub fn mark_queued_in(directory: &Path, job_id: &str, status_text: &str) -> io::Result<()> {
-    let path = state_path_in(directory, job_id)?;
-    let bytes = fs::read(&path)?;
-    let mut document: Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-    if !document.is_object() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "job state is not an object",
-        ));
-    }
-    document["status"] = Value::String("queued".into());
-    document["statusText"] = Value::String(status_text.to_string());
-    document
-        .as_object_mut()
-        .expect("checked above")
-        .remove("error");
-
-    let temporary = path.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec(&document).map_err(io::Error::other)?,
-    )?;
-    fs::rename(&temporary, &path)?;
-    Ok(())
 }
 
 pub fn state_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
@@ -1359,12 +1267,10 @@ pub fn reverse_library_organization(
     }
 }
 
-/// Resume or retry a job: prepare, mark queued, then run the host's runner.
-pub fn restart_job(job_id: &str, status_text: &str) -> io::Result<()> {
+/// Resume or retry a job through the host-owned runner.
+pub fn restart_job(job_id: &str) -> io::Result<()> {
     let directory = jobs_dir()?;
     let request = prepare_restart_in(&directory, job_id)?;
-    // A missing or unreadable state file is not fatal; the runner rewrites it.
-    let _ = mark_queued_in(&directory, job_id, status_text);
     spawn_job_runner(&request)
 }
 
@@ -1372,40 +1278,30 @@ fn safe_job_id(now: u64) -> String {
     format!("subtitle-{now}-{}", now % 997)
 }
 
-fn write_json_atomic(path: &Path, value: &Value) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec(value).map_err(io::Error::other)?,
-    )?;
-    fs::rename(temporary, path)
+fn native_message(value: &Value) -> io::Result<Vec<u8>> {
+    let payload = serde_json::to_vec(value).map_err(io::Error::other)?;
+    let length = u32::try_from(payload.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "native message is too large"))?;
+    let mut framed = Vec::with_capacity(payload.len() + 4);
+    framed.extend_from_slice(&length.to_le_bytes());
+    framed.extend_from_slice(&payload);
+    Ok(framed)
 }
 
-/// Starts the Companion/Modal subtitle runner for a library file.
-pub fn start_library_subtitle_job(folder: Option<&str>, file_name: &str) -> io::Result<String> {
-    let media = media_path(folder, file_name)?;
+fn library_subtitle_command(media: &Path, file_name: &str, request_id: &str) -> Value {
     let title = Path::new(file_name)
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(file_name)
         .to_string();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let job_id = safe_job_id(now);
-    let directory = jobs_dir()?;
-    fs::create_dir_all(&directory)?;
-    let request_id = format!("library-{job_id}");
-    let envelope = json!({
-        "job_id": job_id,
-        "request_id": request_id,
-        "candidate_id": request_id,
-        "source_language": "ja",
-        "target_language": "ko",
+    json!({
+        "protocolVersion": 1,
+        "type": "subtitle.create",
+        "requestId": request_id,
+        "candidateId": request_id,
+        "sourceLanguage": "ja",
+        "targetLanguage": "ko",
+        "mode": "generate",
         "media": {
             "type": "local-file",
             "title": title,
@@ -1414,56 +1310,83 @@ pub fn start_library_subtitle_job(folder: Option<&str>, file_name: &str) -> io::
             "audioRenditionUrl": "",
             "localFilePath": media.to_string_lossy(),
         }
-    });
-    let state = json!({
-        "jobId": job_id,
-        "jobType": "subtitle",
-        "requestId": request_id,
-        "candidateId": request_id,
-        "sourceLanguage": "ja",
-        "targetLanguage": "ko",
-        "inputKind": "local-file",
-        "outputFormat": "vtt",
-        "executionStatus": "started",
-        "status": "preparing",
-        "statusText": "보관함 영상에서 자막을 준비하는 중…",
-        "title": title,
-        "createdAt": now,
-        "updatedAt": now,
-    });
-    let request_path = directory.join(format!("{job_id}.subtitle.request.json"));
-    let state_path = directory.join(format!("{job_id}.state.json"));
-    write_json_atomic(&request_path, &envelope)?;
-    write_json_atomic(&state_path, &state)?;
-    spawn_subtitle_runner(&request_path)?;
-    Ok(job_id)
+    })
 }
 
+/// Submits the existing native `subtitle.create` command. The host validates
+/// the command, creates the request record and initial JobState, and launches
+/// its subtitle runner; the manager never writes durable job state.
 #[cfg(target_os = "windows")]
-pub fn spawn_subtitle_runner(request_path: &Path) -> io::Result<()> {
+fn submit_subtitle_command(command: &Value) -> io::Result<Value> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-
-    Command::new(host_executable()?)
-        .arg("--run-subtitle-job")
-        .arg(request_path)
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut child = Command::new(host_executable()?)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    Ok(())
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "host stdin is unavailable"))?
+        .write_all(&native_message(command)?)?;
+    let mut output = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "host stdout is unavailable"))?
+        .read_to_end(&mut output)?;
+    let status = child.wait()?;
+    if !status.success() || output.len() < 4 {
+        return Err(io::Error::other(
+            "Companion 자막 요청에 응답하지 않았습니다.",
+        ));
+    }
+    let size = u32::from_le_bytes(output[..4].try_into().expect("four-byte prefix")) as usize;
+    if output.len() != size + 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid native response",
+        ));
+    }
+    serde_json::from_slice(&output[4..]).map_err(io::Error::other)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn spawn_subtitle_runner(_request_path: &Path) -> io::Result<()> {
+fn submit_subtitle_command(_command: &Value) -> io::Result<Value> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "starting a subtitle job is Windows only",
     ))
+}
+
+/// Starts the Companion/Modal subtitle runner for a library file.
+pub fn start_library_subtitle_job(folder: Option<&str>, file_name: &str) -> io::Result<String> {
+    let media = media_path(folder, file_name)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let request_id = format!("library-{}", safe_job_id(now));
+    let response =
+        submit_subtitle_command(&library_subtitle_command(&media, file_name, &request_id))?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(io::Error::other(
+            response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Companion 자막 요청이 거부되었습니다."),
+        ));
+    }
+    response
+        .get("jobId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "subtitle job id is missing"))
 }
 
 #[cfg(target_os = "windows")]
@@ -1937,21 +1860,19 @@ mod tests {
     }
 
     #[test]
-    fn cancel_marks_the_card_as_processing_after_the_stop_marker_exists() {
+    fn cancel_creates_only_its_marker_and_preserves_host_state_bytes() {
         let directory = temp_dir("cancel-state");
-        write_state(
-            &directory,
-            "job-abc",
-            r#"{"jobId":"job-abc","status":"running","statusText":"다운로드 중","error":"old","updatedAt":1}"#,
-        );
+        let original = r#"{ "jobId": "job-abc", "status": "running", "statusText": "다운로드 중", "error": "old", "updatedAt": 1 }"#;
+        write_state(&directory, "job-abc", original);
 
-        request_cancel_in(&directory, "job-abc").expect("cancel writes and state updates");
+        request_cancel_in(&directory, "job-abc").expect("cancel marker writes");
 
         assert!(directory.join("job-abc.cancel").is_file());
-        let jobs = read_jobs_in(&directory).expect("jobs read");
-        assert_eq!(jobs[0].status, "running");
-        assert_eq!(jobs[0].status_text, "취소 처리 중…");
-        assert!(jobs[0].error.is_none());
+        assert_eq!(
+            fs::read(directory.join("job-abc.state.json")).expect("state reads"),
+            original.as_bytes(),
+            "only the host may rewrite durable JobState bytes"
+        );
         fs::remove_dir_all(directory).expect("temp directory removes");
     }
 
@@ -2018,12 +1939,23 @@ mod tests {
     #[test]
     fn pause_writes_a_marker_distinct_from_cancel() {
         let directory = temp_dir("pause");
+        let original =
+            br#"{"jobId":"job-abc","status":"running","statusText":"host-owned","updatedAt":7}"#;
+        fs::write(directory.join("job-abc.state.json"), original).expect("state writes");
         request_pause_in(&directory, "job-abc").expect("pause writes");
         assert!(directory.join("job-abc.pause").is_file());
         assert!(!directory.join("job-abc.cancel").exists());
+        assert_eq!(
+            fs::read(directory.join("job-abc.state.json")).expect("state reads"),
+            original
+        );
 
         request_cancel_in(&directory, "job-abc").expect("cancel writes");
         assert!(directory.join("job-abc.cancel").is_file());
+        assert_eq!(
+            fs::read(directory.join("job-abc.state.json")).expect("state reads"),
+            original
+        );
         fs::remove_dir_all(directory).expect("temp directory removes");
     }
 
@@ -2050,6 +1982,9 @@ mod tests {
             br#"{"type":"youtube-download","jobId":"job-abc","url":"https://youtu.be/x"}"#,
         )
         .expect("request writes");
+        let original_state =
+            br#"{ "jobId":"job-abc", "status":"failed", "error":"host failure", "updatedAt":99 }"#;
+        fs::write(directory.join("job-abc.state.json"), original_state).expect("state writes");
         request_pause_in(&directory, "job-abc").expect("pause writes");
         request_cancel_in(&directory, "job-abc").expect("cancel writes");
 
@@ -2058,6 +1993,11 @@ mod tests {
         // A leftover marker would stop the fresh runner on its first loop.
         assert!(!directory.join("job-abc.pause").exists());
         assert!(!directory.join("job-abc.cancel").exists());
+        assert_eq!(
+            fs::read(directory.join("job-abc.state.json")).expect("state reads"),
+            original_state,
+            "restart preparation must leave state for --run-job to replace"
+        );
 
         fs::remove_dir_all(directory).expect("temp directory removes");
     }
@@ -2076,24 +2016,29 @@ mod tests {
     }
 
     #[test]
-    fn marking_a_job_queued_clears_a_previous_error() {
-        let directory = temp_dir("queued");
-        write_state(
-            &directory,
-            "job-abc",
-            r#"{"jobId":"job-abc","status":"failed","statusText":"실패","error":"boom","progress":40,"updatedAt":7}"#,
+    fn library_subtitle_command_preserves_the_existing_native_request_abi() {
+        let command = library_subtitle_command(
+            Path::new(r"C:\Media\clip.mp4"),
+            "clip.mp4",
+            "library-request-1",
         );
-        mark_queued_in(&directory, "job-abc", "다시 시도하는 중…").expect("state updates");
-
-        let jobs = read_jobs_in(&directory).expect("jobs read");
-        assert_eq!(jobs[0].status, "queued");
-        assert_eq!(jobs[0].status_text, "다시 시도하는 중…");
+        assert_eq!(command["protocolVersion"], 1);
+        assert_eq!(command["type"], "subtitle.create");
+        assert_eq!(command["requestId"], "library-request-1");
+        assert_eq!(command["candidateId"], "library-request-1");
+        assert_eq!(command["media"]["type"], "local-file");
+        assert_eq!(command["media"]["localFilePath"], r"C:\Media\clip.mp4");
+        assert!(
+            command.get("jobId").is_none(),
+            "the host owns job IDs and initial state"
+        );
+        let framed = native_message(&command).expect("command frames");
+        let size = u32::from_le_bytes(framed[..4].try_into().expect("prefix")) as usize;
+        assert_eq!(size, framed.len() - 4);
         assert_eq!(
-            jobs[0].error, None,
-            "a stale error must not survive a retry"
+            serde_json::from_slice::<Value>(&framed[4..]).expect("payload parses"),
+            command
         );
-        assert_eq!(jobs[0].progress, Some(40), "other fields are preserved");
-        fs::remove_dir_all(directory).expect("temp directory removes");
     }
 
     #[test]

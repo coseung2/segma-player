@@ -302,43 +302,42 @@ impl ManagerApp {
 
     fn handle(&mut self, event: RowEvent) {
         match event {
-            RowEvent::Pause(job_id) => {
-                if let Err(error) = jobs::request_pause(&job_id) {
-                    let _ = jobs::set_job_status_text(
-                        &job_id,
-                        &format!("일시정지하지 못했습니다: {error}"),
-                    );
-                }
-            }
-            RowEvent::Resume(job_id) => {
-                if let Err(error) = jobs::restart_job(&job_id, "이어받기를 준비하는 중…")
-                {
-                    let _ = jobs::set_job_status_text(
-                        &job_id,
-                        &format!("이어받기를 시작하지 못했습니다: {error}"),
-                    );
-                }
-            }
-            RowEvent::Retry(job_id) => {
-                if let Err(error) = jobs::restart_job(&job_id, "다시 시도하는 중…") {
-                    let _ = jobs::set_job_status_text(
-                        &job_id,
-                        &format!("다시 시도하지 못했습니다: {error}"),
-                    );
-                }
-            }
+            RowEvent::Pause(job_id) => self.show_row_action_result(
+                jobs::request_pause(&job_id),
+                "일시정지를 요청했습니다.",
+                "일시정지하지 못했습니다",
+            ),
+            RowEvent::Resume(job_id) => self.show_row_action_result(
+                jobs::restart_job(&job_id),
+                "이어받기를 시작했습니다.",
+                "이어받기를 시작하지 못했습니다",
+            ),
+            RowEvent::Retry(job_id) => self.show_row_action_result(
+                jobs::restart_job(&job_id),
+                "다시 시도합니다.",
+                "다시 시도하지 못했습니다",
+            ),
             RowEvent::Play(job_id) => self.play(&job_id),
-            RowEvent::Cancel(job_id) => {
-                if let Err(error) = jobs::request_cancel(&job_id) {
-                    let _ = jobs::set_job_status_text(
-                        &job_id,
-                        &format!("취소하지 못했습니다: {error}"),
-                    );
-                }
-            }
+            RowEvent::Cancel(job_id) => self.show_row_action_result(
+                jobs::request_cancel(&job_id),
+                "취소를 요청했습니다.",
+                "취소하지 못했습니다",
+            ),
             RowEvent::OpenFolder => self.open_folder(),
         }
         self.poll(true);
+    }
+
+    fn show_row_action_result(
+        &mut self,
+        result: std::io::Result<()>,
+        success: &str,
+        failure: &str,
+    ) {
+        match result {
+            Ok(()) => self.notify(success, NoticeTone::Info),
+            Err(error) => self.notify(format!("{failure}: {error}"), NoticeTone::Error),
+        }
     }
 
     /// Plays a job's recorded output. Resolves the file name from job state, so
@@ -3657,6 +3656,43 @@ mod tests {
         assert!(!QueueFilter::Failed.matches(&cancelled));
         assert!(!QueueFilter::Active.matches(&cancelled));
         assert!(QueueFilter::All.matches(&cancelled));
+    }
+
+    #[test]
+    fn row_action_errors_are_transient_notices_and_preserve_host_state_bytes() {
+        let directory = std::env::temp_dir().join(format!(
+            "aura-manager-app-notice-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory creates");
+        let state_path = directory.join("job-abc.state.json");
+        let original =
+            br#"{ "jobId":"job-abc", "status":"failed", "error":"host-owned", "updatedAt":41 }"#;
+        std::fs::write(&state_path, original).expect("state writes");
+
+        let mut app = ManagerApp::default();
+        app.show_row_action_result(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "marker denied",
+            )),
+            "unused",
+            "취소하지 못했습니다",
+        );
+
+        let notice = app.notice.as_ref().expect("error is visible immediately");
+        assert_eq!(notice.tone, NoticeTone::Error);
+        assert!(notice.text.contains("취소하지 못했습니다"));
+        assert!(notice.text.contains("marker denied"));
+        assert_eq!(
+            std::fs::read(&state_path).expect("state reads"),
+            original,
+            "UI feedback must not overwrite host-owned JobState"
+        );
+        std::fs::remove_dir_all(directory).expect("temp directory removes");
     }
 
     #[test]

@@ -8,9 +8,11 @@ import {
   MEDIA_DOWNLOAD_PROTOCOL,
   SUBTITLE_COMMAND_PROTOCOL,
   companionRequest,
+  companionStatus,
   disconnectCompanion,
   mediaDownloadBrowserContext,
   onCompanionEvent,
+  setCompanionDownloadFolder,
   startCompanionMediaDownload,
   startCompanionSubtitleJob,
 } from "./companion-client.js";
@@ -21,6 +23,18 @@ const helloContract = JSON.parse(await readFile(
 ));
 const mediaDownloadContract = JSON.parse(await readFile(
   new URL("./test-fixtures/companion/media-download-v1.json", import.meta.url),
+  "utf8",
+));
+const statusContract = JSON.parse(await readFile(
+  new URL("./test-fixtures/companion/status-v2.json", import.meta.url),
+  "utf8",
+));
+const mediaDownloadRejectionContracts = JSON.parse(await readFile(
+  new URL("./test-fixtures/companion/media-download-v1-rejections.json", import.meta.url),
+  "utf8",
+));
+const downloadFolderContract = JSON.parse(await readFile(
+  new URL("./test-fixtures/companion/download-folder-v1.json", import.meta.url),
   "utf8",
 ));
 
@@ -167,6 +181,21 @@ test("hello constants match the shared native-host contract fixture", () => {
   assert.equal(MEDIA_DOWNLOAD_PROTOCOL, mediaDownloadContract.protocolVersion);
 });
 
+test("status v2 consumes the correlated shared response envelope", async () => {
+  const fake = installFakeChrome((port, message) => {
+    assert.equal(message.type, "status");
+    port.respond({ ...statusContract, requestId: message.requestId });
+  }, { capabilities: helloContract.capabilities });
+
+  const response = await companionStatus();
+  const [, statusRequest] = fake.ports[0].messages;
+  assert.match(statusRequest.requestId, /^[a-z0-9]+-[a-z0-9]+$/);
+  assert.deepEqual(
+    { ...response, requestId: statusContract.requestId },
+    statusContract,
+  );
+});
+
 test("media-download derives bounded non-secret browser request metadata", () => {
   assert.deepEqual(mediaDownloadBrowserContext({
     userAgent: "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36",
@@ -243,6 +272,65 @@ test("media-download requires an accepted reply for the same job", async () => {
     startCompanionMediaDownload(sampleMediaDownloadInput()),
     assertCompanionCode("media-companion-start-rejected"),
   );
+});
+
+test("media-download v1 preserves correlated native rejection codes", async () => {
+  let activeContract = null;
+  const uncorrelated = [];
+  const removeListener = onCompanionEvent((message) => uncorrelated.push(message));
+  installFakeChrome((port, message) => {
+    assert.ok(activeContract, "a rejection contract is selected");
+    port.respond(activeContract.response);
+    port.respond({ ...activeContract.response, requestId: message.requestId });
+  }, { capabilities: [MEDIA_DOWNLOAD_CAPABILITY] });
+
+  try {
+    for (const contract of mediaDownloadRejectionContracts) {
+      activeContract = contract;
+      await assert.rejects(
+        startCompanionMediaDownload(sampleMediaDownloadInput()),
+        (error) => {
+          assert.equal(error.code, contract.response.errorCode, contract.name);
+          assert.equal(error.message, contract.response.error, contract.name);
+          return true;
+        },
+      );
+    }
+  } finally {
+    removeListener();
+  }
+  assert.deepEqual(uncorrelated, mediaDownloadRejectionContracts.map(({ response }) => response));
+});
+
+test("download-folder command preserves input and native validation envelopes", async () => {
+  const cases = [...downloadFolderContract.accepted, ...downloadFolderContract.rejected];
+  let activeCase = null;
+  installFakeChrome((port, message) => {
+    assert.equal(message.type, "set-download-folder");
+    assert.equal(message.folder, activeCase.folder);
+    port.respond({ ...activeCase.response, requestId: message.requestId });
+  });
+
+  for (const contract of downloadFolderContract.accepted) {
+    activeCase = contract;
+    const response = await setCompanionDownloadFolder(contract.folder);
+    assert.deepEqual(
+      { ...response, requestId: contract.response.requestId },
+      contract.response,
+    );
+  }
+  for (const contract of downloadFolderContract.rejected) {
+    activeCase = contract;
+    await assert.rejects(
+      setCompanionDownloadFolder(contract.folder),
+      (error) => {
+        assert.equal(error.code, contract.response.errorCode);
+        assert.equal(error.message, contract.response.error);
+        return true;
+      },
+    );
+  }
+  assert.equal(cases.length, 4);
 });
 
 test("subtitle bridge performs hello then sends the exact allowlisted command", async () => {

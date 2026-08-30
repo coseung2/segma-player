@@ -1,8 +1,45 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import {
+  createMediaRequestDiagnosticStore,
+  resolveMediaRequestContext,
+} from "./media-request-context.js";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
+const redactedDiagnosticsContract = JSON.parse(await read(
+  "./test-fixtures/companion/redacted-diagnostics-v1.json",
+));
+
+test("shared diagnostics fixture passes through the shipped redaction behavior", () => {
+  const { input, expected, forbiddenFragments } = redactedDiagnosticsContract;
+  let now = input.startedAt;
+  const resolved = resolveMediaRequestContext({
+    url: input.url,
+    fallbackReferrer: input.fallbackReferrer,
+    sourceContext: input.sourceContext,
+    consumer: input.consumer,
+    lookupRequestHeaders: () => input.lookup,
+  });
+  const store = createMediaRequestDiagnosticStore({ now: () => now });
+  assert.equal(store.start({
+    leaseId: input.leaseId,
+    requestTabId: input.requestTabId,
+    url: resolved.url,
+    diagnostic: resolved.diagnostic,
+  }), true);
+  now = input.completedAt;
+  const completed = store.finish({
+    tabId: input.requestTabId,
+    url: input.url,
+    statusCode: input.statusCode,
+    resourceType: input.resourceType,
+  });
+
+  assert.deepEqual(completed, expected);
+  const serialized = JSON.stringify(completed);
+  for (const fragment of forbiddenFragments) assert.doesNotMatch(serialized, new RegExp(fragment));
+});
 
 test("the per-job Win32 progress window is gone and the manager binary owns the UI", async () => {
   const [source, process, nativeModules] = await Promise.all([
@@ -71,7 +108,7 @@ test("the extension stays free while the installed app owns General and Pro", as
   assert.match(nativeHost, /license_edition\.as_deref\(\) == Some\("pro"\)/);
 });
 
-test("candidate and link downloads hand off to Companion without a local execution fallback", async () => {
+test("candidate and link downloads have no local execution fallback", async () => {
   const [background, content, handoff] = await Promise.all([
     read("./background.js"),
     read("./content.js"),
@@ -86,17 +123,8 @@ test("candidate and link downloads hand off to Companion without a local executi
   assert.doesNotMatch(content, /show-download-overlay|hide-download-overlay|list-download-jobs|cancel-download-job/);
   assert.doesNotMatch(`${background}\n${handoff}`, /function dispatchMediaDownload|function recoverInterruptedMediaDownloads/);
 
-  const candidateRoute = background.slice(
-    background.indexOf('message?.type === "download-candidate"'),
-    background.indexOf('message?.type === "refresh-download-candidate"'),
-  );
-  const linkRoute = background.slice(
-    background.indexOf('message?.type === "download-url"'),
-    background.indexOf('message?.type === "clear-tab"'),
-  );
-  assert.match(candidateRoute, /beginCandidateDownload\(candidate\)/);
-  assert.match(linkRoute, /playerGraphResolver\.resolve\(targetUrl\)/);
-  assert.match(linkRoute, /beginCandidateDownload\(candidate\)/);
+  assert.match(background, /downloadRouter\.downloadCandidate\(message\.candidateId\)/);
+  assert.match(background, /downloadRouter\.downloadUrl\(message\.url\)/);
   assert.match(background, /message\?\.type === "companion-status"/);
   assert.match(background, /message\?\.type === "show-companion-ui"/);
   assert.match(background, /function isExtensionUiSender\(sender\)/);

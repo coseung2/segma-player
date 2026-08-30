@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { createCandidateRepository } from "./background-candidate-repository.js";
 import { createCompanionHandoff, isYouTubeDetectionCandidate } from "./background-companion-handoff.js";
+import { createDownloadRouter } from "./background-download-router.js";
 import { createProgressiveRedirectStore, createQaRequestTraceStore } from "./background-request-evidence.js";
 
 function progressiveCandidate(overrides = {}) {
@@ -58,6 +59,45 @@ test("Companion handoff keeps media and YouTube commands bounded", async () => {
     pageUrl: "https://blog.example/post",
     resourceUrl: "https://r1---sn.googlevideo.com/videoplayback",
   }), false);
+});
+
+test("candidate and pasted-link routes converge on the same Companion handoff", async () => {
+  const candidates = new Map([["candidate-1", progressiveCandidate()]]);
+  const handoffs = [];
+  const observed = [];
+  const router = createDownloadRouter({
+    candidates,
+    ensureDirectMediaAccess: async () => ({ ok: true }),
+    playerGraphResolver: {
+      resolve: async () => ({
+        url: "https://cdn.example/resolved.m3u8",
+        type: "hls",
+        referrer: "https://player.example/e/abc",
+      }),
+    },
+    observeResource: (input) => {
+      observed.push(input);
+      return progressiveCandidate({
+        id: "candidate-link",
+        resourceUrl: input.resourceUrl,
+        pageUrl: input.pageUrl,
+        mediaType: input.contentType.includes("mpegurl") ? "HLS_MASTER" : "PROGRESSIVE",
+      });
+    },
+    beginCandidateDownload: async (candidate) => {
+      handoffs.push(candidate);
+      return { mode: "media-companion", jobId: `job-${handoffs.length}` };
+    },
+  });
+
+  const ranked = await router.downloadCandidate("candidate-1");
+  const pasted = await router.downloadUrl("https://player.example/e/abc");
+  assert.equal(ranked.candidate.id, "candidate-1");
+  assert.equal(pasted.candidate.id, "candidate-link");
+  assert.deepEqual(handoffs.map((candidate) => candidate.id), ["candidate-1", "candidate-link"]);
+  assert.equal(observed[0].resourceUrl, "https://cdn.example/resolved.m3u8");
+  assert.equal(observed[0].pageUrl, "https://player.example/e/abc");
+  await assert.rejects(() => router.downloadCandidate("missing"), { code: "candidate-not-found" });
 });
 
 test("candidate repository ranks, persists, restores, and clears per tab", async () => {

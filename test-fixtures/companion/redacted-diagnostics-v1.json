@@ -1,0 +1,64 @@
+{
+  "input": {
+    "url": "https://cdn.example/hls/video0.jpeg?token=URL_SECRET",
+    "fallbackReferrer": "https://site.example/watch/1?session=PAGE_SECRET",
+    "sourceContext": {
+      "tabId": 7,
+      "frameId": 3,
+      "initiator": "https://player.example/embed/1?auth=FRAME_SECRET"
+    },
+    "consumer": "playback-hls",
+    "requestTabId": 41,
+    "leaseId": "fixture-lease-1",
+    "startedAt": 100,
+    "completedAt": 145,
+    "statusCode": 403,
+    "resourceType": "xmlhttprequest",
+    "lookup": {
+      "matchedBy": "exact",
+      "dnrRequestHeaders": [
+        { "header": "Referer", "operation": "set", "value": "https://player.example/embed/1?auth=FRAME_SECRET" },
+        { "header": "Origin", "operation": "set", "value": "https://player.example" },
+        { "header": "Cookie", "operation": "set", "value": "sid=COOKIE_SECRET" },
+        { "header": "Authorization", "operation": "set", "value": "Bearer HEADER_SECRET" },
+        { "header": "Accept-Language", "operation": "set", "value": "ko-KR" }
+      ]
+    }
+  },
+  "expected": {
+    "leaseId": "fixture-lease-1",
+    "consumer": "playback-hls",
+    "target": {
+      "host": "cdn.example",
+      "extension": "jpeg",
+      "pathHash": "4e487c7f"
+    },
+    "matchedBy": "exact",
+    "referrerSource": "recorded",
+    "referrerOrigin": "https://player.example",
+    "sourceTabId": 7,
+    "sourceFrameId": 3,
+    "initiatorOrigin": "https://player.example",
+    "headerNames": ["Referer", "Origin", "Cookie", "Authorization", "Accept-Language"],
+    "credentialHeaderNames": ["Cookie", "Authorization"],
+    "requestTabId": 41,
+    "resourceType": "xmlhttprequest",
+    "statusCode": 403,
+    "networkError": "",
+    "fromCache": false,
+    "redirects": [],
+    "startedAt": 100,
+    "completedAt": 145,
+    "durationMs": 45
+  },
+  "forbiddenFragments": [
+    "URL_SECRET",
+    "PAGE_SECRET",
+    "FRAME_SECRET",
+    "COOKIE_SECRET",
+    "HEADER_SECRET",
+    "video0",
+    "watch/1",
+    "embed/1"
+  ]
+}

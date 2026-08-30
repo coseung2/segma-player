@@ -3,6 +3,7 @@
     "background.js",
     "background-candidate-repository.js",
     "background-companion-handoff.js",
+    "background-download-router.js",
     "background-player-resolution.js",
     "background-request-evidence.js",
     "candidate.js",

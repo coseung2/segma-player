@@ -31,7 +31,6 @@ const SCRUBBER_HIT_HEIGHT: f32 = 18.0;
 const VOLUME_WIDTH: f32 = 84.0;
 const FULLSCREEN_CONTROL_HEIGHT: f32 = 42.0;
 const FULLSCREEN_CONTROL_MARGIN: f32 = 16.0;
-const FULLSCREEN_CONTROL_ALPHA: f32 = 0.86;
 pub const SEEK_PREVIEW_WIDTH: f32 = 192.0;
 /// Native preview includes a 108px image and a 28px timecode strip.
 pub const SEEK_PREVIEW_HEIGHT: f32 = 136.0;
@@ -87,6 +86,9 @@ pub struct PlayerUiOutput {
     pub logical_video_rect: Rect,
     /// The same surface converted to physical pixels for the native child window.
     pub physical_video_rect: PhysicalVideoRect,
+    /// Optional local physical-pixel height to expose below the native child.
+    /// Fullscreen controls use this instead of a second always-on-top window.
+    pub video_clip_height: Option<i32>,
     /// Deliberately singular: one frame never floods the engine command queue.
     pub command: Option<PlayerCommand>,
     pub hover_preview: Option<HoverPreview>,
@@ -104,6 +106,7 @@ impl Default for PlayerUiOutput {
         Self {
             logical_video_rect: Rect::NOTHING,
             physical_video_rect: PhysicalVideoRect::default(),
+            video_clip_height: None,
             command: None,
             hover_preview: None,
             selected_up_next_file: None,
@@ -193,8 +196,8 @@ pub fn player_view(ui: &mut Ui, input: PlayerUiInput<'_>) -> PlayerUiOutput {
     output
 }
 
-/// Fullscreen keeps the video dominant and reveals the controls from the
-/// bottom edge only while the pointer is in the lower control zone.
+/// Fullscreen keeps the video dominant and reveals one main-viewport control
+/// surface from the bottom edge while the pointer is in the lower control zone.
 fn fullscreen_player(
     ui: &mut Ui,
     snapshot: &PlayerSnapshot,
@@ -203,13 +206,10 @@ fn fullscreen_player(
 ) {
     let available = ui.available_rect_before_wrap();
     let context = ui.ctx().clone();
-    let hover_memory_id = ui.id().with("fullscreen-control-overlay-hover");
-    let overlay_hovered = context
-        .data(|data| data.get_temp::<bool>(hover_memory_id))
-        .unwrap_or(false);
     let bottom_hover = context.input(|input| {
+        let pointer = native_root_pointer_position(&context).or_else(|| input.pointer.hover_pos());
         input.focused
-            && input.pointer.hover_pos().is_some_and(|pointer| {
+            && pointer.is_some_and(|pointer| {
                 pointer.x >= available.left()
                     && pointer.x <= available.right()
                     && pointer.y
@@ -219,12 +219,7 @@ fn fullscreen_player(
                     && pointer.y <= available.bottom()
             })
     });
-    let controls_requested = bottom_hover || overlay_hovered;
-    let control_progress = context.animate_bool_with_time(
-        ui.id().with("fullscreen-controls"),
-        controls_requested,
-        0.18,
-    );
+    let control_progress = f32::from(bottom_hover);
     let (video_rect, controls_rect) = fullscreen_layout(available, control_progress);
     let video_response = ui.interact(video_rect, ui.id().with("fullscreen-video"), Sense::click());
     paint_video_surface(ui, video_rect, &video_response, snapshot);
@@ -235,43 +230,28 @@ fn fullscreen_player(
     output.physical_video_rect = physical_rect(ui, video_rect);
 
     if control_progress > 0.01 {
-        let parent_origin = context
-            .input(|input| input.viewport().inner_rect.map(|rect| rect.min))
-            .unwrap_or(Pos2::ZERO);
-        let overlay_position = parent_origin + controls_rect.min.to_vec2();
-        let overlay_size = controls_rect.size();
-        let overlay_id = egui::ViewportId::from_hash_of("fullscreen-control-overlay");
-        let builder = egui::ViewportBuilder::default()
-            .with_title("Segma Player controls")
-            .with_position(overlay_position)
-            .with_inner_size(overlay_size)
-            .with_min_inner_size(overlay_size)
-            .with_max_inner_size(overlay_size)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_transparent(true)
-            .with_taskbar(false)
-            .with_active(false)
-            .with_always_on_top();
-
-        let hovered = context.show_viewport_immediate(overlay_id, builder, |controls, _class| {
-            controls.set_min_size(overlay_size);
-            if controls.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
-                output.fullscreen_requested = true;
-            }
-            fullscreen_seek_bar(
-                controls,
-                snapshot,
-                pose_markers,
-                controls_rect.min.to_vec2(),
-                output,
-                control_progress,
-            );
-            controls.rect_contains_pointer(controls.max_rect())
-        });
-        context.data_mut(|data| data.insert_temp(hover_memory_id, hovered));
-    } else {
-        context.data_mut(|data| data.insert_temp(hover_memory_id, false));
+        let scale = context.pixels_per_point();
+        output.video_clip_height = Some(
+            ((controls_rect.top() - video_rect.top()) * scale)
+                .round()
+                .clamp(1.0, output.physical_video_rect.height.max(1) as f32) as i32,
+        );
+        // Painting into the existing root viewport avoids DWM creating one
+        // borderless native window per frame. It also removes the black
+        // undecorated-window fringe seen in fullscreen captures.
+        let layer_id = egui::LayerId::new(
+            egui::Order::Foreground,
+            ui.id().with("fullscreen-control-surface"),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .id_salt("fullscreen-control-surface")
+                .layer_id(layer_id)
+                .max_rect(controls_rect),
+            |controls| {
+                fullscreen_seek_bar(controls, snapshot, pose_markers, output, control_progress);
+            },
+        );
     }
 }
 
@@ -290,26 +270,42 @@ fn aspect_fit_rect(available: Rect, aspect: f32) -> Rect {
 
 fn fullscreen_controls_rect(available: Rect, progress: f32) -> Rect {
     let progress = progress.clamp(0.0, 1.0);
-    let width = (available.width() - FULLSCREEN_CONTROL_MARGIN * 2.0).max(1.0);
-    let visible_bottom = available.bottom() - FULLSCREEN_CONTROL_MARGIN;
+    let width = available.width().max(1.0);
+    let visible_bottom = available.bottom();
     let hidden_bottom = available.bottom() + FULLSCREEN_CONTROL_HEIGHT;
     let bottom = egui::lerp(hidden_bottom..=visible_bottom, progress);
     Rect::from_min_size(
-        Pos2::new(
-            available.left() + FULLSCREEN_CONTROL_MARGIN,
-            bottom - FULLSCREEN_CONTROL_HEIGHT,
-        ),
+        Pos2::new(available.left(), bottom - FULLSCREEN_CONTROL_HEIGHT),
         Vec2::new(width, FULLSCREEN_CONTROL_HEIGHT),
     )
 }
 
-fn fullscreen_control_fill(progress: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(
-        255,
-        255,
-        255,
-        (255.0 * FULLSCREEN_CONTROL_ALPHA * progress.clamp(0.0, 1.0)).round() as u8,
-    )
+fn fullscreen_control_fill(_progress: f32) -> Color32 {
+    color::BG_SURFACE
+}
+
+/// Read the pointer even while the native mpv child owns mouse input.
+/// Screen pixels are converted into the root viewport's logical coordinates.
+#[cfg(target_os = "windows")]
+fn native_root_pointer_position(context: &egui::Context) -> Option<Pos2> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point).ok()? };
+    let scale = context.pixels_per_point().max(f32::EPSILON);
+    let origin = context
+        .input(|input| input.viewport().inner_rect.map(|rect| rect.min))
+        .unwrap_or(Pos2::ZERO);
+    Some(Pos2::new(
+        point.x as f32 / scale - origin.x,
+        point.y as f32 / scale - origin.y,
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_root_pointer_position(_context: &egui::Context) -> Option<Pos2> {
+    None
 }
 
 fn header(ui: &mut Ui, snapshot: &PlayerSnapshot, output: &mut PlayerUiOutput) {
@@ -410,7 +406,7 @@ fn control_bar(
         .inner_margin(margin_xy(space::X16, space::X12))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(space::X8, space::X12);
-            scrubber(ui, snapshot, pose_markers, Vec2::ZERO, output);
+            scrubber(ui, snapshot, pose_markers, output);
 
             let playable = snapshot.loaded_path.is_some() && snapshot.engine_available;
             let muted = snapshot.muted || snapshot.volume <= 0.0;
@@ -486,17 +482,16 @@ fn fullscreen_seek_bar(
     ui: &mut Ui,
     snapshot: &PlayerSnapshot,
     pose_markers: &[f64],
-    preview_origin: Vec2,
     output: &mut PlayerUiOutput,
     progress: f32,
 ) {
     egui::Frame::new()
         .fill(fullscreen_control_fill(progress))
-        .stroke(hairline(color::BORDER_SUBTLE))
-        .corner_radius(corner(radius::LG))
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(0.0)
         .inner_margin(margin_xy(space::X12, space::X8))
         .show(ui, |ui| {
-            scrubber(ui, snapshot, pose_markers, preview_origin, output);
+            scrubber(ui, snapshot, pose_markers, output);
         });
 }
 
@@ -613,7 +608,6 @@ fn scrubber(
     ui: &mut Ui,
     snapshot: &PlayerSnapshot,
     pose_markers: &[f64],
-    preview_origin: Vec2,
     output: &mut PlayerUiOutput,
 ) {
     let track_height = metric::PROGRESS_HEIGHT;
@@ -665,7 +659,12 @@ fn scrubber(
             });
             output.hover_preview = Some(HoverPreview {
                 target,
-                placement: seek_preview_placement(pointer.x, track, PREVIEW_SIZE, preview_origin),
+                placement: seek_preview_placement(
+                    pointer.x,
+                    track,
+                    PREVIEW_SIZE,
+                    ui.ctx().content_rect(),
+                ),
                 size: PREVIEW_SIZE,
             });
 
@@ -693,17 +692,21 @@ fn scrubber(
     }
 }
 
-fn seek_preview_x(pointer_x: f32, track: Rect, preview_width: f32) -> f32 {
-    (pointer_x - preview_width / 2.0).clamp(
-        track.left(),
-        (track.right() - preview_width).max(track.left()),
-    )
+fn seek_preview_x(pointer_x: f32, track: Rect, preview_width: f32, bounds: Rect) -> f32 {
+    let minimum = bounds
+        .left()
+        .max(track.left().min(bounds.right() - preview_width));
+    let maximum = (bounds.right() - preview_width)
+        .min(track.right() - preview_width)
+        .max(minimum);
+    (pointer_x - preview_width / 2.0).clamp(minimum, maximum)
 }
 
-fn seek_preview_placement(pointer_x: f32, track: Rect, preview_size: Vec2, origin: Vec2) -> Pos2 {
+fn seek_preview_placement(pointer_x: f32, track: Rect, preview_size: Vec2, bounds: Rect) -> Pos2 {
+    let maximum_y = (bounds.bottom() - preview_size.y).max(bounds.top());
     Pos2::new(
-        seek_preview_x(pointer_x, track, preview_size.x) + origin.x,
-        track.top() - preview_size.y - PREVIEW_GAP + origin.y,
+        seek_preview_x(pointer_x, track, preview_size.x, bounds),
+        (track.top() - preview_size.y - PREVIEW_GAP).clamp(bounds.top(), maximum_y),
     )
 }
 
@@ -964,7 +967,6 @@ pub(crate) fn pip_controls(
     snapshot: &PlayerSnapshot,
     output: &mut PlayerUiOutput,
     preview_size: Vec2,
-    preview_origin: Vec2,
 ) {
     ui.painter().rect_filled(rect, 0.0, color::BG_INVERSE);
     let layout = pip_control_layout(rect);
@@ -1024,14 +1026,7 @@ pub(crate) fn pip_controls(
         set_command(output, PlayerCommand::SeekRelative(10.0));
     }
 
-    paint_pip_seek_bar(
-        ui,
-        layout.seek,
-        snapshot,
-        output,
-        preview_size,
-        preview_origin,
-    );
+    paint_pip_seek_bar(ui, layout.seek, snapshot, output, preview_size);
     ui.painter().text(
         Pos2::new(layout.time.left(), layout.time.center().y),
         Align2::LEFT_CENTER,
@@ -1051,7 +1046,6 @@ fn paint_pip_seek_bar(
     snapshot: &PlayerSnapshot,
     output: &mut PlayerUiOutput,
     preview_size: Vec2,
-    preview_origin: Vec2,
 ) {
     let response = ui.interact(track, ui.id().with("pip-seek-bar"), Sense::click_and_drag());
     ui.painter()
@@ -1073,7 +1067,12 @@ fn paint_pip_seek_bar(
             ) * snapshot.duration;
             output.hover_preview = Some(HoverPreview {
                 target,
-                placement: seek_preview_placement(pointer.x, track, preview_size, preview_origin),
+                placement: seek_preview_placement(
+                    pointer.x,
+                    track,
+                    preview_size,
+                    ui.ctx().content_rect(),
+                ),
                 size: preview_size,
             });
         }
@@ -1179,6 +1178,46 @@ pub(crate) fn paint_seek_preview(
         hairline(Color32::from_white_alpha(40)),
         StrokeKind::Inside,
     );
+}
+
+/// Present the seek preview in its own input-passthrough viewport.
+///
+/// The mpv video is a native child HWND above the main egui canvas, so painting
+/// the preview in the main viewport cannot overlap the picture. A dedicated
+/// no-shadow viewport keeps the pointer-relative placement without taking input
+/// away from the seek bar or leaving a black DWM outline.
+pub(crate) fn show_seek_preview_overlay(
+    context: &egui::Context,
+    placement: Pos2,
+    size: Vec2,
+    texture: Option<&TextureHandle>,
+    timecode: &str,
+) {
+    let parent_origin = context
+        .input(|input| input.viewport().inner_rect.map(|rect| rect.min))
+        .unwrap_or(Pos2::ZERO);
+    let overlay_size = Vec2::new(size.x.max(1.0), size.y.max(1.0));
+    let overlay_id = egui::ViewportId::from_hash_of("seek-preview-overlay");
+    let builder = egui::ViewportBuilder::default()
+        .with_title("Segma Player seek preview")
+        .with_position(parent_origin + placement.to_vec2())
+        .with_inner_size(overlay_size)
+        .with_min_inner_size(overlay_size)
+        .with_max_inner_size(overlay_size)
+        .with_decorations(false)
+        .with_resizable(false)
+        // The preview fills this entire viewport. Keeping the native window
+        // opaque avoids the same clear-color fringe as the fullscreen bar.
+        .with_transparent(false)
+        .with_has_shadow(false)
+        .with_mouse_passthrough(true)
+        .with_taskbar(false)
+        .with_active(false)
+        .with_always_on_top();
+    context.show_viewport_immediate(overlay_id, builder, |preview, _class| {
+        preview.set_min_size(overlay_size);
+        paint_seek_preview(preview, Pos2::ZERO, overlay_size, texture, timecode);
+    });
 }
 
 fn range_selector(ui: &mut Ui, snapshot: &PlayerSnapshot, output: &mut PlayerUiOutput) {
@@ -1890,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_controls_float_without_resizing_the_video() {
+    fn fullscreen_controls_use_one_stable_final_position_without_resizing_the_video() {
         let available = Rect::from_min_max(Pos2::ZERO, Pos2::new(1920.0, 1080.0));
         let (hidden_video, hidden_controls) = fullscreen_layout(available, 0.0);
         let (shown_video, shown_controls) = fullscreen_layout(available, 1.0);
@@ -1902,50 +1941,97 @@ mod tests {
         assert!((shown_video.width() / shown_video.height() - VIDEO_ASPECT).abs() < 0.001);
         assert_eq!(shown_video.center(), available.center());
         assert_eq!(hidden_controls.top(), available.bottom());
-        assert_eq!(
-            shown_controls.bottom(),
-            available.bottom() - FULLSCREEN_CONTROL_MARGIN
-        );
+        assert_eq!(shown_controls.bottom(), available.bottom());
         assert_eq!(shown_controls.height(), FULLSCREEN_CONTROL_HEIGHT);
         assert!(shown_controls.top() < hidden_controls.top());
+
+        let source = include_str!("player_ui.rs");
+        let fullscreen = &source[source.find("fn fullscreen_player").unwrap()
+            ..source.find("fn fullscreen_layout").unwrap()];
+        assert!(fullscreen.contains("f32::from(bottom_hover)"));
+        assert!(fullscreen.contains("native_root_pointer_position"));
+        assert!(!fullscreen.contains("animate_bool_with_time"));
+        assert!(!fullscreen.contains("show_viewport_immediate"));
     }
 
     #[test]
-    fn fullscreen_control_surface_fades_to_a_translucent_fill() {
-        assert_eq!(fullscreen_control_fill(0.0).a(), 0);
+    fn fullscreen_control_surface_is_fully_painted_without_a_clear_color_fringe() {
+        assert_eq!(fullscreen_control_fill(0.0), color::BG_SURFACE);
         let shown = fullscreen_control_fill(1.0);
-        assert!(shown.a() > 0 && shown.a() < 255);
-        assert_eq!(shown.r(), shown.a());
-        assert_eq!(shown.g(), shown.a());
-        assert_eq!(shown.b(), shown.a());
+        assert_eq!(shown.a(), 255);
+        assert_eq!(shown, color::BG_SURFACE);
+    }
+
+    #[test]
+    fn fullscreen_controls_stay_in_the_root_viewport_and_use_local_preview_coordinates() {
+        let source = include_str!("player_ui.rs");
+        let fullscreen = &source[source.find("fn fullscreen_player").unwrap()
+            ..source.find("fn fullscreen_layout").unwrap()];
+        assert!(fullscreen.contains("fullscreen-control-surface"));
+        assert!(fullscreen.contains(".layer_id(layer_id)"));
+        assert!(fullscreen.contains(".max_rect(controls_rect)"));
+        assert!(fullscreen.contains("output.video_clip_height = Some"));
+        assert!(!fullscreen.contains("ViewportBuilder"));
+        assert!(!fullscreen.contains("show_viewport_immediate"));
+
+        let seek_bar = &source[source.find("fn fullscreen_seek_bar").unwrap()
+            ..source.find("fn advanced_controls").unwrap()];
+        assert!(seek_bar.contains(".stroke(egui::Stroke::NONE)"));
+
+        let scrubber =
+            &source[source.find("fn scrubber").unwrap()..source.find("fn seek_preview_x").unwrap()];
+        assert!(scrubber.contains("ui.ctx().content_rect()"));
+    }
+
+    #[test]
+    fn seek_preview_overlay_is_shadowless_and_does_not_steal_pointer_input() {
+        let source = include_str!("player_ui.rs");
+        let overlay = &source[source
+            .find("pub(crate) fn show_seek_preview_overlay")
+            .unwrap()..source.find("fn range_selector").unwrap()];
+        assert!(overlay.contains(".with_has_shadow(false)"));
+        assert!(overlay.contains(".with_mouse_passthrough(true)"));
+        assert!(overlay.contains(".with_transparent(false)"));
+        assert!(overlay.contains("paint_seek_preview(preview, Pos2::ZERO"));
     }
 
     #[test]
     fn windowed_seek_preview_uses_the_full_track_width() {
         let track = Rect::from_min_max(Pos2::new(20.0, 0.0), Pos2::new(1_020.0, 8.0));
-        assert_eq!(seek_preview_x(20.0, track, 192.0), 20.0);
-        assert_eq!(seek_preview_x(1_020.0, track, 192.0), 828.0);
-        assert_eq!(seek_preview_x(520.0, track, 192.0), 424.0);
+        let bounds = Rect::from_min_max(Pos2::ZERO, Pos2::new(1_040.0, 800.0));
+        assert_eq!(seek_preview_x(20.0, track, 192.0, bounds), 20.0);
+        assert_eq!(seek_preview_x(1_020.0, track, 192.0, bounds), 828.0);
+        assert_eq!(seek_preview_x(520.0, track, 192.0, bounds), 424.0);
     }
 
     #[test]
     fn seek_preview_floats_above_the_track_in_parent_coordinates() {
+        let bounds = Rect::from_min_max(Pos2::ZERO, Pos2::new(1_920.0, 1_080.0));
         let windowed_track = Rect::from_min_max(Pos2::new(20.0, 700.0), Pos2::new(1_020.0, 704.0));
-        let windowed = seek_preview_placement(520.0, windowed_track, PREVIEW_SIZE, Vec2::ZERO);
+        let windowed = seek_preview_placement(520.0, windowed_track, PREVIEW_SIZE, bounds);
         assert_eq!(windowed, Pos2::new(424.0, 544.0));
         assert_eq!(
             windowed.y + PREVIEW_SIZE.y + PREVIEW_GAP,
             windowed_track.top()
         );
 
-        let overlay_track = Rect::from_min_max(Pos2::new(12.0, 19.0), Pos2::new(1_868.0, 23.0));
-        let overlay_origin = Vec2::new(16.0, 1_022.0);
-        let fullscreen = seek_preview_placement(940.0, overlay_track, PREVIEW_SIZE, overlay_origin);
-        assert_eq!(fullscreen, Pos2::new(860.0, 885.0));
+        let overlay_track =
+            Rect::from_min_max(Pos2::new(12.0, 1_041.0), Pos2::new(1_868.0, 1_045.0));
+        let fullscreen = seek_preview_placement(940.0, overlay_track, PREVIEW_SIZE, bounds);
+        assert_eq!(fullscreen, Pos2::new(844.0, 885.0));
         assert_eq!(
             fullscreen.y + PREVIEW_SIZE.y + PREVIEW_GAP,
-            overlay_track.top() + overlay_origin.y
+            overlay_track.top()
         );
+    }
+
+    #[test]
+    fn seek_preview_is_clamped_to_the_visible_root_viewport() {
+        let bounds = Rect::from_min_max(Pos2::ZERO, Pos2::new(1_920.0, 1_080.0));
+        let right_track = Rect::from_min_max(Pos2::new(12.0, 1_041.0), Pos2::new(1_908.0, 1_045.0));
+        let right = seek_preview_placement(1_908.0, right_track, PREVIEW_SIZE, bounds);
+        assert_eq!(right.x, right_track.right() - PREVIEW_SIZE.x);
+        assert!(bounds.contains_rect(Rect::from_min_size(right, PREVIEW_SIZE)));
     }
 
     #[test]

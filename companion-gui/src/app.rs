@@ -36,17 +36,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const NOTICE_LIFETIME: Duration = Duration::from_secs(6);
 const MINI_PLAYER_WIDTH: f32 = 320.0;
 const MINI_PLAYER_MARGIN: f32 = 20.0;
-const MINI_PLAYER_DRAG_HEIGHT: f32 = 22.0;
+const MINI_PLAYER_DRAG_HEIGHT: f32 = 32.0;
 const MINI_PLAYER_CONTROLS_HEIGHT: f32 = 56.0;
 const MINI_PLAYER_PREVIEW_WIDTH: f32 = 128.0;
 /// 128x72 image plus a compact 20-point timecode strip.
 const MINI_PLAYER_PREVIEW_HEIGHT: f32 = 92.0;
-const MINI_PLAYER_PREVIEW_ROW_PADDING: f32 = 8.0;
 const MINI_PLAYER_MIN_WIDTH: f32 = 240.0;
 const MINI_PLAYER_MAX_WIDTH: f32 = 640.0;
 /// Native mpv never covers this perimeter, so all eight resize targets receive
 /// pointer input even while the child window is topmost.
-const MINI_PLAYER_RESIZE_GUTTER: f32 = 10.0;
+const MINI_PLAYER_RESIZE_GUTTER: f32 = 18.0;
 const RATING_STAR_HIT_SIZE: f32 = 26.0;
 const RATING_STAR_ICON_SIZE: f32 = 14.0;
 const BRAND_LOGO_SIZE: f32 = 32.0;
@@ -376,10 +375,16 @@ pub struct ManagerApp {
     pip_dismissed: bool,
     pip_position: Option<egui::Pos2>,
     pip_width: f32,
+    /// Until this instant the egui surface follows the OS cursor directly.
+    /// This keeps PiP moving after the pointer crosses onto the native mpv
+    /// child, where egui no longer receives drag events.
+    pip_move_until: Option<Instant>,
+    /// Pointer grab offset inside the PiP surface for OS-cursor tracking.
+    pip_move_offset: Vec2,
     /// Fixed position captured when the dedicated PiP drag strip is pressed.
     pip_move_start: Option<egui::Pos2>,
-    /// Geometry captured at the start of an edge drag. `Response::drag_delta`
-    /// is cumulative, so resizing must always derive from this fixed baseline.
+    /// Geometry captured at the start of an edge drag. Resizing uses
+    /// `Response::total_drag_delta`, so it must derive from this fixed baseline.
     pip_resize_drag: Option<PipResizeDrag>,
 }
 
@@ -455,6 +460,8 @@ impl Default for ManagerApp {
             pip_dismissed: false,
             pip_position: None,
             pip_width: MINI_PLAYER_WIDTH,
+            pip_move_until: None,
+            pip_move_offset: Vec2::ZERO,
             pip_move_start: None,
             pip_resize_drag: None,
         }
@@ -1276,6 +1283,7 @@ impl ManagerApp {
         self.pending_resume_position = None;
         self.pip_armed = false;
         self.pip_dismissed = true;
+        self.pip_move_until = None;
         self.pip_move_start = None;
         self.pip_resize_drag = None;
     }
@@ -2544,6 +2552,7 @@ impl ManagerApp {
         let snapshot = self.player.snapshot();
         if !pip_is_active(&snapshot) || self.pip_dismissed {
             self.seek_preview.hide();
+            self.pip_move_until = None;
             self.pip_move_start = None;
             self.pip_resize_drag = None;
             return PhysicalVideoRect::default();
@@ -2553,28 +2562,17 @@ impl ManagerApp {
         let mut physical_video_rect = PhysicalVideoRect::default();
         let pip_width = self.pip_width;
         let video_size = Vec2::new(pip_width, pip_width * 9.0 / 16.0);
-        let preview_open = self.seek_preview.hover_active();
-        let preview_row_height = if preview_open {
-            MINI_PLAYER_PREVIEW_HEIGHT + MINI_PLAYER_PREVIEW_ROW_PADDING * 2.0
-        } else {
-            0.0
-        };
         let surface_size = Vec2::new(
             pip_width + MINI_PLAYER_RESIZE_GUTTER * 2.0,
             MINI_PLAYER_RESIZE_GUTTER * 2.0
                 + MINI_PLAYER_DRAG_HEIGHT
                 + video_size.y
-                + MINI_PLAYER_CONTROLS_HEIGHT
-                + preview_row_height,
+                + MINI_PLAYER_CONTROLS_HEIGHT,
         );
-        let preview_visual = self
-            .seek_preview
-            .visual()
-            .map(|visual| (visual.texture.clone(), visual.timecode.to_owned()));
 
         // The native mpv child owns only the inset video rectangle. The drag
-        // strip, controls, preview, and every resize handle stay in egui-owned
-        // pixels, so a topmost child HWND cannot steal their pointer events.
+        // strip, controls, and every resize handle stay in egui-owned pixels;
+        // the seek preview uses a separate input-passthrough viewport above it.
         let mut area = egui::Area::new(egui::Id::new("segma-pip-surface"))
             .order(egui::Order::Foreground)
             .movable(false)
@@ -2604,6 +2602,10 @@ impl ManagerApp {
                 egui::pos2(content_left, content_top),
                 Vec2::new(pip_width, MINI_PLAYER_DRAG_HEIGHT),
             );
+            let video = egui::Rect::from_min_size(
+                egui::pos2(content_left, drag_strip.bottom()),
+                video_size,
+            );
             let drag_response = ui.interact(
                 drag_strip,
                 ui.id().with("pip-drag-strip"),
@@ -2614,22 +2616,25 @@ impl ManagerApp {
             }
             if drag_response.drag_started() {
                 self.pip_move_start = Some(surface.min);
+                self.pip_move_until = Some(Instant::now() + Duration::from_secs(20));
+                self.pip_move_offset = drag_response
+                    .interact_pointer_pos()
+                    .map_or(Vec2::ZERO, |pointer| pointer - surface.min);
             }
             if drag_response.dragged() {
-                dragged_position =
-                    Some(self.pip_move_start.unwrap_or(surface.min) + drag_response.drag_delta());
+                dragged_position = Some(
+                    self.pip_move_start.unwrap_or(surface.min)
+                        + drag_response.total_drag_delta().unwrap_or_default(),
+                );
             }
             if drag_response.drag_stopped() {
+                self.pip_move_until = None;
                 self.pip_move_start = None;
             }
-            let grip = egui::Rect::from_center_size(drag_strip.center(), Vec2::new(38.0, 3.0));
+            let grip = egui::Rect::from_center_size(drag_strip.center(), Vec2::new(56.0, 4.0));
             ui.painter()
-                .rect_filled(grip, corner(radius::FULL), Color32::from_white_alpha(92));
+                .rect_filled(grip, corner(radius::FULL), Color32::from_white_alpha(128));
 
-            let video = egui::Rect::from_min_size(
-                egui::pos2(content_left, drag_strip.bottom()),
-                video_size,
-            );
             let controls = egui::Rect::from_min_max(
                 egui::Pos2::new(surface.left(), video.bottom()),
                 egui::Pos2::new(
@@ -2645,25 +2650,7 @@ impl ManagerApp {
                 &snapshot,
                 &mut overlay_output,
                 Vec2::new(MINI_PLAYER_PREVIEW_WIDTH, MINI_PLAYER_PREVIEW_HEIGHT),
-                Vec2::ZERO,
             );
-            if preview_open {
-                let preview_width = MINI_PLAYER_PREVIEW_WIDTH;
-                let preview_size = Vec2::new(preview_width, MINI_PLAYER_PREVIEW_HEIGHT);
-                let preview_position = egui::Pos2::new(
-                    surface.center().x - preview_size.x / 2.0,
-                    controls.bottom() + MINI_PLAYER_PREVIEW_ROW_PADDING,
-                );
-                player_ui::paint_seek_preview(
-                    ui,
-                    preview_position,
-                    preview_size,
-                    preview_visual.as_ref().map(|(texture, _)| texture),
-                    preview_visual
-                        .as_ref()
-                        .map_or("00:00", |(_, timecode)| timecode.as_str()),
-                );
-            }
             let gutter = MINI_PLAYER_RESIZE_GUTTER;
             for edge in PipResizeEdge::ALL {
                 let handle_rect = match edge {
@@ -2716,7 +2703,11 @@ impl ManagerApp {
                 }
                 if response.dragged() {
                     if let Some(drag) = self.pip_resize_drag.filter(|drag| drag.edge == edge) {
-                        let width = pip_resize_width(edge, drag.start_width, response.drag_delta());
+                        let width = pip_resize_width(
+                            edge,
+                            drag.start_width,
+                            response.total_drag_delta().unwrap_or_default(),
+                        );
                         next_width = Some(width);
                         next_position = Some(pip_resize_position(
                             edge,
@@ -2730,9 +2721,38 @@ impl ManagerApp {
                     resize_finished = true;
                 }
             }
+            let resize_grip = egui::Rect::from_min_size(
+                surface.right_bottom() - Vec2::splat(gutter),
+                Vec2::splat(gutter),
+            );
+            for inset in [4.0, 8.0, 12.0] {
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(resize_grip.right() - inset, resize_grip.bottom() - 2.0),
+                        egui::pos2(resize_grip.right() - 2.0, resize_grip.bottom() - inset),
+                    ],
+                    egui::Stroke::new(1.0, Color32::from_white_alpha(120)),
+                );
+            }
         });
         if resize_finished {
             self.pip_resize_drag = None;
+        }
+        if self
+            .pip_move_until
+            .is_some_and(|deadline| deadline > Instant::now())
+        {
+            if native_primary_pointer_down() {
+                if let Some(pointer) = native_pointer_position(context) {
+                    dragged_position = Some(pointer - self.pip_move_offset);
+                    context.request_repaint();
+                }
+            } else {
+                self.pip_move_until = None;
+                self.pip_move_start = None;
+            }
+        } else {
+            self.pip_move_until = None;
         }
         self.pip_position = Some(
             next_position
@@ -2758,6 +2778,14 @@ impl ManagerApp {
                 PathBuf::from(path),
                 hover.target,
                 snapshot.duration,
+            );
+            let visual = self.seek_preview.visual();
+            player_ui::show_seek_preview_overlay(
+                context,
+                hover.placement,
+                hover.size,
+                visual.map(|visual| visual.texture),
+                visual.map_or("00:00", |visual| visual.timecode),
             );
         } else {
             self.seek_preview.hide();
@@ -2815,6 +2843,13 @@ impl ManagerApp {
         );
 
         layout_video_window(self.player_video_hwnd, output.physical_video_rect, true);
+        if let Some(clip_height) = output.video_clip_height {
+            clip_video_window_height(
+                self.player_video_hwnd,
+                output.physical_video_rect.width,
+                clip_height,
+            );
+        }
         if output.physical_video_rect.visible() {
             self.last_player_video_rect = output.physical_video_rect;
             self.last_player_video_logical_rect = output.logical_video_rect;
@@ -2900,13 +2935,9 @@ impl ManagerApp {
                 snapshot.duration,
             );
             let visual = self.seek_preview.visual();
-            let placement = egui::Pos2::new(
-                hover.placement.x,
-                output.logical_video_rect.bottom() + space::X8,
-            );
-            player_ui::paint_seek_preview(
-                ui,
-                placement,
+            player_ui::show_seek_preview_overlay(
+                ui.ctx(),
+                hover.placement,
                 hover.size,
                 visual.map(|visual| visual.texture),
                 visual.map_or("00:00", |visual| visual.timecode),
@@ -3443,6 +3474,42 @@ fn layout_video_window(window: isize, rect: PhysicalVideoRect, visible: bool) {
     }
 }
 
+/// Current primary-pointer state even when the native mpv child owns input.
+#[cfg(target_os = "windows")]
+fn native_primary_pointer_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+
+    unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_primary_pointer_down() -> bool {
+    false
+}
+
+/// OS cursor converted to the root viewport's logical egui coordinates.
+#[cfg(target_os = "windows")]
+fn native_pointer_position(context: &egui::Context) -> Option<egui::Pos2> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point).ok()? };
+    let scale = context.pixels_per_point().max(f32::EPSILON);
+    let origin = context
+        .input(|input| input.viewport().inner_rect.map(|rect| rect.min))
+        .unwrap_or(egui::Pos2::ZERO);
+    Some(egui::pos2(
+        point.x as f32 / scale - origin.x,
+        point.y as f32 / scale - origin.y,
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_pointer_position(_context: &egui::Context) -> Option<egui::Pos2> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 fn clear_video_window_region(window: isize) {
     use windows::Win32::Foundation::HWND;
@@ -3456,6 +3523,30 @@ fn clear_video_window_region(window: isize) {
     }
 }
 
+/// Clip, but do not resize, the embedded video child so egui can own one
+/// fullscreen control band in the root viewport. The next Player frame clears
+/// this region before layout, preventing the stale PiP-region regression.
+#[cfg(target_os = "windows")]
+fn clip_video_window_height(window: isize, width: i32, height: i32) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
+
+    if window == 0 || width <= 1 || height <= 1 {
+        return;
+    }
+    let region = unsafe { CreateRectRgn(0, 0, width, height) };
+    if region.is_invalid() {
+        return;
+    }
+    // Windows owns the region after a successful SetWindowRgn call.
+    if unsafe { SetWindowRgn(HWND(window as *mut core::ffi::c_void), Some(region), true) } == 0 {
+        let _ = unsafe { DeleteObject(region.into()) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clip_video_window_height(_window: isize, _width: i32, _height: i32) {}
+
 #[cfg(not(target_os = "windows"))]
 fn clear_video_window_region(_window: isize) {}
 
@@ -3463,10 +3554,7 @@ fn clear_video_window_region(_window: isize) {}
 fn layout_video_window(_window: isize, _rect: PhysicalVideoRect, _visible: bool) {}
 
 fn pip_is_active(snapshot: &crate::player_contract::PlayerSnapshot) -> bool {
-    snapshot.engine_available
-        && snapshot.loaded_path.is_some()
-        && !snapshot.paused
-        && snapshot.error.is_none()
+    snapshot.engine_available && snapshot.loaded_path.is_some() && snapshot.error.is_none()
 }
 
 fn native_clear_color() -> [f32; 4] {
@@ -3479,7 +3567,7 @@ fn native_clear_color() -> [f32; 4] {
 
 /// PiP eligibility for the current active session.
 ///
-/// `armed` is earned only by active playback on the Player screen. `dismissed`
+/// `armed` is earned by a loaded playback session on the Player screen. `dismissed`
 /// records an explicit close and holds for the rest of that session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PipSession {
@@ -3489,19 +3577,20 @@ struct PipSession {
 
 /// Advance the session for one frame.
 ///
-/// A view change alone can never arm PiP: leaving Player while paused or stopped
-/// disarms it, so the window does not appear just because the screen changed.
-fn next_pip_session(session: PipSession, view: View, playback_active: bool) -> PipSession {
+/// A view change alone can never arm PiP: the Player must first own a loaded
+/// session. Pausing that session preserves the PiP so its Play button remains
+/// reachable; only Stop/close/unload ends it.
+fn next_pip_session(session: PipSession, view: View, session_loaded: bool) -> PipSession {
     if view == View::Player {
         return PipSession {
-            armed: playback_active,
+            armed: session_loaded,
             // Returning to Player and playing again starts a new active session,
             // so an earlier close no longer applies.
-            dismissed: session.dismissed && !playback_active,
+            dismissed: session.dismissed && !session_loaded,
         };
     }
     PipSession {
-        armed: session.armed && playback_active,
+        armed: session.armed && session_loaded,
         dismissed: session.dismissed,
     }
 }
@@ -4263,8 +4352,8 @@ mod tests {
             }
         }
 
-        // `drag_delta` is cumulative. Re-evaluating the same drag event must
-        // therefore produce the same geometry, not add another 40 points.
+        // Total drag delta is cumulative. Re-evaluating the same drag event
+        // must therefore produce the same geometry, not add another 40 points.
         let first = pip_resize_width(PipResizeEdge::Right, start_width, delta);
         let repeated = pip_resize_width(PipResizeEdge::Right, start_width, delta);
         assert_eq!(first, 360.0);
@@ -4276,6 +4365,19 @@ mod tests {
         let clear = native_clear_color();
         assert_eq!(clear[3], 1.0);
         assert_eq!(clear, color::BG_CANVAS.to_normalized_gamma_f32());
+    }
+
+    #[test]
+    fn fullscreen_controls_clip_the_native_child_instead_of_opening_an_overlay_window() {
+        let app = include_str!("app.rs");
+        let player = include_str!("player_ui.rs");
+        let fullscreen = &player[player.find("fn fullscreen_player").unwrap()
+            ..player.find("fn fullscreen_layout").unwrap()];
+        assert!(fullscreen.contains("output.video_clip_height = Some"));
+        assert!(!fullscreen.contains("show_viewport_immediate"));
+        assert!(app.contains("clip_video_window_height("));
+        assert!(app.contains("SetWindowRgn"));
+        assert!(app.contains("clear_video_window_region(self.player_video_hwnd)"));
     }
 
     #[test]
@@ -4300,8 +4402,8 @@ mod tests {
             armed: false,
             dismissed: false,
         };
-        // Paused on Player, then navigating away: nothing arms, so no PiP appears
-        // merely because the view changed.
+        // No loaded media on Player, then navigating away: nothing arms, so no
+        // PiP appears merely because the view changed.
         let paused_on_player = next_pip_session(idle, View::Player, false);
         assert_eq!(paused_on_player, idle);
         assert_eq!(
@@ -4315,10 +4417,11 @@ mod tests {
         let navigated = next_pip_session(playing, View::Library, true);
         assert!(navigated.armed && !navigated.dismissed);
 
-        // Pausing outside Player disarms, and resuming there cannot re-arm it.
-        let paused_away = next_pip_session(navigated, View::Library, false);
-        assert!(!paused_away.armed);
-        assert!(!next_pip_session(paused_away, View::Library, true).armed);
+        // Pausing outside Player keeps the loaded session armed. Stop/unload is
+        // represented by `session_loaded = false` and is the only disarm path.
+        let paused_away = next_pip_session(navigated, View::Library, true);
+        assert!(paused_away.armed);
+        assert!(!next_pip_session(paused_away, View::Library, false).armed);
 
         // An explicit close survives further navigation while the session lasts.
         let closed = PipSession {
@@ -4339,19 +4442,41 @@ mod tests {
     }
 
     #[test]
-    fn pip_requires_active_playback_and_is_suppressed_after_close() {
+    fn pip_keeps_a_loaded_paused_session_visible_and_is_suppressed_after_close() {
         let mut snapshot = playing_snapshot();
 
         assert!(pip_is_active(&snapshot));
         assert!(pip_should_show(&snapshot, View::Library, true, false));
 
         snapshot.paused = true;
-        assert!(!pip_is_active(&snapshot));
-        assert!(!pip_should_show(&snapshot, View::Library, true, false));
+        assert!(pip_is_active(&snapshot));
+        assert!(pip_should_show(&snapshot, View::Library, true, false));
 
         snapshot.paused = false;
         assert!(!pip_should_show(&snapshot, View::Library, true, true));
         assert!(!pip_should_show(&snapshot, View::Player, true, false));
+    }
+
+    #[test]
+    fn pip_move_target_covers_the_video_and_resize_targets_remain_on_all_edges() {
+        let source = include_str!("app.rs");
+        let pip =
+            &source[source.find("fn pip_surface").unwrap()..source.find("fn player_view").unwrap()];
+        assert!(MINI_PLAYER_DRAG_HEIGHT >= 32.0);
+        assert!(MINI_PLAYER_RESIZE_GUTTER >= 18.0);
+        assert!(pip.contains("ui.interact(\n                drag_strip"));
+        assert_eq!(
+            pip.matches("total_drag_delta().unwrap_or_default()")
+                .count(),
+            2
+        );
+        assert!(!pip.contains("drag_response.drag_delta()"));
+        assert!(!pip.contains("response.drag_delta()"));
+        assert!(pip.contains("native_primary_pointer_down()"));
+        assert!(pip.contains("native_pointer_position(context)"));
+        assert!(pip.contains("let resize_grip"));
+        assert!(pip.contains("for edge in PipResizeEdge::ALL"));
+        assert_eq!(PipResizeEdge::ALL.len(), 8);
     }
 
     #[test]

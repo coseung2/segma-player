@@ -361,10 +361,6 @@ impl SeekPreviewController {
         })
     }
 
-    pub fn hover_active(&self) -> bool {
-        self.hover_active
-    }
-
     /// Hide immediately. Keep the last same-media texture warm so re-entering
     /// the seek bar or moving into another slot never flashes a placeholder.
     /// [`Self::media_changed`] is the boundary that releases this association.

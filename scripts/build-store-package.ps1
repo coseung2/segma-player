@@ -53,10 +53,15 @@ if ($CompanionInstallUrl) {
 
 $runtimeFiles = @(
   'background.js',
+  'background-candidate-repository.js',
+  'background-companion-handoff.js',
+  'background-player-resolution.js',
+  'background-request-evidence.js',
   'companion-client.js',
   'candidate.js',
   'candidate-ranking.js',
   'content.js',
+  'content-extraction.js',
   'download-errors.js',
   'download-mode.js',
   'download-policy.js',
@@ -221,11 +226,11 @@ function Write-AuditedManifest {
   }
   $validIsolatedContent = $isolatedProperties -eq 'all_frames,js,matches,run_at' -and
     (@($isolatedContent.matches) -join ',') -eq 'http://*/*,https://*/*' -and
-    (@($isolatedContent.js) -join ',') -eq 'content.js' -and
+    (@($isolatedContent.js) -join ',') -eq 'content-extraction.js,content.js' -and
     $isolatedContent.run_at -eq 'document_start' -and
     $isolatedContent.all_frames -eq $true
   if (-not $validIsolatedContent) {
-    throw 'Store manifest isolated content script must be content.js at document_start.'
+    throw 'Store manifest isolated content scripts must be content-extraction.js then content.js at document_start.'
   }
   if ($auditedManifest.background.service_worker -ne 'background.js' -or $auditedManifest.background.type -ne 'module') {
     throw 'Store manifest background runtime is not the audited module worker.'
@@ -290,7 +295,7 @@ function Invoke-StoreAudit([string[]]$ExpectedFiles) {
     (@($contentScripts[0].js) -join ',') -eq 'page-media-observer.js,level5-page-bridge.js' -and
     $contentScripts[0].run_at -eq 'document_start' -and
     $contentScripts[0].world -eq 'MAIN' -and
-    (@($contentScripts[1].js) -join ',') -eq 'content.js' -and
+    (@($contentScripts[1].js) -join ',') -eq 'content-extraction.js,content.js' -and
     $contentScripts[1].run_at -eq 'document_start' -and
     -not ($contentScripts[1].PSObject.Properties.Name -contains 'world')
   if (-not $validContentScripts) {
@@ -304,8 +309,10 @@ function Invoke-StoreAudit([string[]]$ExpectedFiles) {
     throw 'Store audit did not find the bundled page bridge cache and loader key paths.'
   }
   $auditedBackground = Read-Utf8 (Join-Path $StageDirectory 'background.js')
+  $auditedHandoff = Read-Utf8 (Join-Path $StageDirectory 'background-companion-handoff.js')
   $auditedCompanion = Read-Utf8 (Join-Path $StageDirectory 'companion-client.js')
-  if ($auditedBackground -notmatch 'startCompanionMediaDownload' -or
+  if ($auditedBackground -notmatch 'createCompanionHandoff' -or
+      $auditedHandoff -notmatch 'startCompanionMediaDownload' -or
       $auditedCompanion -notmatch 'com\.aura\.media_companion' -or
       $auditedCompanion -notmatch 'media-download-v1') {
     throw 'Store audit did not find the reviewed Aura Companion bridge.'

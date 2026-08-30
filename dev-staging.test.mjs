@@ -64,6 +64,10 @@ test("cross-platform development staging builds an exact Pro directory without a
   assert.match(edition, /PRODUCT_EDITION = "pro"/);
   assert.match(edition, /COMPANION_INSTALL_URL = "https:\/\/aura\.example\/companion"/);
   assert.match(await readFile(path.join(stageDirectory, "background.js"), "utf8"), /media-request-context\.js/);
+  assert.match(await readFile(path.join(stageDirectory, "background.js"), "utf8"), /background-candidate-repository\.js/);
+  assert.match(await readFile(path.join(stageDirectory, "content.js"), "utf8"), /__segmaContentExtractionV1/);
+  assert.equal((await readFile(path.join(stageDirectory, "content-extraction.js"), "utf8")).length > 0, true);
+  assert.deepEqual(manifest.content_scripts[1].js, ["content-extraction.js", "content.js"]);
   const stagedNames = new Set(await filesUnder(stageDirectory));
   for (const retired of [
     "playback-addon.js",

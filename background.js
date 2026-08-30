@@ -3,18 +3,18 @@ import {
   MEDIA_TYPES,
   canonicalHttpUrl,
   isDownloadableMediaType,
-  isImageResourceUrl,
   isLikelyHlsSegmentUrl,
   makeCandidate,
   mediaTypeForResource,
   normalizeOriginPath,
-  redactUrl,
   redactCandidateForUi,
   sanitizePageMessage,
   toTextOnlyRows,
-  upsertCandidate,
 } from "./candidate.js";
-import { rankCandidates } from "./candidate-ranking.js";
+import { createCandidateRepository } from "./background-candidate-repository.js";
+import { createCompanionHandoff, isYouTubeDetectionCandidate } from "./background-companion-handoff.js";
+import { createPlayerResolutionCoordinator } from "./background-player-resolution.js";
+import { createProgressiveRedirectStore, createQaRequestTraceStore } from "./background-request-evidence.js";
 import { DOWNLOAD_MENU_ID } from "./download.js";
 import { candidateDownloadErrorCode } from "./download-errors.js";
 import { normalizeLevel5KeyError } from "./level5-key-error.js";
@@ -26,65 +26,24 @@ import {
   isMobileUserAgentRuleId,
 } from "./mobile-user-agent.js";
 import {
-  createPlayerGraphResolver,
-  isStreamtapePlayerPage,
   looksLikePlayerPage,
 } from "./player-page-resolver.js";
 import {
   companionStatus,
-  mediaDownloadBrowserContext,
   showCompanionUi,
-  startCompanionMediaDownload,
-  startCompanionYouTubeDownload,
 } from "./companion-client.js";
 import { createMediaRequestDiagnosticStore } from "./media-request-context.js";
 import { isPlayerFrameUrl, titleSelectorsForPage } from "./sites/registry.js";
 
-const candidates = new Map();
-const PROGRESSIVE_REDIRECT_TARGET_LIMIT = 1000;
-const PROGRESSIVE_REDIRECT_TARGET_TTL_MS = 60_000;
 const mediaRequestDiagnostics = createMediaRequestDiagnosticStore();
-const qaRequestTraceByKey = new Map();
-const QA_REQUEST_TRACE_LIMIT = 512;
-const progressiveRedirectTargets = new Map();
-const mainFramesByTab = new Map();
-const frameLayoutsByTab = new Map();
-const frameStatesByTab = new Map();
+const qaRequestTrace = createQaRequestTraceStore();
+const progressiveRedirects = createProgressiveRedirectStore();
 const doodDirectByFrame = new Map();
 const DOOD_DIRECT_CACHE_TTL_MS = 60_000;
-const nonPersistentCandidates = new WeakSet();
-const SESSION_CANDIDATES_KEY = "candidates";
 const tabTitleCache = new Map();
-let persistTimer = null;
 const MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36";
 const mobileUaRulesByTab = new Map();
 let mobileUaRuleIds = null;
-
-function rememberQaRequestTrace(details, patch = {}) {
-  if (!Number.isInteger(details?.tabId) || details.tabId <= 0 || typeof details?.url !== "string") return;
-  const resource = redactUrl(details.url);
-  if (resource === "[redacted-invalid-url]") return;
-  const key = `${details.tabId}:${details.requestId || resource}`;
-  const previous = qaRequestTraceByKey.get(key) || {
-    tabId: details.tabId,
-    requestId: typeof details.requestId === "string" ? details.requestId : "",
-    frameId: Number.isInteger(details.frameId) ? details.frameId : null,
-    parentFrameId: Number.isInteger(details.parentFrameId) ? details.parentFrameId : null,
-    resource,
-    documentUrl: typeof details.documentUrl === "string" ? redactUrl(details.documentUrl) : "",
-    type: typeof details.type === "string" ? details.type : "",
-    phases: [],
-  };
-  previous.resource = resource;
-  previous.phases = [...new Set([...previous.phases, patch.phase].filter(Boolean))].slice(-8);
-  Object.assign(previous, patch);
-  previous.updatedAt = Number.isFinite(details.timeStamp) ? details.timeStamp : Date.now();
-  qaRequestTraceByKey.delete(key);
-  qaRequestTraceByKey.set(key, previous);
-  while (qaRequestTraceByKey.size > QA_REQUEST_TRACE_LIMIT) {
-    qaRequestTraceByKey.delete(qaRequestTraceByKey.keys().next().value);
-  }
-}
 
 try {
   const sessionAccess = chrome.storage.session.setAccessLevel?.({
@@ -101,101 +60,6 @@ async function ensureDirectMediaAccess(values) {
     .map((value) => canonicalHttpUrl(value)?.hostname)
     .filter(Boolean))];
   return { ok: true, hosts };
-}
-
-// Shared, bounded player-graph resolver for every player-page resolution
-// path. Caches are keyed by canonical URL with short TTLs; the factory's only
-// clear() aborts every in-flight traversal, so tab navigation never calls it
-// globally (one tab would cancel another tab's active resolution). Positive
-// and negative TTLs self-expire stale entries instead.
-const playerGraphResolver = createPlayerGraphResolver({
-  ensureRoute: ensureDirectMediaAccess,
-  getRedirectTarget: (url) => progressiveRedirectTargetFor(url),
-});
-
-async function resolveObservedPlayerFrame(details) {
-  if (details?.type !== "sub_frame" || !looksLikePlayerPage(details?.url)
-    || !Number.isInteger(details?.tabId) || details.tabId <= 0
-    || !Number.isInteger(details?.frameId) || details.frameId < 0) return null;
-  const resolved = await playerGraphResolver.resolve(details.url);
-  if (!resolved?.url) return null;
-  const title = await tabTitle(details.tabId);
-  return observeResource({
-    pageTitle: title,
-    pageUrl: resolved.referrer || details.url,
-    siteUrl: details.initiator || details.documentUrl || details.url,
-    frameUrl: details.url,
-    frameId: details.frameId,
-    resourceUrl: resolved.url,
-    contentType: resolved.type === "hls"
-      ? "application/vnd.apple.mpegurl" : "video/mp4",
-    detectionSource: "player-page-resolver",
-    player: isStreamtapePlayerPage(details.url) ? "streamtape" : "player-page",
-    requestType: "sub_frame",
-    confidence: 100,
-    observedAt: details.timeStamp,
-  }, details.tabId);
-}
-
-function canonicalYouTubeUrl(value) {
-  const url = canonicalHttpUrl(value);
-  if (!url) return null;
-  const host = url.hostname.toLowerCase();
-  if (host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com")) return url.href;
-  return null;
-}
-
-function isYouTubeDetectionCandidate(candidate) {
-  // googlevideo.com also backs Blogger-hosted players embedded by sites such
-  // as Gogoanime. Suppress it only for an actual YouTube page; otherwise the
-  // site's progressive video would never reach the candidate list.
-  if (canonicalYouTubeUrl(candidate?.pageUrl) || canonicalYouTubeUrl(candidate?.siteUrl)) return true;
-  const resource = canonicalHttpUrl(candidate?.resourceUrl);
-  if (!resource) return false;
-  const host = resource.hostname.toLowerCase();
-  return host === "youtube.com"
-    || host.endsWith(".youtube.com")
-    || host === "youtu.be";
-}
-
-const YOUTUBE_QUALITIES = new Set(["best", "4320", "2160", "1440", "1080", "720", "480", "360", "240", "144"]);
-
-async function startYouTubeDownload(rawUrl, rawQuality = "best") {
-  const url = canonicalYouTubeUrl(rawUrl);
-  if (!url) throw new Error("invalid-youtube-url");
-  const quality = String(rawQuality || "best");
-  if (!YOUTUBE_QUALITIES.has(quality)) throw new Error("invalid-youtube-quality");
-
-  const jobId = crypto.randomUUID();
-  const accepted = await startCompanionYouTubeDownload({ jobId, url, quality });
-  if (accepted?.accepted !== true || accepted?.jobId !== jobId) {
-    const error = new Error("Segma Player가 YouTube 다운로드 작업을 수락하지 않았습니다.");
-    error.code = "media-companion-start-rejected";
-    throw error;
-  }
-  return { mode: "youtube-companion", jobId };
-}
-function progressiveRedirectTargetFor(value) {
-  const url = canonicalHttpUrl(value)?.href;
-  if (!url) return null;
-  const entry = progressiveRedirectTargets.get(url);
-  if (!entry) return null;
-  if (Date.now() - entry.at > PROGRESSIVE_REDIRECT_TARGET_TTL_MS) {
-    progressiveRedirectTargets.delete(url);
-    return null;
-  }
-  return entry.url;
-}
-
-function recordProgressiveRedirect(details) {
-  const from = canonicalHttpUrl(details?.url)?.href;
-  const to = canonicalHttpUrl(details?.redirectUrl)?.href;
-  if (!from || !to || from === to) return;
-  progressiveRedirectTargets.delete(from);
-  progressiveRedirectTargets.set(from, { url: to, at: Date.now() });
-  while (progressiveRedirectTargets.size > PROGRESSIVE_REDIRECT_TARGET_LIMIT) {
-    progressiveRedirectTargets.delete(progressiveRedirectTargets.keys().next().value);
-  }
 }
 
 const mobileUaRulesReady = chrome.declarativeNetRequest.getSessionRules().then((rules) => {
@@ -297,33 +161,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   });
 });
 
-async function queueMediaDownload(candidate) {
-  const transferCandidate = await resolvePlayerCandidate(candidate);
-  const jobId = crypto.randomUUID();
-  await startCompanionMediaDownload({
-    jobId,
-    candidateId: transferCandidate.id,
-    url: transferCandidate.resourceUrl,
-    ...(transferCandidate.pageUrl ? { referrer: transferCandidate.pageUrl } : {}),
-    title: transferCandidate.pageTitle || "미디어 다운로드",
-    inputKind: transferCandidate.mediaType,
-    ...mediaDownloadBrowserContext(),
-  });
-  return { mode: "media-companion", jobId };
-}
-
-async function beginCandidateDownload(candidate) {
-  if (isLikelyHlsSegmentUrl(candidate?.resourceUrl)) throw new Error("unsupported-media");
-  if (candidate.mediaType === "PROGRESSIVE") {
-    return queueMediaDownload(candidate);
-  }
-  if (isHlsCandidate(candidate)) {
-    return queueMediaDownload(candidate);
-  }
-  if (candidate.mediaType === "DASH") return queueMediaDownload(candidate);
-  throw new Error("unsupported-media");
-}
-
 function popupCandidate(candidate) {
   const projection = redactCandidateForUi(candidate);
   // Popup previews are optional and must not make unsolicited requests with a
@@ -334,31 +171,6 @@ function popupCandidate(candidate) {
     : null;
   const sourceUrl = canonicalHttpUrl(candidate.pageUrl)?.href || null;
   return { ...projection, previewUrl, sourceUrl };
-}
-
-function playerCandidateHasQuery(candidate) {
-  if (!looksLikePlayerPage(candidate?.pageUrl)) return false;
-  try { return Boolean(new URL(candidate.resourceUrl).search); } catch { return false; }
-}
-
-function rerankTabCandidates(tabId) {
-  if (!Number.isInteger(tabId) || tabId <= 0) return [];
-  const tabCandidates = [...candidates.values()].filter((candidate) => candidate.tabId === tabId);
-  return rankCandidates(tabCandidates, {
-    frameStates: frameStatesByTab.get(tabId) || null,
-    frameLayouts: frameLayoutsByTab.get(tabId) || null,
-    now: Date.now(),
-  });
-}
-
-function observeCandidate(candidate, { nonPersistent = false } = {}) {
-  if (!candidate || isYouTubeDetectionCandidate(candidate)) return null;
-  void applyTitleSelectors(candidate);
-  const stored = upsertCandidate(candidates, candidate, LIMITS.candidates);
-  if (nonPersistent || stored.tokenized || playerCandidateHasQuery(stored)) nonPersistentCandidates.add(stored);
-  if (Number.isInteger(stored.tabId)) rerankTabCandidates(stored.tabId);
-  persistCandidates();
-  return stored;
 }
 
 // Sites whose real media title is not in `<title>` declare selectors in their
@@ -410,45 +222,6 @@ async function applyTitleSelectors(candidate) {
   applyResolvedTitleToTab(tabId, response?.pageTitle);
 }
 
-function persistCandidates() {
-  clearTimeout(persistTimer);
-  persistTimer = setTimeout(() => {
-    try {
-      const snapshot = [...candidates.values()]
-        .filter((candidate) => !nonPersistentCandidates.has(candidate));
-      void chrome.storage.session.set({ [SESSION_CANDIDATES_KEY]: snapshot }).catch(() => {});
-    } catch {
-      // Session storage can be unavailable briefly while the worker restarts.
-    }
-  }, 300);
-}
-
-if (chrome.storage?.session) {
-  chrome.storage.session.get({ [SESSION_CANDIDATES_KEY]: [] }).then(({ [SESSION_CANDIDATES_KEY]: saved }) => {
-    if (!Array.isArray(saved)) return;
-    for (const item of saved) {
-      if (isImageResourceUrl(item?.resourceUrl) || isYouTubeDetectionCandidate(item)) continue;
-      const restored = upsertCandidate(candidates, item, LIMITS.candidates);
-      if (playerCandidateHasQuery(restored)) nonPersistentCandidates.add(restored);
-    }
-  }).catch(() => {});
-}
-
-function observeResource(input, tabId) {
-  const candidate = makeCandidate({ ...input, tabId: tabId || null });
-  if (!candidate) return null;
-  if (!candidate.main && isMainFrame(tabId, input.frameUrl)) candidate.main = true;
-  return observeCandidate(candidate);
-}
-
-function isMainFrame(tabId, frameUrl) {
-  if (!tabId || !frameUrl) return false;
-  const frames = mainFramesByTab.get(tabId);
-  if (!frames || frames.size === 0) return false;
-  const key = normalizeOriginPath(frameUrl);
-  return key ? frames.has(key) : false;
-}
-
 async function tabTitle(tabId) {
   if (!Number.isInteger(tabId) || tabId <= 0) return "";
   const cached = tabTitleCache.get(tabId);
@@ -463,94 +236,8 @@ async function tabTitle(tabId) {
   }
 }
 
-function candidateContentType(candidate) {
-  if (candidate?.mediaType === MEDIA_TYPES.DASH) return "application/dash+xml";
-  if (candidate?.mediaType === MEDIA_TYPES.HLS_MASTER || candidate?.mediaType === MEDIA_TYPES.HLS_MEDIA) {
-    return "application/vnd.apple.mpegurl";
-  }
-  return candidate?.mediaType === MEDIA_TYPES.PROGRESSIVE ? "video/mp4" : "";
-}
-
-async function refreshCandidateFromSourceFrame(candidate, { force = false } = {}) {
-  if (!candidate || !Number.isInteger(candidate.tabId) || candidate.tabId <= 0
-    || !Number.isInteger(candidate.frameId) || candidate.frameId < 0) return candidate;
-  const shouldRefresh = force || candidate.tokenized
-    || (Number.isFinite(candidate.refreshAfter) && candidate.refreshAfter <= Date.now())
-    || Boolean(candidate.player)
-    || (Array.isArray(candidate.evidence)
-      && candidate.evidence.some((item) => item?.source === "player-adapter"));
-  if (!shouldRefresh) return candidate;
-  const response = await sendTabMessageWithTimeout(candidate.tabId, {
-    type: "refresh-media-source",
-    resourceUrl: candidate.resourceUrl,
-    player: candidate.player || "",
-    sessionId: candidate.sessionId || "",
-  }, 3_000, { frameId: candidate.frameId });
-  const resourceUrl = response?.ok ? canonicalHttpUrl(response.url)?.href : null;
-  if (!resourceUrl) return candidate;
-  const pageUrl = canonicalHttpUrl(response.frameUrl)?.href || candidate.pageUrl;
-  const refreshed = makeCandidate({
-    pageTitle: candidate.pageTitle,
-    pageUrl,
-    siteUrl: candidate.siteUrl || candidate.pageUrl,
-    resourceUrl,
-    contentType: candidateContentType(candidate),
-    variants: candidate.variants || [],
-    main: candidate.main,
-    explicitMain: candidate.explicitMain,
-    tabId: candidate.tabId,
-    frameId: candidate.frameId,
-    evidence: [
-      ...(Array.isArray(candidate.evidence) ? candidate.evidence : []),
-      {
-        source: "refresh",
-        player: response.player || candidate.player || "",
-        sessionId: response.sessionId || candidate.sessionId || "",
-        confidence: 100,
-        at: response.observedAt || Date.now(),
-      },
-    ],
-    player: response.player || candidate.player || "",
-    sessionId: response.sessionId || candidate.sessionId || "",
-    detectionSource: "refresh",
-    confidence: 100,
-    observedAt: response.observedAt || Date.now(),
-  });
-  if (!refreshed || refreshed.mediaType !== candidate.mediaType) return candidate;
-  refreshed.id = candidate.id;
-  for (const [key, item] of candidates) {
-    if (item === candidate || item.id === candidate.id) candidates.delete(key);
-  }
-  return observeCandidate(refreshed, { nonPersistent: true }) || refreshed;
-}
-
 function popupSender(sender) {
   return exactExtensionPageSender(sender, "popup.html");
-}
-
-async function resolvePlayerCandidate(candidate) {
-  const fresh = await refreshCandidateFromSourceFrame(candidate);
-  if (!looksLikePlayerPage(fresh?.resourceUrl)) return fresh;
-  const resolved = await playerGraphResolver.resolve(fresh.resourceUrl);
-  if (!resolved?.url) return fresh;
-  const resolvedCandidate = makeCandidate({
-    pageTitle: fresh.pageTitle,
-    pageUrl: resolved.referrer || fresh.pageUrl,
-    siteUrl: fresh.siteUrl || fresh.pageUrl,
-    resourceUrl: resolved.url,
-    contentType: resolved.type === "hls" ? "application/vnd.apple.mpegurl" : "video/mp4",
-    likelyAdvertisement: fresh.likelyAdvertisement,
-    tabId: fresh.tabId,
-    frameId: fresh.frameId,
-    main: fresh.main,
-    explicitMain: fresh.explicitMain,
-    detectionSource: "player-page-resolver",
-    confidence: 100,
-    observedAt: Date.now(),
-  });
-  if (!resolvedCandidate) return fresh;
-  resolvedCandidate.id = fresh.id;
-  return resolvedCandidate;
 }
 
 function sendTabMessageWithTimeout(tabId, message, timeoutMs = 8000, options = null) {
@@ -569,6 +256,43 @@ function sendTabMessageWithTimeout(tabId, message, timeoutMs = 8000, options = n
     });
   });
 }
+
+const candidateRepository = createCandidateRepository({
+  storageSession: chrome.storage?.session,
+  ignoreCandidate: isYouTubeDetectionCandidate,
+  onCandidate: applyTitleSelectors,
+});
+const {
+  candidates,
+  mainFramesByTab,
+  frameLayoutsByTab,
+  frameStatesByTab,
+  isMainFrame,
+  observeCandidate,
+  observeResource,
+  rerankTabCandidates,
+  persistCandidates,
+} = candidateRepository;
+void candidateRepository.restore();
+
+const playerResolution = createPlayerResolutionCoordinator({
+  ensureRoute: ensureDirectMediaAccess,
+  getRedirectTarget: (url) => progressiveRedirects.get(url),
+  tabTitle,
+  observeResource,
+  replaceCandidate: candidateRepository.replaceCandidate,
+  sendTabMessage: sendTabMessageWithTimeout,
+});
+const {
+  resolver: playerGraphResolver,
+  resolveObservedPlayerFrame,
+  refreshCandidateFromSourceFrame,
+  resolvePlayerCandidate,
+} = playerResolution;
+const {
+  beginCandidateDownload,
+  startYouTubeDownload,
+} = createCompanionHandoff({ resolveCandidate: resolvePlayerCandidate });
 
 chrome.webRequest.onCompleted?.addListener(
   (details) => {
@@ -604,7 +328,7 @@ chrome.webRequest.onErrorOccurred?.addListener(
 
 chrome.webRequest.onBeforeRedirect.addListener(
   (details) => {
-    recordProgressiveRedirect(details);
+    progressiveRedirects.record(details);
     mediaRequestDiagnostics.redirect({
       tabId: details.tabId,
       url: details.url,
@@ -622,7 +346,10 @@ chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id || !tab.url) return;
   const url = canonicalHttpUrl(tab.url);
   if (!url) return;
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ["content-extraction.js", "content.js"],
+  });
 });
 
 async function reinjectContentScripts() {
@@ -632,7 +359,7 @@ async function reinjectContentScripts() {
   if (!targets.length) return;
   await Promise.allSettled(targets.map((target) => chrome.scripting.executeScript({
     target,
-    files: ["content.js"],
+    files: ["content-extraction.js", "content.js"],
   })));
 }
 
@@ -641,13 +368,12 @@ chrome.runtime.onInstalled.addListener(() => {
   void reinjectContentScripts();
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
-  mainFramesByTab.delete(tabId);
-  frameLayoutsByTab.delete(tabId);
-  frameStatesByTab.delete(tabId);
+  candidateRepository.clearTab(tabId);
   tabTitleCache.delete(tabId);
   titleSelectorTabs.delete(tabId);
   resolvedTitleByTab.delete(tabId);
   clearDoodDirectForTab(tabId);
+  qaRequestTrace.clearTab(tabId);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -655,17 +381,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     return;
   }
   if (changeInfo.status !== "loading" || !changeInfo.url) return;
-  mainFramesByTab.delete(tabId);
-  frameLayoutsByTab.delete(tabId);
-  frameStatesByTab.delete(tabId);
+  candidateRepository.clearTab(tabId);
   tabTitleCache.delete(tabId);
   titleSelectorTabs.delete(tabId);
   resolvedTitleByTab.delete(tabId);
   clearDoodDirectForTab(tabId);
-  for (const [key, item] of candidates) {
-    if (item.tabId === tabId) candidates.delete(key);
-  }
-  persistCandidates();
 });
 configureDownloadMenu();
 
@@ -695,7 +415,7 @@ chrome.contextMenus.onClicked.addListener((info) => {
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    rememberQaRequestTrace(details, { phase: "request" });
+    qaRequestTrace.remember(details, { phase: "request" });
     void tabTitle(details.tabId).then((title) => {
       observeResource({
         pageTitle: title,
@@ -724,7 +444,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     const contentType = (details.responseHeaders || []).find((header) => header.name.toLowerCase() === "content-type")?.value || "";
-    rememberQaRequestTrace(details, {
+    qaRequestTrace.remember(details, {
       phase: "headers",
       statusCode: Number.isInteger(details.statusCode) ? details.statusCode : null,
       contentType: contentType.slice(0, 128),
@@ -758,7 +478,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.webRequest.onCompleted?.addListener(
   (details) => {
-    rememberQaRequestTrace(details, {
+    qaRequestTrace.remember(details, {
       phase: "completed",
       statusCode: Number.isInteger(details.statusCode) ? details.statusCode : null,
       fromCache: details.fromCache === true,
@@ -769,7 +489,7 @@ chrome.webRequest.onCompleted?.addListener(
 
 chrome.webRequest.onErrorOccurred?.addListener(
   (details) => {
-    rememberQaRequestTrace(details, {
+    qaRequestTrace.remember(details, {
       phase: "error",
       error: typeof details.error === "string" ? details.error.slice(0, 160) : "",
     });
@@ -849,10 +569,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "qa-list-request-trace" && Number.isInteger(sender.tab?.id)) {
     const tabId = sender.tab.id;
-    const trace = [...qaRequestTraceByKey.values()]
-      .filter((entry) => entry.tabId === tabId)
-      .slice(-160)
-      .map((entry) => ({ ...entry, phases: [...entry.phases] }));
+    const trace = qaRequestTrace.listForTab(tabId);
     sendResponse({ ok: true, requests: trace });
     return false;
   }
@@ -1008,15 +725,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "clear-tab" && isExtensionUiSender(sender) && Number.isInteger(message.tabId)) {
-    for (const [key, item] of candidates) {
-      if (item.tabId === message.tabId) candidates.delete(key);
-    }
-    mainFramesByTab.delete(message.tabId);
-    frameLayoutsByTab.delete(message.tabId);
-    frameStatesByTab.delete(message.tabId);
+    candidateRepository.clearTab(message.tabId);
     titleSelectorTabs.delete(message.tabId);
     resolvedTitleByTab.delete(message.tabId);
-    persistCandidates();
     sendResponse({ ok: true });
     return false;
   }

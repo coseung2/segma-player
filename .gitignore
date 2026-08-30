@@ -6,6 +6,7 @@ __pycache__/
 *.pem
 native-host/target/
 companion-gui/target/
+companion-contract/target/
 artifacts/
 dist/
 output/

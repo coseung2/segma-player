@@ -2,9 +2,8 @@
 
 ## Status
 
-**IN PROGRESS — phases that do not overlap the in-flight Companion GUI/PiP
-work may proceed. Phase 6 and every edit to the files owned by that session
-remain blocked until the user confirms the PiP work is finished.**
+**IN PROGRESS — the Companion GUI/PiP work is complete and committed. Phase 6
+is unblocked; the remaining phases proceed in dependency order.**
 
 This is the current refactoring roadmap for the Companion-first product. It
 supersedes `MEDIA_MODULE_REFACTOR.md` as a roadmap; that file remains a
@@ -21,9 +20,9 @@ planning, another session owned uncommitted changes in:
 - `companion-gui/src/player_ui.rs`
 - `companion-gui/src/seek_preview.rs`
 
-These paths and versions are a snapshot, not an implementation baseline. They
-must be re-read after the other session finishes. This planning pass changed no
-runtime code, staging artifact, installer, or browser state.
+These paths and versions are the initial planning snapshot, not the current
+implementation baseline. The PiP work completed in `a6abc39` and its validation
+was recorded in `d8420cf`; the committed result is now the Phase 6 baseline.
 
 ## Progress tracking
 
@@ -32,13 +31,13 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 
 | Phase | Status | Completion evidence |
 | --- | --- | --- |
-| 0. Stable baseline | Complete for non-GUI scope | 2026-08-30 baseline below; GUI baseline deferred |
+| 0. Stable baseline | Complete | 2026-08-30 baseline plus committed PiP result |
 | 1. Trustworthy tests and frozen contracts | Complete | Shared protocol/disk fixtures; 2026-08-30 checks below |
-| 2. Native-host module split | Pending | Pending |
-| 3. Shared host/GUI disk contract | Pending | Pending |
-| 4. Shipped extension split | Pending | Pending |
+| 2. Native-host module split | Complete | `5834205`; 52 host tests and focused contract checks |
+| 3. Shared host/GUI disk contract | Complete | `a20b46c`; shared crate and both Cargo suites |
+| 4. Shipped extension split | Complete | `0.4.58`; module boundaries and validation below |
 | 5. Packaging and retired runtime | Pending | Pending |
-| 6. Native manager split | Blocked on PiP session | User confirmation required |
+| 6. Native manager split | Pending, unblocked | PiP baseline complete; start after Phase 5 |
 | 7. Integrated validation and handoff | Pending | Pending |
 
 ## Goal
@@ -388,6 +387,41 @@ Do not add a generic event bus or a second candidate/protocol model.
 Exit gate: ranked-candidate and pasted-link actions reach the same Companion
 handoff, YouTube uses its existing remote command, rescan rebuilds candidates,
 and the extension performs no local file write or media execution.
+
+#### Phase 4 result — 2026-08-30
+
+Completed at development version `0.4.58` without changing Companion, PiP, or
+native execution ownership:
+
+- `background-candidate-repository.js` owns candidate/frame state, ranking,
+  bounded session persistence, restore, replacement, and tab cleanup.
+- `background-companion-handoff.js` owns validated media and YouTube Companion
+  commands. `background-player-resolution.js` owns observed-frame resolution,
+  source refresh, and final candidate resolution. `background-request-evidence.js`
+  owns bounded QA request traces and progressive redirect evidence.
+- `content-extraction.js` is a manifest-ordered classic-script helper shared by
+  `content.js` and `player-page-resolver.js`. Packed, hex, reversed, percent,
+  and base64 clues plus public HTTP/IP validation now have one implementation.
+- Removed the unreachable content-side `download-direct`, anchor-download, and
+  legacy job-overlay message paths. The shipped extension retains detection,
+  rescan, token refresh, player-page resolution, and bounded Companion handoff;
+  it does not regain local media execution or file writing.
+- Root and store manifests, installation reinjection, development staging, and
+  store packaging all load `content-extraction.js` before `content.js` and
+  include the four new background modules. The duplicated JavaScript and
+  PowerShell runtime allowlists are intentionally left for Phase 5.
+- `background.js` decreased from 1,111 to 822 lines and `content.js` from 1,460
+  to 989 lines. The split reuses the existing candidate, ranking, player graph,
+  site registry, and Companion protocol primitives rather than adding a second
+  event or candidate model.
+
+Validation at this checkpoint: focused extraction/background/player/staging/
+store tests 99 passed; store package builds 2 passed; `npm run test:media-sites`
+48 passed; full Node suite 526 passed and 22 explicitly skipped; native host 53
+passed; Companion GUI 185 passed; both Rust format checks and `git diff --check`
+passed. No Chrome/Whale or installed Companion interaction was run for this
+behavior-neutral split, so live validation is `NOT_RUN` and no live behavior is
+claimed.
 
 ### Phase 5 — unify packaging and quarantine retired runtime
 

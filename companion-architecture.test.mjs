@@ -72,16 +72,19 @@ test("the extension stays free while the installed app owns General and Pro", as
 });
 
 test("candidate and link downloads hand off to Companion without a local execution fallback", async () => {
-  const background = await read("./background.js");
-  const queueStart = background.indexOf("async function queueMediaDownload(candidate)");
-  const queueEnd = background.indexOf("async function beginCandidateDownload", queueStart);
-  const queueSource = background.slice(queueStart, queueEnd);
-  assert.ok(queueStart >= 0 && queueEnd > queueStart);
-  assert.match(queueSource, /resolvePlayerCandidate\(candidate\)/);
-  assert.match(queueSource, /startCompanionMediaDownload\(\{/);
-  assert.match(queueSource, /mode: "media-companion"/);
-  assert.doesNotMatch(queueSource, /ensureDownloadWorker|run-download-job|chrome\.downloads|native-file-writer/);
-  assert.doesNotMatch(background, /function dispatchMediaDownload|function recoverInterruptedMediaDownloads/);
+  const [background, content, handoff] = await Promise.all([
+    read("./background.js"),
+    read("./content.js"),
+    read("./background-companion-handoff.js"),
+  ]);
+  assert.match(background, /createCompanionHandoff\(\{ resolveCandidate: resolvePlayerCandidate \}\)/);
+  assert.match(handoff, /const transferCandidate = await resolveCandidate\(candidate\)/);
+  assert.match(handoff, /startMedia\(\{/);
+  assert.match(handoff, /mode: "media-companion"/);
+  assert.doesNotMatch(handoff, /ensureDownloadWorker|run-download-job|chrome\.downloads|native-file-writer/);
+  assert.doesNotMatch(content, /download-direct|anchor\.download|referrerPolicy = "unsafe-url"/);
+  assert.doesNotMatch(content, /show-download-overlay|hide-download-overlay|list-download-jobs|cancel-download-job/);
+  assert.doesNotMatch(`${background}\n${handoff}`, /function dispatchMediaDownload|function recoverInterruptedMediaDownloads/);
 
   const candidateRoute = background.slice(
     background.indexOf('message?.type === "download-candidate"'),

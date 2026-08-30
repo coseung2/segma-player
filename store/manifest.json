@@ -41,6 +41,7 @@
         "https://*/*"
       ],
       "js": [
+        "content-extraction.js",
         "content.js"
       ],
       "run_at": "document_start",

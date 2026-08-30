@@ -247,81 +247,12 @@ export function completeDoodDirectUrl(value, pageSource, { nonce = null, now = D
   return direct.href;
 }
 
-// Local mirror of candidate.js's public-URL security contract. candidate.js
-// imports isStreamtapePlayerPage from this module, so importing it back here
-// would create a cycle; this validator keeps the same properties: public
-// http(s) only, no credentials or fragments, default ports only, bounded
-// lengths, and no private/loopback/reserved IP literals (IPv4 and IPv6).
-function publicIpLiteral(hostname) {
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
-    const octets = hostname.split(".").map(Number);
-    if (octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) return false;
-    const [a, b, c] = octets;
-    return !(a === 0 || a === 10 || a === 127 || a >= 224
-      || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254)
-      || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
-      || (a === 198 && (b === 18 || b === 19)) || (a === 192 && b === 0 && c === 0));
-  }
-  if (hostname.includes(":")) {
-    const lower = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    const halves = lower.split("::");
-    if (halves.length > 2) return false;
-    const parseHalf = (half) => half ? half.split(":").map((part) => {
-      if (part.includes(".")) {
-        const octets = part.split(".").map(Number);
-        if (octets.length !== 4 || octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) return null;
-        return [(octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]];
-      }
-      if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
-      return [Number.parseInt(part, 16)];
-    }).flat() : [];
-    const left = parseHalf(halves[0]);
-    const right = parseHalf(halves[1] || "");
-    if (!left || !right || left.includes(null) || right.includes(null)) return false;
-    const missing = 8 - left.length - right.length;
-    if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return false;
-    const words = [...left, ...Array(Math.max(0, missing)).fill(0), ...right];
-    if (words.length !== 8) return false;
-    const first = words[0];
-    if (words.every((word) => word === 0) || words.slice(0, 7).every((word) => word === 0) && words[7] === 1
-      || (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80
-      || (first & 0xffc0) === 0xfec0 || (first & 0xff00) === 0xff00) return false;
-    if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
-      return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
-    }
-    if (words.slice(0, 6).every((word) => word === 0)) {
-      return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
-    }
-    if (words[0] === 0x0064 && words[1] === 0xff9b && words.slice(2, 6).every((word) => word === 0)) {
-      return publicIpLiteral(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
-    }
-    if (words[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return false;
-    if (words[0] === 0x2002) {
-      return publicIpLiteral(`${words[1] >> 8}.${words[1] & 255}.${words[2] >> 8}.${words[2] & 255}`);
-    }
-    return true;
-  }
-  return true;
-}
-
 export function canonicalPublicHttpUrl(value) {
-  if (typeof value !== "string" || value.length === 0 || value.length > PLAYER_GRAPH_LIMITS.maxUrlBytes
-    || /[\u0000-\u0020\u007f]/.test(value)) return null;
-  try {
-    const url = new URL(value);
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash) return null;
-    if ((url.protocol === "http:" && url.port && url.port !== "80")
-      || (url.protocol === "https:" && url.port && url.port !== "443")) return null;
-    const host = url.hostname.replace(/\.$/, "").toLowerCase();
-    if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")
-      || !publicIpLiteral(host)) return null;
-    if (url.search.length > PLAYER_GRAPH_LIMITS.maxQueryBytes + 1) return null;
-    url.hostname = host;
-    url.port = "";
-    return url;
-  } catch {
-    return null;
-  }
+  return sharedCanonicalPublicHttpUrl(value, {
+    maxUrlBytes: PLAYER_GRAPH_LIMITS.maxUrlBytes,
+    maxQueryBytes: PLAYER_GRAPH_LIMITS.maxQueryBytes,
+    allowHash: false,
+  });
 }
 
 // Decoy checks mirror candidate.js's image/preview/segment exclusions so the
@@ -558,152 +489,6 @@ function mediaResultForValue(value, pageUrl) {
     || !/\.(?:m3u8|mp4|webm)$/i.test(canonical.pathname)) return null;
   const type = /\.m3u8$/i.test(canonical.pathname) ? RESULT_TYPES.HLS : RESULT_TYPES.PROGRESSIVE;
   return { type, url: canonical.href, referrer: pageUrl };
-}
-
-function decodeRadix62(token, radix) {
-  let val = 0;
-  for (let i = 0; i < token.length; i += 1) {
-    const code = token.charCodeAt(i);
-    let digit = 0;
-    if (code >= 48 && code <= 57) digit = code - 48;
-    else if (code >= 97 && code <= 122) digit = code - 97 + 10;
-    else if (code >= 65 && code <= 90) digit = code - 65 + 36;
-    else return null;
-    if (digit >= radix) return null;
-    val = val * radix + digit;
-  }
-  return val;
-}
-
-export function unpackPackerScripts(text) {
-  if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-  const pattern = /\be[v]al\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,[^\)]+\)[\s\S]*?\}\s*\(\s*(['"])((?:\\.|[^\\])*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])((?:\\.|[^\\])*?)\5\.split\s*\(\s*['"]\|['"]\s*\)/gi;
-  let match;
-  const results = [];
-  while ((match = pattern.exec(text))) {
-    try {
-      const payload = match[2]
-        .replace(/\\'/g, "'")
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, "\\");
-      const radix = Number.parseInt(match[3], 10);
-      const count = Number.parseInt(match[4], 10);
-      const keywords = match[6].split("|");
-      if (!Number.isInteger(radix) || radix < 2 || radix > 62 || !keywords.length) continue;
-      const unpacked = payload.replace(/\b[0-9a-zA-Z]+\b/g, (token) => {
-        const index = decodeRadix62(token, radix);
-        if (index === null || index >= keywords.length) return token;
-        const word = keywords[index];
-        return word !== "" ? word : token;
-      });
-      results.push(unpacked);
-    } catch {
-      // Ignore malformed packer blocks
-    }
-  }
-  return results.join("\n");
-}
-
-export function decodeHexEscapedScript(text) {
-  if (typeof text !== "string" || !text.includes("\\x")) return "";
-  const hexRe = /(?:\\x[0-9a-fA-F]{2}){6,}/g;
-  let match;
-  const results = [];
-  while ((match = hexRe.exec(text))) {
-    try {
-      const decoded = match[0].replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) =>
-        String.fromCharCode(Number.parseInt(hex, 16))
-      );
-      if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
-        results.push(decoded);
-      }
-    } catch {
-      // Ignore malformed hex blocks
-    }
-  }
-  return results.join("\n");
-}
-
-export function decodeReversedUrls(text) {
-  if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-  const pattern = /(["'])([A-Za-z0-9_.:~%/?&=+\-]{12,2048})\1/g;
-  let match;
-  const results = [];
-  while ((match = pattern.exec(text))) {
-    const candidate = match[2];
-    if (candidate.includes("://") || candidate.startsWith("http")) continue;
-    const reversed = candidate.split("").reverse().join("");
-    if (/^https?:\/\/[^\s"'<>\\`]+\.(?:m3u8|mpd|mp4|m4v|webm)(?:\?[^\s"'<>\\`]*)?$/i.test(reversed)
-      || (/^https?:\/\/[^\s"'<>\\`]+/i.test(reversed) && /(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8|dash|mpd)\b/i.test(reversed))) {
-      results.push(reversed);
-    }
-  }
-  return results.join("\n");
-}
-
-export function decodePercentEscapedUrls(text) {
-  if (typeof text !== "string" || !text.includes("%")) return "";
-  const percentRe = /(?:https?|%[0-9a-fA-F]{2})(?:[A-Za-z0-9._~:/?@!$&()*+,;=%\-]|%[0-9a-fA-F]{2}){5,4090}/g;
-  let match;
-  const results = [];
-  while ((match = percentRe.exec(text))) {
-    try {
-      let decoded = match[0];
-      for (let pass = 0; pass < 2 && decoded.includes("%"); pass += 1) {
-        try {
-          const next = decodeURIComponent(decoded);
-          if (next === decoded) break;
-          decoded = next;
-        } catch {
-          break;
-        }
-      }
-      if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
-        results.push(decoded);
-      }
-    } catch {
-      // Ignore invalid percent encoding
-    }
-  }
-  return results.join("\n");
-}
-
-export function decodeBase64JsonConfigs(text) {
-  if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-  const b64Re = /(?:["']|:\s*)([A-Za-z0-9+/_-]{16,}={0,2})(?:["']|[\s;,}\]]|$)/g;
-  let match;
-  const results = [];
-  while ((match = b64Re.exec(text))) {
-    try {
-      const rawB64 = match[1];
-      if (rawB64.length > 333_336) continue;
-      let decoded = "";
-      try {
-        const normalized = rawB64.replace(/-/g, "+").replace(/_/g, "/");
-        if (normalized.length % 4 === 1) continue;
-        const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-        decoded = atob(padded).trim();
-      } catch {
-        continue;
-      }
-      if ((decoded.startsWith("{") || decoded.startsWith("[")) && decoded.length <= 250_000) {
-        results.push(decoded);
-      }
-    } catch {
-      // Ignore invalid base64
-    }
-  }
-  return results.join("\n");
-}
-
-export function deobfuscateScriptText(text) {
-  if (typeof text !== "string" || !text) return "";
-  const unpacked = unpackPackerScripts(text);
-  const decodedHex = decodeHexEscapedScript(text);
-  const reversed = decodeReversedUrls(text);
-  const percent = decodePercentEscapedUrls(text);
-  const b64Json = decodeBase64JsonConfigs(text);
-  return [unpacked, decodedHex, reversed, percent, b64Json].filter(Boolean).join("\n");
 }
 
 function hostedPlayerResult(text, pageUrl) {
@@ -1058,3 +843,23 @@ export async function resolvePlayerPage(pageUrl, { ensureRoute = null } = {}) {
     return null;
   }
 }
+import "./content-extraction.js";
+
+const {
+  canonicalPublicHttpUrl: sharedCanonicalPublicHttpUrl,
+  decodeBase64JsonConfigs,
+  decodeHexEscapedScript,
+  decodePercentEscapedUrls,
+  decodeReversedUrls,
+  deobfuscateScriptText,
+  unpackPackerScripts,
+} = globalThis.__segmaContentExtractionV1;
+
+export {
+  decodeBase64JsonConfigs,
+  decodeHexEscapedScript,
+  decodePercentEscapedUrls,
+  decodeReversedUrls,
+  deobfuscateScriptText,
+  unpackPackerScripts,
+};

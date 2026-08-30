@@ -191,7 +191,7 @@ test("store packager builds and audits the exact free-edition ZIP", async (conte
       world: "MAIN",
     }, {
       matches: ["http://*/*", "https://*/*"],
-      js: ["content.js"],
+      js: ["content-extraction.js", "content.js"],
       run_at: "document_start",
       all_frames: true,
     }]);
@@ -213,7 +213,8 @@ test("store packager builds and audits the exact free-edition ZIP", async (conte
     assert.equal(packagedManifest.permissions.includes("offscreen"), false);
     assert.doesNotMatch(textFiles.find(([file]) => file === "background.js")[1], /download-worker|native-file-writer|chrome\.downloads/);
     assert.match(textFiles.find(([file]) => file === "companion-client.js")[1], /com\.aura\.media_companion/);
-    assert.match(textFiles.find(([file]) => file === "background.js")[1], /startCompanionMediaDownload/);
+    assert.match(textFiles.find(([file]) => file === "background.js")[1], /createCompanionHandoff/);
+    assert.match(textFiles.find(([file]) => file === "background-companion-handoff.js")[1], /startCompanionMediaDownload/);
     const bridge = textFiles.find(([file]) => file === "level5-page-bridge.js")[1];
     assert.match(bridge, /cachedKey\(hls, url\.href\)/);
     assert.match(bridge, /loadKey\(hls, url\.href\)/);

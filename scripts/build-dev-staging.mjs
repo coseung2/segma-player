@@ -7,10 +7,15 @@ const defaultRepositoryRoot = path.dirname(scriptDirectory);
 
 export const STORE_RUNTIME_FILES = Object.freeze([
   "background.js",
+  "background-candidate-repository.js",
+  "background-companion-handoff.js",
+  "background-player-resolution.js",
+  "background-request-evidence.js",
   "candidate.js",
   "candidate-ranking.js",
   "companion-client.js",
   "content.js",
+  "content-extraction.js",
   "download-errors.js",
   "download-mode.js",
   "download-policy.js",
@@ -219,7 +224,7 @@ function validateAuditedManifest(manifest) {
     || scripts[1]?.run_at !== "document_start"
     || scripts[1]?.all_frames !== true
     || "world" in scripts[1]
-    || !arraysEqual(scripts[1]?.js || [], ["content.js"])) {
+    || !arraysEqual(scripts[1]?.js || [], ["content-extraction.js", "content.js"])) {
     throw new Error("Store manifest content scripts differ from the audited runtime.");
   }
 }

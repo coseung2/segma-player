@@ -2,6 +2,8 @@
   const RESCAN_EVENT_TYPE = "aura-media-detector-rescan-v1";
   if (globalThis.__auraMediaDetectorInstalledV4) return;
   globalThis.__auraMediaDetectorInstalledV4 = true;
+  const extraction = globalThis.__segmaContentExtractionV1;
+  if (!extraction) throw new Error("content-extraction-unavailable");
   const MAX_URL_BYTES = 4096;
   const MAX_TITLE_CHARACTERS = 512;
   const MAX_SEEN = 1000;
@@ -22,8 +24,6 @@
   const SHADOW_WALK_LIMIT = 400;
   const SRCDOC_FRAME_LIMIT = 8;
   const SRCDOC_TEXT_LIMIT = 120_000;
-  const INLINE_MEDIA_FIELD_RE = /\b(?:video_url(?:_hd)?|streaming_url|streamingUrl|playback_url|playbackUrl|manifest_url|manifestUrl|hls_url|hlsUrl|play_url|playUrl|videoUrl|source_url|sourceUrl|contentUrl|file|src|url|source|playlist)\s*[:=]\s*(["'])((?:\\.|[^\\])*?)\1/g;
-  const INLINE_MEDIA_URL_RE = /https?:\/\/[^\s"'<>\\`]+(?:\.m3u8|\.mpd|\.mp4|\.m4v|\.webm)(?:\?[^\s"'<>\\`]*)?/gi;
   const INLINE_MEDIA_ATTRS = Object.freeze([
     "src", "data-src", "data-file", "data-url", "data-video", "data-stream", "data-hls", "href",
   ]);
@@ -362,44 +362,11 @@
   }
 
   function canonicalInlineMediaUrl(value) {
-    if (typeof value !== "string") return "";
-    const trimmed = value.trim();
-    if (!trimmed || trimmed.length > MAX_URL_BYTES) return "";
-    try {
-      const decoded = /^[A-Za-z0-9+/]{8,}={0,2}$/.test(trimmed) && !/^https?:/i.test(trimmed)
-        ? atob(trimmed).trim()
-        : trimmed.replace(/^["']|["']$/g, "");
-      const url = new URL(decoded, location.href);
-      if (!/^https?:$/.test(url.protocol) || url.href.length > MAX_URL_BYTES) return "";
-      const pathname = url.pathname.toLowerCase();
-      const search = url.search.toLowerCase();
-      if (/\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i.test(pathname)) return "";
-      if (/\.(?:m3u8|mpd|mp4|m4v|webm)$/i.test(pathname)) return url.href;
-      if (/(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8|dash|mpd)\b/.test(search)) return url.href;
-      if (/(?:^|\/)(?:hls|playlist|manifest|get_file|getfile)(?:\/|$)/.test(pathname)) return url.href;
-      return "";
-    } catch {
-      return "";
-    }
+    return extraction.canonicalMediaUrl(value, location.href);
   }
 
   function inferredInlineContentType(value) {
-    try {
-      const url = new URL(value, location.href);
-      const pathname = url.pathname.toLowerCase();
-      const search = url.search.toLowerCase();
-      if (pathname.endsWith(".mpd") || /(?:^|[?&])(?:type|format|kind)=(?:dash|mpd)\b/.test(search)) {
-        return "application/dash+xml";
-      }
-      if (pathname.endsWith(".m3u8") || /(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8)\b/.test(search)
-        || /(?:^|\/)(?:hls|playlist|manifest)(?:\/|$)/.test(pathname)) {
-        return "application/vnd.apple.mpegurl";
-      }
-      if (pathname.endsWith(".webm")) return "video/webm";
-      return "video/mp4";
-    } catch {
-      return "video/mp4";
-    }
+    return extraction.inferredContentType(value, location.href);
   }
 
   function collectAttributeMediaUrls(root, urls) {
@@ -472,170 +439,8 @@
     }
   }
 
-  function decodeRadix62(token, radix) {
-    let val = 0;
-    for (let i = 0; i < token.length; i += 1) {
-      const code = token.charCodeAt(i);
-      let digit = 0;
-      if (code >= 48 && code <= 57) digit = code - 48;
-      else if (code >= 97 && code <= 122) digit = code - 97 + 10;
-      else if (code >= 65 && code <= 90) digit = code - 65 + 36;
-      else return null;
-      if (digit >= radix) return null;
-      val = val * radix + digit;
-    }
-    return val;
-  }
-
-  function unpackPackerScripts(text) {
-    if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-    const pattern = /\be[v]al\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,[^\)]+\)[\s\S]*?\}\s*\(\s*(['"])((?:\\.|[^\\])*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])((?:\\.|[^\\])*?)\5\.split\s*\(\s*['"]\|['"]\s*\)/gi;
-    let match;
-    const results = [];
-    while ((match = pattern.exec(text))) {
-      try {
-        const payload = match[2]
-          .replace(/\\'/g, "'")
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, "\\");
-        const radix = Number.parseInt(match[3], 10);
-        const count = Number.parseInt(match[4], 10);
-        const keywords = match[6].split("|");
-        if (!Number.isInteger(radix) || radix < 2 || radix > 62 || !keywords.length) continue;
-        const unpacked = payload.replace(/\b[0-9a-zA-Z]+\b/g, (token) => {
-          const index = decodeRadix62(token, radix);
-          if (index === null || index >= keywords.length) return token;
-          const word = keywords[index];
-          return word !== "" ? word : token;
-        });
-        results.push(unpacked);
-      } catch {
-        // Ignore malformed packer blocks
-      }
-    }
-    return results.join("\n");
-  }
-
-  function decodeHexEscapedScript(text) {
-    if (typeof text !== "string" || !text.includes("\\x")) return "";
-    const hexRe = /(?:\\x[0-9a-fA-F]{2}){6,}/g;
-    let match;
-    const results = [];
-    while ((match = hexRe.exec(text))) {
-      try {
-        const decoded = match[0].replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) =>
-          String.fromCharCode(Number.parseInt(hex, 16))
-        );
-        if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
-          results.push(decoded);
-        }
-      } catch {
-        // Ignore malformed hex blocks
-      }
-    }
-    return results.join("\n");
-  }
-
-  function decodeReversedUrls(text) {
-    if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-    const pattern = /(["'])([A-Za-z0-9_.:~%/?&=+\-]{12,2048})\1/g;
-    let match;
-    const results = [];
-    while ((match = pattern.exec(text))) {
-      const candidate = match[2];
-      if (candidate.includes("://") || candidate.startsWith("http")) continue;
-      const reversed = candidate.split("").reverse().join("");
-      if (/^https?:\/\/[^\s"'<>\\`]+\.(?:m3u8|mpd|mp4|m4v|webm)(?:\?[^\s"'<>\\`]*)?$/i.test(reversed)
-        || (/^https?:\/\/[^\s"'<>\\`]+/i.test(reversed) && /(?:^|[?&])(?:type|format|kind)=(?:hls|m3u8|dash|mpd)\b/i.test(reversed))) {
-        results.push(reversed);
-      }
-    }
-    return results.join("\n");
-  }
-
-  function decodePercentEscapedUrls(text) {
-    if (typeof text !== "string" || !text.includes("%")) return "";
-    const percentRe = /(?:https?|%[0-9a-fA-F]{2})(?:[A-Za-z0-9._~:/?@!$&()*+,;=%\-]|%[0-9a-fA-F]{2}){5,4090}/g;
-    let match;
-    const results = [];
-    while ((match = percentRe.exec(text))) {
-      try {
-        let decoded = match[0];
-        for (let pass = 0; pass < 2 && decoded.includes("%"); pass += 1) {
-          try {
-            const next = decodeURIComponent(decoded);
-            if (next === decoded) break;
-            decoded = next;
-          } catch {
-            break;
-          }
-        }
-        if (decoded.length <= 4096 && (/^https?:\/\//i.test(decoded) || /\.(?:m3u8|mpd|mp4|m4v|webm)/i.test(decoded))) {
-          results.push(decoded);
-        }
-      } catch {
-        // Ignore invalid percent encoding
-      }
-    }
-    return results.join("\n");
-  }
-
-  function decodeBase64JsonConfigs(text) {
-    if (typeof text !== "string" || text.length === 0 || text.length > 2_000_000) return "";
-    const b64Re = /(?:["']|:\s*)([A-Za-z0-9+/_-]{16,}={0,2})(?:["']|[\s;,}\]]|$)/g;
-    let match;
-    const results = [];
-    while ((match = b64Re.exec(text))) {
-      try {
-        const rawB64 = match[1];
-        if (rawB64.length > 333_336) continue;
-        let decoded = "";
-        try {
-          const normalized = rawB64.replace(/-/g, "+").replace(/_/g, "/");
-          if (normalized.length % 4 === 1) continue;
-          const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-          decoded = atob(padded).trim();
-        } catch {
-          continue;
-        }
-        if ((decoded.startsWith("{") || decoded.startsWith("[")) && decoded.length <= 250_000) {
-          results.push(decoded);
-        }
-      } catch {
-        // Ignore invalid base64
-      }
-    }
-    return results.join("\n");
-  }
-
-  function deobfuscateScriptText(text) {
-    if (typeof text !== "string" || !text) return "";
-    const unpacked = unpackPackerScripts(text);
-    const decodedHex = decodeHexEscapedScript(text);
-    const reversed = decodeReversedUrls(text);
-    const percent = decodePercentEscapedUrls(text);
-    const b64Json = decodeBase64JsonConfigs(text);
-    return [unpacked, decodedHex, reversed, percent, b64Json].filter(Boolean).join("\n");
-  }
-
   function rememberInlineScriptMediaUrls(source, urls) {
-    const deobfuscated = deobfuscateScriptText(source);
-    const targetSource = deobfuscated ? `${source}\n${deobfuscated}` : source;
-    const videoUrlRe = /\bvideo_url(?:_hd)?\s*:\s*(["'])([A-Za-z0-9+/]{8,}={0,2})\1/g;
-    let match;
-    while ((match = videoUrlRe.exec(targetSource))) {
-      try {
-        rememberEmbeddedUrl(urls, atob(match[2]).trim());
-      } catch {
-        // Ignore malformed player configuration values.
-      }
-    }
-    INLINE_MEDIA_FIELD_RE.lastIndex = 0;
-    while ((match = INLINE_MEDIA_FIELD_RE.exec(targetSource))) {
-      rememberEmbeddedUrl(urls, match[2].replace(/\\\//g, "/"));
-    }
-    INLINE_MEDIA_URL_RE.lastIndex = 0;
-    while ((match = INLINE_MEDIA_URL_RE.exec(targetSource))) rememberEmbeddedUrl(urls, match[0]);
+    for (const url of extraction.scriptMediaUrls(source, location.href)) rememberEmbeddedUrl(urls, url);
   }
 
   function collectSrcdocConfigUrls(root, urls) {
@@ -978,42 +783,7 @@
     send({ type: "dood-direct", url: resolved.url, frameUrl: resolved.frameUrl });
   }
 
-  function handleDirectDownload(message, sendResponse) {
-    if (message?.type !== "download-direct" || typeof message.url !== "string") return false;
-    try {
-      const url = new URL(message.url);
-      if (!/^https?:$/.test(url.protocol)) {
-        sendResponse({ ok: false });
-        return true;
-      }
-      const anchor = document.createElement("a");
-      anchor.href = url.href;
-      if (typeof message.filename === "string" && message.filename) anchor.download = message.filename;
-      anchor.referrerPolicy = "unsafe-url";
-      anchor.style.display = "none";
-      document.documentElement.append(anchor);
-      anchor.click();
-      anchor.remove();
-      sendResponse({ ok: true });
-    } catch {
-      sendResponse({ ok: false });
-    }
-    return true;
-  }
-
   function handleMessage(message, sendResponse) {
-    if (message?.type === "show-download-overlay") {
-      void showDownloadOverlay(message.jobIds).then(
-        (shown) => sendResponse({ ok: true, shown }),
-        () => sendResponse({ ok: false }),
-      );
-      return true;
-    }
-    if (message?.type === "hide-download-overlay") {
-      cleanDownloadOverlay();
-      sendResponse({ ok: true, hidden: true });
-      return false;
-    }
     if (message?.type === "rescan") {
       performExplicitRescan();
       sendResponse({ ok: true });
@@ -1039,247 +809,7 @@
     }
     if (handleRefreshMediaSource(message, sendResponse)) return true;
     if (handleLevel5KeyRequest(message, sendResponse)) return true;
-    if (handleDoodRequest(message, sendResponse)) return true;
-    return handleDirectDownload(message, sendResponse);
-  }
-
-  let downloadOverlayTimer = null;
-  const shownDownloadJobIds = new Set();
-  const ACTIVE_DOWNLOAD_STATUSES = new Set(["queued", "running", "paused"]);
-
-  function cleanDownloadOverlay() {
-    if (downloadOverlayTimer !== null) {
-      clearInterval(downloadOverlayTimer);
-      downloadOverlayTimer = null;
-    }
-    shownDownloadJobIds.clear();
-    document.getElementById?.("aura-media-progress-host")?.remove();
-  }
-
-  function dismissDownloadOverlay() {
-    cleanDownloadOverlay();
-    void chrome.runtime.sendMessage({ type: "dismiss-download-overlay" }).catch(() => {});
-  }
-
-  function downloadOverlayHost() {
-    let host = document.getElementById("aura-media-progress-host");
-    if (!host) {
-      host = document.createElement("div");
-      host.id = "aura-media-progress-host";
-      host.setAttribute("style", "position:fixed;right:16px;bottom:16px;z-index:2147483647;width:320px;max-width:calc(100vw - 24px);font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:block !important;visibility:visible !important;opacity:1 !important;pointer-events:auto !important;");
-      document.documentElement.append(host);
-    }
-    host.style.setProperty("display", "block", "important");
-    host.style.setProperty("visibility", "visible", "important");
-    host.style.setProperty("opacity", "1", "important");
-    host.style.setProperty("pointer-events", "auto", "important");
-    if (!host.shadowRoot) {
-      try { host.attachShadow({ mode: "open" }); } catch { /* keep the light DOM fallback */ }
-    }
-    return { host, root: host.shadowRoot || host };
-  }
-
-  // The content script is a classic script and cannot import i18n.js, so the
-  // overlay keeps its own copy of the few strings it renders. The active locale
-  // comes from the same storage key the popup and settings write.
-  const OVERLAY_LOCALE_KEY = "auraUiLocale";
-  const OVERLAY_TEXT = {
-    ko: {
-      heading: "다운로드", close: "다운로드 창 닫기", cancel: "취소", cancelling: "취소 중",
-      fallbackTitle: "다운로드",
-      queued: "대기", running: "진행 중", paused: "일시정지", completed: "완료", failed: "실패", cancelled: "취소됨",
-    },
-    en: {
-      heading: "Downloads", close: "Close the download panel", cancel: "Cancel", cancelling: "Cancelling",
-      fallbackTitle: "Download",
-      queued: "Queued", running: "In progress", paused: "Paused", completed: "Done", failed: "Failed", cancelled: "Cancelled",
-    },
-    ja: {
-      heading: "ダウンロード", close: "ダウンロード画面を閉じる", cancel: "キャンセル", cancelling: "キャンセル中",
-      fallbackTitle: "ダウンロード",
-      queued: "待機", running: "進行中", paused: "一時停止", completed: "完了", failed: "失敗", cancelled: "キャンセル",
-    },
-    zh: {
-      heading: "下载", close: "关闭下载面板", cancel: "取消", cancelling: "正在取消",
-      fallbackTitle: "下载",
-      queued: "等待", running: "进行中", paused: "已暂停", completed: "完成", failed: "失败", cancelled: "已取消",
-    },
-  };
-  let overlayLocale = "en";
-
-  function normalizeOverlayLocale(value) {
-    const base = String(value || "").toLowerCase().replace("_", "-").split("-")[0];
-    return Object.prototype.hasOwnProperty.call(OVERLAY_TEXT, base) ? base : null;
-  }
-
-  function overlayText(key) {
-    const table = OVERLAY_TEXT[overlayLocale] || OVERLAY_TEXT.en;
-    return table[key] ?? OVERLAY_TEXT.en[key] ?? key;
-  }
-
-  async function syncOverlayLocale() {
-    try {
-      const entry = await chrome.storage.local.get(OVERLAY_LOCALE_KEY);
-      const stored = normalizeOverlayLocale(entry?.[OVERLAY_LOCALE_KEY]);
-      if (stored) {
-        overlayLocale = stored;
-        return;
-      }
-    } catch {
-      // Storage is unavailable here; fall back to the browser UI language.
-    }
-    overlayLocale = normalizeOverlayLocale(navigator.language) || "en";
-  }
-
-  try {
-    chrome.storage?.onChanged?.addListener((changes, area) => {
-      if (area !== "local" || !changes[OVERLAY_LOCALE_KEY]) return;
-      const next = normalizeOverlayLocale(changes[OVERLAY_LOCALE_KEY].newValue);
-      if (next) overlayLocale = next;
-    });
-  } catch {
-    // Storage change events are optional for the overlay.
-  }
-
-  function downloadOverlayPercent(job) {
-    const message = String(job?.statusText || "");
-    const segments = /저장 중…\s+(\d+)\s*\/\s*(\d+)/.exec(message);
-    if (segments) {
-      const current = Number(segments[1]);
-      const total = Number(segments[2]);
-      if (Number.isFinite(current) && Number.isFinite(total) && total > 0) {
-        return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
-      }
-    }
-    const percent = /(?:저장 중|서버 처리 중|내 기기로 전송 중|수신 중)…\s+(\d{1,3})%/.exec(message);
-    if (percent) {
-      const value = Number(percent[1]);
-      if (Number.isFinite(value)) return Math.max(0, Math.min(100, value));
-    }
-    return null;
-  }
-
-  function buildDownloadOverlayRow(job) {
-    const row = document.createElement("div");
-    row.setAttribute("style", "display:flex;align-items:center;gap:8px;padding:9px 10px;border-top:1px solid #222c3a;");
-    const info = document.createElement("div");
-    info.setAttribute("style", "flex:1;min-width:0;");
-    const title = document.createElement("div");
-    title.textContent = typeof job.title === "string" && job.title ? job.title : overlayText("fallbackTitle");
-    title.setAttribute("style", "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#f4f7fb;font-size:11px;font-weight:700;");
-    const status = document.createElement("div");
-    const label = overlayText(job.status) || overlayText("running");
-    const percent = job.status === "running" ? downloadOverlayPercent(job) : null;
-    const message = String(job.status === "failed" ? (job.error || job.statusText || label) : (job.statusText || label));
-    status.textContent = percent !== null ? `${label} · ${percent}%` : `${label} · ${message}`;
-    status.setAttribute("style", "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8f9eb2;font-size:10px;margin-top:2px;");
-    if (job.status === "completed") status.style.color = "#78d99a";
-    else if (job.status === "failed" || job.status === "cancelled") status.style.color = "#ff8f8f";
-    info.append(title, status);
-    row.append(info);
-    if (ACTIVE_DOWNLOAD_STATUSES.has(job.status)) {
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.textContent = overlayText("cancel");
-      cancel.setAttribute("style", "appearance:none;-webkit-appearance:none;border:0;border-radius:6px;background:transparent;color:#d09a97;cursor:pointer;font-size:10px;font-weight:700;padding:4px 6px;");
-      cancel.addEventListener("click", async () => {
-        cancel.disabled = true;
-        cancel.textContent = overlayText("cancelling");
-        await chrome.runtime.sendMessage({ type: "cancel-download-job", jobId: job.id }).catch(() => null);
-        void refreshDownloadOverlay();
-      });
-      row.append(cancel);
-    }
-    return row;
-  }
-
-  async function refreshDownloadOverlay() {
-    let jobs = [];
-    try {
-      const response = await chrome.runtime.sendMessage({ type: "list-download-jobs" });
-      jobs = Array.isArray(response?.jobs) ? response.jobs : [];
-    } catch {
-      // The background may be waking; the timer will retry on the next tick.
-    }
-    const qaCandidates = jobs
-      .filter((job) => job?.diagnostic && typeof job.diagnostic === "object")
-      .map((job) => ({
-        id: job.id,
-        title: job.title,
-        status: job.status,
-        statusText: job.statusText,
-        updatedAt: job.updatedAt,
-        diagnostic: job.diagnostic,
-      }));
-    if (qaCandidates.length) document.documentElement.dataset.auraQaCandidates = JSON.stringify(qaCandidates);
-    try {
-      const detected = await chrome.runtime.sendMessage({ type: "qa-list-candidates" });
-      if (detected?.ok && Array.isArray(detected.candidates)) {
-        document.documentElement.dataset.auraQaDetectedCandidates = JSON.stringify(detected.candidates);
-      }
-    } catch {
-      // QA diagnostics are optional and never affect the overlay.
-    }
-    try {
-      const trace = await chrome.runtime.sendMessage({ type: "qa-list-request-trace" });
-      if (trace?.ok && Array.isArray(trace.requests)) {
-        document.documentElement.dataset.auraQaRequestTrace = JSON.stringify(trace.requests);
-      }
-    } catch {
-      // QA diagnostics are optional and never affect the overlay.
-    }
-    const visible = jobs.filter((job) => shownDownloadJobIds.has(job.id));
-    if (!jobs.length) {
-      cleanDownloadOverlay();
-      return;
-    }
-    if (!visible.length) {
-      cleanDownloadOverlay();
-      return;
-    }
-    const { host, root } = downloadOverlayHost();
-    const visibleQaCandidates = visible
-      .filter((job) => job?.diagnostic && typeof job.diagnostic === "object")
-      .map((job) => ({
-        id: job.id,
-        title: job.title,
-        status: job.status,
-        statusText: job.statusText,
-        diagnostic: job.diagnostic,
-      }));
-    if (visibleQaCandidates.length) host.dataset.auraQaCandidates = JSON.stringify(visibleQaCandidates);
-    else delete host.dataset.auraQaCandidates;
-    root.replaceChildren();
-    const panel = document.createElement("div");
-    panel.setAttribute("style", "overflow:hidden;background:#10141c;border:1px solid #2a3444;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.45);");
-    const head = document.createElement("div");
-    head.setAttribute("style", "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;");
-    const heading = document.createElement("div");
-    heading.textContent = overlayText("heading");
-    heading.setAttribute("style", "color:#f4f7fb;font-size:12px;font-weight:800;");
-    const close = document.createElement("button");
-    close.type = "button";
-    close.textContent = "×";
-    close.setAttribute("aria-label", overlayText("close"));
-    close.setAttribute("style", "appearance:none;-webkit-appearance:none;border:0;background:transparent;color:#8b9ab0;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;");
-    close.addEventListener("click", dismissDownloadOverlay);
-    head.append(heading, close);
-    panel.append(head);
-    for (const job of visible.slice(0, 3)) panel.append(buildDownloadOverlayRow(job));
-    root.append(panel);
-  }
-
-  async function showDownloadOverlay(jobIds = []) {
-    if (window !== window.top) return false;
-    for (const jobId of Array.isArray(jobIds) ? jobIds : []) {
-      if (typeof jobId === "string" && jobId) shownDownloadJobIds.add(jobId);
-    }
-    if (downloadOverlayTimer !== null) clearInterval(downloadOverlayTimer);
-    downloadOverlayTimer = setInterval(() => void refreshDownloadOverlay(), 1000);
-    downloadOverlayTimer?.unref?.();
-    await syncOverlayLocale();
-    await refreshDownloadOverlay();
-    return true;
+    return handleDoodRequest(message, sendResponse);
   }
 
   function scan() {
@@ -1455,6 +985,5 @@
   } catch {
     // Some test or embedded realms do not expose interval timers.
   }
-  void refreshDownloadOverlay();
   scan();
 })();

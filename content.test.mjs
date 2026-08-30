@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 let moduleCounter = 0;
+await import("./content-extraction.js");
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -75,20 +76,6 @@ function baseEnvironment({
   delete globalThis.__auraMediaDetectorInstalledV3;
   delete globalThis.__auraMediaDetectorInstalledV4;
   delete globalThis.__personalVpnMediaDetectorInstalledV3;
-  class MockShadowRoot {
-    constructor(host) {
-      this.host = host;
-      this.children = [];
-    }
-
-    replaceChildren(...children) {
-      this.children = [...children];
-    }
-
-    append(...children) {
-      this.children.push(...children);
-    }
-  }
   globalThis.Element = class MockElement {
     constructor(tagName = "DIV") {
       this.tagName = String(tagName).toUpperCase();
@@ -127,11 +114,6 @@ function baseEnvironment({
 
     addEventListener(name, handler) {
       this.eventHandlers[name] = handler;
-    }
-
-    attachShadow() {
-      this.shadowRoot = new MockShadowRoot(this);
-      return this.shadowRoot;
     }
 
     remove() {
@@ -270,9 +252,6 @@ function baseEnvironment({
     mutationObservers,
     performanceObservers,
     documentHtml,
-    get overlayHost() {
-      return elementsById.get("aura-media-progress-host") || null;
-    },
     get countScans() {
       return getEntriesCalls;
     },
@@ -819,55 +798,6 @@ test("the all-frame popup wake event performs the same explicit rescan", async (
   assert.equal(handlers.length, 1);
   handlers[0]();
   assert.equal(countResource(env.sent, url), 2);
-});
-
-test("download overlay acknowledges its top-frame activation after the first refresh", async () => {
-  const env = baseEnvironment();
-  await importFreshContent();
-  const result = await new Promise((resolve) => {
-    const keepAlive = env.onMessage({ type: "show-download-overlay" }, {}, resolve);
-    assert.equal(keepAlive, true);
-  });
-  assert.deepEqual(result, { ok: true, shown: true });
-  assert.ok(env.sent.some((message) => message.type === "list-download-jobs"));
-});
-
-test("download overlay keeps diagnostics on the host and renders into its ShadowRoot", async () => {
-  const job = {
-    id: "job-shadow-root",
-    title: "Dood download",
-    status: "running",
-    statusText: "Running 20%",
-    diagnostic: { providerId: "dood", frameId: 8 },
-  };
-  const env = baseEnvironment({
-    runtimeHandler(message) {
-      if (message.type === "list-download-jobs") return { jobs: [job] };
-      if (message.type === "qa-list-candidates") return { ok: true, candidates: [] };
-      if (message.type === "qa-list-request-trace") return { ok: true, requests: [] };
-      return undefined;
-    },
-  });
-  await importFreshContent();
-  const result = await new Promise((resolve) => {
-    const keepAlive = env.onMessage({ type: "show-download-overlay", jobIds: [job.id] }, {}, resolve);
-    assert.equal(keepAlive, true);
-  });
-
-  assert.deepEqual(result, { ok: true, shown: true });
-  assert.equal(JSON.parse(env.overlayHost.dataset.auraQaCandidates)[0].id, job.id);
-  assert.equal(env.overlayHost.shadowRoot.children.length, 1);
-  await new Promise((resolve) => env.onMessage({ type: "hide-download-overlay" }, {}, resolve));
-});
-
-test("download overlay hide message stops the local timer and removes the host", async () => {
-  const env = baseEnvironment();
-  await importFreshContent();
-  const result = await new Promise((resolve) => {
-    const keepAlive = env.onMessage({ type: "hide-download-overlay" }, {}, resolve);
-    assert.equal(keepAlive, false);
-  });
-  assert.deepEqual(result, { ok: true, hidden: true });
 });
 
 test("an explicit rescan interrupts a pending debounce without double scanning", async () => {

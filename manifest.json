@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Segma Player",
-  "version": "0.4.58",
+  "version": "0.4.59",
   "minimum_chrome_version": "111",
   "description": "Detect media and send download requests to Segma Player.",
   "permissions": ["activeTab", "contextMenus", "declarativeNetRequest", "nativeMessaging", "scripting", "storage", "webRequest"],

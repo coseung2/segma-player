@@ -2,70 +2,12 @@ import { readFile, readdir, rm, mkdir, copyFile, writeFile } from "node:fs/promi
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { readStoreRuntimeFiles, validateRuntimeGraph } from "./runtime-graph.mjs";
+
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = path.dirname(scriptDirectory);
 
-export const STORE_RUNTIME_FILES = Object.freeze([
-  "background.js",
-  "background-candidate-repository.js",
-  "background-companion-handoff.js",
-  "background-player-resolution.js",
-  "background-request-evidence.js",
-  "candidate.js",
-  "candidate-ranking.js",
-  "companion-client.js",
-  "content.js",
-  "content-extraction.js",
-  "download-errors.js",
-  "download-mode.js",
-  "download-policy.js",
-  "downloaders/ids.js",
-  "download.js",
-  "edition.js",
-  "i18n.js",
-  "icons/icon16.png",
-  "icons/icon32.png",
-  "icons/icon48.png",
-  "icons/icon128.png",
-  "level5-key-error.js",
-  "level5-page-bridge.js",
-  "manifest.json",
-  "media-request-context.js",
-  "mobile-user-agent.js",
-  "options.html",
-  "options.js",
-  "page-media-observer.js",
-  "player-page-resolver.js",
-  "popup.css",
-  "popup.html",
-  "popup.js",
-  "providers/dood.js",
-  "providers/hlsjs.js",
-  "providers/ids.js",
-  "providers/level5.js",
-  "providers/player-api.js",
-  "providers/registry.js",
-  "providers/signals.js",
-  "sites/animepahe/profile.js",
-  "sites/asianporn/profile.js",
-  "sites/av19/profile.js",
-  "sites/avsee/profile.js",
-  "sites/beeg/profile.js",
-  "sites/dood/profile.js",
-  "sites/gogoanime/profile.js",
-  "sites/missav/profile.js",
-  "sites/onlyjerk/profile.js",
-  "sites/playmogo/profile.js",
-  "sites/pimpbunny/profile.js",
-  "sites/recu/profile.js",
-  "sites/jamak/profile.js",
-  "sites/lulustream/profile.js",
-  "sites/shackledshow/profile.js",
-  "sites/profile.js",
-  "sites/registry.js",
-  "sites/youtube/profile.js",
-  "sites/zoro/profile.js",
-].sort());
+export const STORE_RUNTIME_FILES = await readStoreRuntimeFiles();
 
 export const DEV_EXTRA_FILES = Object.freeze([]);
 
@@ -316,6 +258,7 @@ export async function buildDevStaging({
   await writeDevelopmentManifest({ repositoryRoot: root, stageDirectory, version: selectedVersion });
   await stageTextTransforms(stageDirectory);
   await auditStage(stageDirectory, selectedVersion, selectedEdition);
+  await validateRuntimeGraph({ stageDirectory, runtimeFiles: DEV_STAGING_FILES });
   return Object.freeze({
     stageDirectory,
     version: selectedVersion,

@@ -5,10 +5,11 @@ product. Users start detection, link input, download, playback, and subtitle
 actions from the Chrome/Whale/Edge extension; Aura Media Companion performs the
 download, playback, or subtitle work and owns persistent state.
 
-The repository still contains the extension-primary implementation during this
-migration. Read [PRODUCT_DIRECTION.md](PRODUCT_DIRECTION.md) for target ownership
-and [DOCUMENTATION.md](DOCUMENTATION.md) before treating older reports or store
-copy as current product documentation.
+The repository still retains extension-primary source and tests as compatibility
+reference during this migration, but that code is outside the packaged runtime.
+Read [PRODUCT_DIRECTION.md](PRODUCT_DIRECTION.md) for ownership and
+[DOCUMENTATION.md](DOCUMENTATION.md) before treating older reports or store copy
+as current product documentation.
 
 ## Product direction
 
@@ -68,42 +69,24 @@ enforcement are implemented and verified.
 
 ## Current implementation architecture
 
-The following describes the migration baseline on disk, not the completed
-Companion-first target.
+- `page-media-observer.js` and `level5-page-bridge.js` collect bounded
+  MAIN-world evidence from supported players and browser requests.
+- `content-extraction.js` and `content.js` extract media clues, report frame
+  state, and support explicit rescans without downloading or writing files.
+- `background.js` composes candidate state/ranking, request evidence, bounded
+  player-page resolution, source-token refresh, and Companion command handoff.
+- `popup.js` exposes only detection and pasted-link intent. `companion-client.js`
+  negotiates the Native Messaging contract with `com.aura.media_companion`.
+- The Companion owns jobs, execution, playback, subtitles, folders, settings,
+  and General/Pro entitlement. Its player stores pose-start bookmarks and owns
+  seek preview, fullscreen, and PiP behavior.
 
-- `page-media-observer.js` collects bounded MAIN-world evidence from hls.js,
-  video.js, Plyr, JWPlayer, Level5, Fetch, and XHR without patching MSE buffers.
-- `content.js` reports exact frame playback state and structured iframe layout;
-  `candidate-ranking.js` combines that evidence into primary/alternate/ad scores.
-- `background.js` owns candidate state, short-lived playback sessions, exact
-  request-context leases, and source-frame token refresh. `media-request-context.js`
-  makes download and playback select the same observed source context and keeps
-  bounded diagnostics free of URL queries and header values.
-- The Companion player stores pose-start bookmarks with each library item,
-  paints them on the seek bar, previews their frames on hover, and seeks to the
-  exact saved timestamp when clicked.
-- `download-worker.js` keeps accepted downloads running in an offscreen document
-  and `hls-download.js` refreshes short-lived manifests after 401/403 responses.
-- `contextual-hls-loader.js` applies the captured iframe Referer/Origin/Cookie
-  context to each manifest, segment, and key request made by the browser player;
-  `hls-playback-recovery.js` separates network failures from nonfatal internal
-  aborts before consuming Aura's one-shot recovery.
-- `save-directory.js` keeps the browser File System Access fallback, while
-  `companion-client.js` and `native-file-writer.js` prefer the reviewed Windows
-  Companion for local writing when it is available. Progressive/HLS requests
-  still originate in the browser so captured request context is preserved.
-- The current extension subtitle path prefers a separate HLS audio rendition,
-  uploads only that bounded audio input, normalizes it in a CPU Modal function,
-  and starts the GPU only for ASR and translation. It is migration code. The
-  target Companion/Worker/Modal contract is defined in
-  `MODAL_SUBTITLE_INTEGRATION.md`.
-- YouTube uses the local Companion first. During migration the notebook server
-  remains as a fallback and still accepts only HMAC capability tokens issued by
-  the license worker (`/api/youtube-token`).
-- Media-route/VPN ownership remains outside this project; the downloader does
-  not recreate a second route broker inside the Companion.
-
-The store ZIP excludes private page-key code, static site-specific redirect rules, tests, native source, build scripts, and fixed extension keys.
+The package graph is declared once in `scripts/store-runtime-files.json` and is
+consumed by both development staging and the PowerShell store packager. Each
+build validates the complete manifest/import closure, so retained legacy
+download worker, browser player, subtitle, license, and file-writer modules
+cannot enter the package indirectly. Private page-key code, tests, native
+source, build scripts, and fixed extension keys are likewise excluded.
 
 ## Development
 
@@ -171,12 +154,11 @@ it does not retain browser download or playback fallbacks. Segma Player saves un
 the audited Pro directory under `artifacts/chrome-web-store/staging-pro` on any
 Node-supported platform and intentionally creates no ZIP.
 
-## Browser connector store package — migration baseline
+## Browser connector store package
 
-The Companion-first listing/rebrand is on hold while the primary application is
-implemented. The commands below reproduce the current extension-primary package
-for testing or an explicitly scoped maintenance release; they do not authorize
-publishing its legacy listing copy as the new product.
+The commands below reproduce the audited Companion-first browser connector.
+Historical store listing copy remains separately classified in
+`DOCUMENTATION.md` and must be reviewed before publication.
 
 Dry-run package with the Pro link disabled:
 

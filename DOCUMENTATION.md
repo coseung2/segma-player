@@ -14,9 +14,8 @@ product-direction source of truth.
 
 - `REFACTORING_PLAN.md` — current Companion-first refactoring order, frozen
   compatibility contracts, phase gates, progress, and validation requirements.
-  Non-PiP phases may proceed while the native-manager/PiP phase remains blocked
-  until the in-flight GUI work is finished.
-- `SITE_DOWNLOAD_MODES.md` — browser connector site/provider/downloader layers.
+- `SITE_DOWNLOAD_MODES.md` — browser connector site/provider diagnostic layers
+  and the Companion execution boundary.
 - `MODAL_SUBTITLE_INTEGRATION.md` — target Companion/Worker/Modal subtitle job
   and security contract.
 - `INCIDENTS.md` — append-only incident status and regression history.

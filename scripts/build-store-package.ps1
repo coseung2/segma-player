@@ -51,67 +51,16 @@ if ($CompanionInstallUrl) {
   }
 }
 
-$runtimeFiles = @(
-  'background.js',
-  'background-candidate-repository.js',
-  'background-companion-handoff.js',
-  'background-player-resolution.js',
-  'background-request-evidence.js',
-  'companion-client.js',
-  'candidate.js',
-  'candidate-ranking.js',
-  'content.js',
-  'content-extraction.js',
-  'download-errors.js',
-  'download-mode.js',
-  'download-policy.js',
-  'downloaders/ids.js',
-  'download.js',
-  'i18n.js',
-  'level5-key-error.js',
-  'level5-page-bridge.js',
-  'icons/icon16.png',
-  'icons/icon32.png',
-  'icons/icon48.png',
-  'icons/icon128.png',
-  'media-request-context.js',
-  'mobile-user-agent.js',
-  'options.html',
-  'options.js',
-  'page-media-observer.js',
-  'player-page-resolver.js',
-  'popup.css',
-  'popup.html',
-  'popup.js',
-  'providers/dood.js',
-  'providers/hlsjs.js',
-  'providers/ids.js',
-  'providers/level5.js',
-  'providers/player-api.js',
-  'providers/registry.js',
-  'providers/signals.js',
-  'sites/animepahe/profile.js',
-  'sites/asianporn/profile.js',
-  'sites/av19/profile.js',
-  'sites/avsee/profile.js',
-  'sites/beeg/profile.js',
-  'sites/dood/profile.js',
-  'sites/gogoanime/profile.js',
-  'sites/missav/profile.js',
-  'sites/onlyjerk/profile.js',
-  'sites/playmogo/profile.js',
-  'sites/pimpbunny/profile.js',
-  'sites/recu/profile.js',
-  'sites/jamak/profile.js',
-  'sites/lulustream/profile.js',
-  'sites/shackledshow/profile.js',
-  'sites/profile.js',
-  'sites/registry.js',
-  'sites/youtube/profile.js',
-  'sites/zoro/profile.js',
-  'edition.js',
-  'manifest.json'
-)
+$RuntimeConfigPath = Join-Path $PSScriptRoot 'store-runtime-files.json'
+$RuntimeGraphScript = Join-Path $PSScriptRoot 'validate-runtime-graph.mjs'
+if (-not (Test-Path -LiteralPath $RuntimeConfigPath -PathType Leaf)) {
+  throw "Runtime file config is missing: $RuntimeConfigPath"
+}
+$runtimeConfig = Get-Content -LiteralPath $RuntimeConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$runtimeFiles = @($runtimeConfig.files)
+if ($runtimeFiles.Count -eq 0 -or (@($runtimeFiles | Select-Object -Unique).Count -ne $runtimeFiles.Count)) {
+  throw 'Runtime file config is empty or contains duplicate entries.'
+}
 
 $forbiddenEntryPatterns = @(
   '(?i)(^|/)(?:bridge|route-client|redirect-block-rules)(?:\.js|\.json)?$',
@@ -366,6 +315,10 @@ foreach ($runtimeFile in $runtimeFiles) {
 
 $expectedFiles = @($runtimeFiles | ForEach-Object { $_.Replace('\', '/') } | Sort-Object)
 Invoke-StoreAudit $expectedFiles
+$runtimeGraphOutput = & node $RuntimeGraphScript "--stage=$StageDirectory" 2>&1
+if ($LASTEXITCODE -ne 0) {
+  throw "Packaged runtime graph validation failed: $($runtimeGraphOutput -join [System.Environment]::NewLine)"
+}
 
 $packageSuffix = if ($Edition -eq 'pro') { '-pro' } else { '' }
 $zipPath = Join-Path $OutputDirectory "aura-media-downloader$packageSuffix-$effectiveVersion.zip"

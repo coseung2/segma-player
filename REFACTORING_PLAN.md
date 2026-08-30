@@ -36,7 +36,7 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | 2. Native-host module split | Complete | `5834205`; 52 host tests and focused contract checks |
 | 3. Shared host/GUI disk contract | Complete | `a20b46c`; shared crate and both Cargo suites |
 | 4. Shipped extension split | Complete | `0.4.58`; module boundaries and validation below |
-| 5. Packaging and retired runtime | Pending | Pending |
+| 5. Packaging and retired runtime | Complete | `0.4.59`; shared graph and closure validation below |
 | 6. Native manager split | Pending, unblocked | PiP baseline complete; start after Phase 5 |
 | 7. Integrated validation and handoff | Pending | Pending |
 
@@ -62,8 +62,9 @@ The repository root contains both the shipped Companion-first connector and
 older extension-primary implementation code. File size or test coverage alone
 does not prove that a module is part of the installed product.
 
-The source of truth for the packaged extension is `STORE_RUNTIME_FILES` in
-`scripts/build-dev-staging.mjs`. The active flow is:
+The source of truth for the packaged extension is
+`scripts/store-runtime-files.json`, consumed by both build paths. The active
+flow is:
 
 ```text
 page-media-observer.js / level5-page-bridge.js
@@ -78,12 +79,12 @@ page-media-observer.js / level5-page-bridge.js
   -> aura-media-manager.exe polls disk state
 ```
 
-Examples of source that is present but not in the current staging allowlist
-include `hls-download.js`, `download-worker.js`, `player.js`,
+Examples of retained legacy reference/test source outside the validated runtime
+graph include `hls-download.js`, `download-worker.js`, `player.js`,
 `playback-session.js`, `native-file-writer.js`, `save-directory.js`, and the
-transport implementations under `downloaders/` other than `ids.js`. These are
-transitional or compatibility surfaces until reachability and installed-client
-compatibility are proved. Their tests do not prove the shipped connector path.
+transport implementations under `downloaders/` other than `ids.js`. Their
+tests do not prove the shipped connector path, and import-closure validation
+prevents them from entering staging indirectly.
 
 ## Compatibility invariants
 
@@ -445,6 +446,37 @@ Historical documents and append-only incident/QA evidence are not rewritten.
 Exit gate: staging and store builds consume the same declared graph, no retired
 module is packaged, and root-source tests are clearly separated from shipped
 runtime tests.
+
+#### Phase 5 result — 2026-08-31
+
+Completed at development version `0.4.59`:
+
+- `scripts/store-runtime-files.json` is now the sole runtime file declaration.
+  The JavaScript staging builder and PowerShell store packager both consume it;
+  the duplicated source lists were removed.
+- `scripts/runtime-graph.mjs` walks manifest entries, content-script order,
+  HTML scripts/styles, static ESM imports/re-exports, and literal dynamic
+  imports. Development staging and store packaging fail if an import is missing
+  from the declaration or if a declared file is unreachable.
+- Reachability proved that the old options page was not a manifest entry, so
+  `options.html` and `options.js` were removed from the shipped graph. Legacy
+  browser download, player, subtitle, license, collection, and file-writer
+  source remains only as explicit reference/test code outside the package.
+- `runtime-graph.test.mjs` proves the current 57-file closure and rejects both a
+  synthetic retired-module import and an unreachable allowlist addition. The
+  obsolete duplicate expected-file list in the store package test was removed.
+- Current README, documentation map, and site/provider mode contract now
+  describe diagnostic downloader IDs and Companion execution. Historical
+  incident, QA, and extension-primary snapshot documents were not rewritten.
+- Native-host `media-*` compatibility remains isolated in `legacy_writer.rs`;
+  this phase neither removed nor changed that installed-client contract.
+
+Validation at this checkpoint: focused graph/staging/store/architecture suite
+13 passed including both deterministic store ZIP builds; media-site suite 48
+passed; full Node suite 528 passed and 22 explicitly skipped; shared contract 2
+passed; native host 53 passed; Companion GUI 185 passed; both Rust format checks
+and `git diff --check` passed. No live browser or installed Companion check is
+claimed for packaging-only changes; live validation is `NOT_RUN`.
 
 ### Phase 6 — split the native manager after PiP work lands
 

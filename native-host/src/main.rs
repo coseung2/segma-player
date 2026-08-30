@@ -1,6 +1,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+mod job_store;
+mod legacy_writer;
+mod media_download;
+mod process;
+mod protocol;
+mod subtitle;
+mod youtube;
+
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use reqwest::StatusCode;
@@ -9,7 +16,6 @@ use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,34 +29,22 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 #[cfg(target_os = "windows")]
-use std::os::windows::ffi::OsStrExt;
-#[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 const PROTOCOL_VERSION: u32 = 2;
-const MAX_NATIVE_MESSAGE_BYTES: usize = 1024 * 1024;
-const MEDIA_DOWNLOAD_COMMAND_VERSION: u32 = 1;
-const MAX_MEDIA_DOWNLOAD_MESSAGE_BYTES: usize = 16 * 1024;
-const MAX_MEDIA_DOWNLOAD_URL_BYTES: usize = 4096;
-const MAX_MEDIA_DOWNLOAD_TITLE_BYTES: usize = 512;
-const MAX_MEDIA_DOWNLOAD_ID_BYTES: usize = 128;
-const MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES: usize = 512;
-const MAX_MEDIA_DOWNLOAD_ACCEPT_LANGUAGE_BYTES: usize = 256;
 const SUBTITLE_COMMAND_VERSION: u32 = 1;
 const MAX_SUBTITLE_MESSAGE_BYTES: usize = 32 * 1024;
-const MAX_SUBTITLE_URL_BYTES: usize = 4096;
 const MAX_SUBTITLE_TITLE_BYTES: usize = 512;
 const MAX_SUBTITLE_METADATA_BYTES: usize = 128;
 const MAX_COMPANION_SETTINGS_BYTES: usize = 16 * 1024;
 const MAX_SUBTITLE_RESULT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SUBTITLE_REMOTE_RESPONSE_BYTES: usize = MAX_SUBTITLE_RESULT_BYTES + 64 * 1024;
 const MAX_SUBTITLE_PHASE_BYTES: usize = 128;
-const SUBTITLE_WORKER_URL: &str = "https://aura.mdownloader.workers.dev/api/subtitles";
+const SUBTITLE_WORKER_URL: &str = subtitle::WORKER_URL;
 const SUBTITLE_POLL_INTERVAL: Duration = Duration::from_millis(1_200);
 const SUBTITLE_MAX_RUNTIME: Duration = Duration::from_secs(30 * 60);
 const SUBTITLE_ACTIVE_MAX_AGE_MS: u64 = 2 * 60 * 60 * 1000;
-const MAX_SUBTITLE_AUDIO_BYTES: u64 = 80 * 1024 * 1024;
-const MAX_SUBTITLE_DURATION_SECONDS: u64 = 60 * 60;
+const MAX_SUBTITLE_AUDIO_BYTES: u64 = subtitle::MAX_AUDIO_BYTES;
 const MEDIA_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36";
 const PROGRESSIVE_RANGE_MIN_CONCURRENCY: usize = 2;
@@ -61,12 +55,6 @@ const PROGRESSIVE_RANGE_RETRIES: usize = 3;
 static NEXT_SUBTITLE_JOB_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-const YOUTUBE_OUTPUT_TEMPLATE: &str = "[%(height)sp] %(title).170B.%(ext)s";
-#[cfg(target_os = "windows")]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
-#[cfg(target_os = "windows")]
-const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Request {
@@ -117,44 +105,8 @@ struct Request {
     message_bytes: usize,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct MediaDownloadCommand {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(rename = "protocolVersion")]
-    protocol_version: u32,
-    #[serde(rename = "requestId", default)]
-    request_id: String,
-    #[serde(rename = "jobId")]
-    job_id: String,
-    #[serde(rename = "candidateId")]
-    candidate_id: String,
-    url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    referrer: Option<String>,
-    title: String,
-    #[serde(rename = "inputKind")]
-    input_kind: String,
-    #[serde(
-        rename = "userAgent",
-        default,
-        skip_serializing_if = "String::is_empty"
-    )]
-    user_agent: String,
-    #[serde(
-        rename = "acceptLanguage",
-        default,
-        skip_serializing_if = "String::is_empty"
-    )]
-    accept_language: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MediaDownloadValidationError {
-    code: &'static str,
-    message: &'static str,
-}
+type MediaDownloadCommand = media_download::Command;
+type MediaDownloadValidationError = media_download::ValidationError;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -311,56 +263,7 @@ trait SubtitleTransport {
     ) -> Result<SubtitleCancelStatus, SubtitleRunError>;
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct JobState {
-    #[serde(rename = "jobId")]
-    job_id: String,
-    #[serde(rename = "jobType", skip_serializing_if = "Option::is_none")]
-    job_type: Option<String>,
-    #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
-    request_id: Option<String>,
-    #[serde(rename = "candidateId", skip_serializing_if = "Option::is_none")]
-    candidate_id: Option<String>,
-    #[serde(rename = "sourceLanguage", skip_serializing_if = "Option::is_none")]
-    source_language: Option<String>,
-    #[serde(rename = "targetLanguage", skip_serializing_if = "Option::is_none")]
-    target_language: Option<String>,
-    #[serde(rename = "inputKind", skip_serializing_if = "Option::is_none")]
-    input_kind: Option<String>,
-    #[serde(rename = "outputFormat", skip_serializing_if = "Option::is_none")]
-    output_format: Option<String>,
-    #[serde(rename = "executionStatus", skip_serializing_if = "Option::is_none")]
-    execution_status: Option<String>,
-    #[serde(rename = "tabId", skip_serializing_if = "Option::is_none")]
-    tab_id: Option<u32>,
-    #[serde(rename = "frameId", skip_serializing_if = "Option::is_none")]
-    frame_id: Option<u32>,
-    #[serde(rename = "remoteJobId", skip_serializing_if = "Option::is_none")]
-    remote_job_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    phase: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    completed: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    total: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    status: String,
-    #[serde(rename = "statusText")]
-    status_text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    progress: Option<u8>,
-    #[serde(rename = "fileName", skip_serializing_if = "Option::is_none")]
-    file_name: Option<String>,
-    #[serde(rename = "createdAt", default)]
-    created_at: u64,
-    #[serde(rename = "updatedAt")]
-    updated_at: u64,
-}
+type JobState = job_store::JobState;
 
 #[derive(Debug, Clone, Copy)]
 struct SubtitleValidationError {
@@ -382,96 +285,32 @@ fn subtitle_error(code: &'static str, message: &'static str) -> SubtitleValidati
     SubtitleValidationError { code, message }
 }
 
-fn sensitive_header_key(key: &str) -> bool {
-    let normalized = key.to_ascii_lowercase();
-    normalized.contains("cookie")
-        || normalized.contains("authorization")
-        || normalized.contains("header")
-}
-
 fn contains_sensitive_header(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => object
-            .iter()
-            .any(|(key, child)| sensitive_header_key(key) || contains_sensitive_header(child)),
-        Value::Array(values) => values.iter().any(contains_sensitive_header),
-        _ => false,
-    }
+    media_download::contains_sensitive_header(value)
 }
 
 fn bounded_text(value: &str, maximum: usize) -> bool {
-    value.len() <= maximum && !value.chars().any(|character| character.is_control())
-}
-
-fn valid_user_agent(value: &str) -> bool {
-    value.len() <= MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte == b' ' || byte.is_ascii_graphic())
-}
-
-fn valid_accept_language(value: &str) -> bool {
-    value.len() <= MAX_MEDIA_DOWNLOAD_ACCEPT_LANGUAGE_BYTES
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b',' | b'.' | b';' | b'=' | b'-' | b' ')
-        })
-}
-
-fn media_download_error(code: &'static str, message: &'static str) -> MediaDownloadValidationError {
-    MediaDownloadValidationError { code, message }
+    media_download::bounded_text(value, maximum)
 }
 
 fn valid_local_subtitle_path(value: &Option<String>) -> bool {
-    let Some(path) = value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-    if path.chars().any(char::is_control) || path.len() > 32_767 {
-        return false;
-    }
-    let path = Path::new(path);
-    path.is_absolute()
-        && !path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
+    subtitle::valid_local_path(value)
 }
 
 fn valid_local_subtitle_file(value: &Option<String>) -> bool {
-    valid_local_subtitle_path(value) && Path::new(value.as_deref().unwrap_or("")).is_file()
+    subtitle::valid_local_file(value)
 }
 
 fn ffmpeg_executable() -> Result<PathBuf, SubtitleRunError> {
-    let ffmpeg = command_tools()
+    let ffmpeg_directory = command_tools()
         .map_err(|_| run_error("tools-not-installed", "ffmpeg is not installed"))?
-        .2
-        .join("ffmpeg.exe");
-    if ffmpeg.is_file() {
-        Ok(ffmpeg)
-    } else {
-        Err(run_error("tools-not-installed", "ffmpeg is not installed"))
-    }
+        .2;
+    subtitle::ffmpeg_executable(&ffmpeg_directory)
+        .ok_or_else(|| run_error("tools-not-installed", "ffmpeg is not installed"))
 }
 
 fn configure_local_subtitle_audio_command(command: &mut Command, source: &Path, output: &Path) {
-    command
-        .arg("-y")
-        .arg("-i")
-        .arg(source)
-        .arg("-vn")
-        .arg("-ac")
-        .arg("1")
-        .arg("-ar")
-        .arg("16000")
-        .arg("-c:a")
-        .arg("aac")
-        .arg("-b:a")
-        .arg("64k")
-        .arg("-t")
-        .arg(MAX_SUBTITLE_DURATION_SECONDS.to_string())
-        .arg(output);
+    subtitle::configure_local_audio_command(command, source, output);
 }
 
 fn prepare_local_subtitle_audio(
@@ -574,209 +413,31 @@ fn submit_local_audio(
 }
 
 fn encode_subtitle_title(title: &str) -> String {
-    let clipped: String = title.chars().take(240).collect();
-    let mut encoded = String::new();
-    for byte in clipped.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(*byte as char);
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
-}
-
-fn public_ipv4_address(address: std::net::Ipv4Addr) -> bool {
-    let octets = address.octets();
-    !matches!(
-        octets,
-        [0, ..]
-            | [10, ..]
-            | [100, 64..=127, ..]
-            | [127, ..]
-            | [169, 254, ..]
-            | [172, 16..=31, ..]
-            | [192, 0, 0, ..]
-            | [192, 0, 2, ..]
-            | [192, 168, ..]
-            | [198, 18..=19, ..]
-            | [198, 51, 100, ..]
-            | [203, 0, 113, ..]
-            | [224..=255, ..]
-    )
-}
-
-fn public_ipv6_address(address: std::net::Ipv6Addr) -> bool {
-    if let Some(mapped) = address.to_ipv4_mapped() {
-        return public_ipv4_address(mapped);
-    }
-    let segments = address.segments();
-    !(address.is_loopback()
-        || address.is_unspecified()
-        || segments[0] & 0xfe00 == 0xfc00
-        || segments[0] & 0xffc0 == 0xfe80
-        || segments[0] & 0xff00 == 0xff00
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8))
-}
-
-fn public_dns_host(host: &str) -> bool {
-    if host.ends_with('.') {
-        return false;
-    }
-    let labels = host.split('.').collect::<Vec<_>>();
-    if labels.len() < 2
-        || labels.iter().any(|label| {
-            label.is_empty()
-                || label.starts_with('-')
-                || label.ends_with('-')
-                || !label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-    {
-        return false;
-    }
-    !["localhost", "local", "internal", "lan"]
-        .iter()
-        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
-        && host != "home.arpa"
-        && !host.ends_with(".home.arpa")
+    subtitle::encode_title(title)
 }
 
 fn valid_http_url(value: &str) -> bool {
-    if !bounded_text(value, MAX_SUBTITLE_URL_BYTES)
-        || value.is_empty()
-        || value.chars().any(char::is_whitespace)
-    {
-        return false;
-    }
-    let Ok(parsed) = reqwest::Url::parse(value) else {
-        return false;
-    };
-    if !matches!(parsed.scheme(), "http" | "https")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.fragment().is_some()
-        || parsed.port() == Some(0)
-    {
-        return false;
-    }
-    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
-        return false;
-    };
-    match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(address)) => public_ipv4_address(address),
-        Ok(IpAddr::V6(address)) => public_ipv6_address(address),
-        Err(_) => public_dns_host(&host),
-    }
+    media_download::valid_http_url(value)
 }
 
 fn validate_media_download_fields(
     command: &MediaDownloadCommand,
 ) -> Result<(), MediaDownloadValidationError> {
-    if command.protocol_version != MEDIA_DOWNLOAD_COMMAND_VERSION {
-        return Err(media_download_error(
-            "media-download-protocol-unsupported",
-            "media download protocol version is unsupported",
-        ));
-    }
-    if command.kind != "media-download" {
-        return Err(media_download_error(
-            "invalid-media-download-command",
-            "media download command type is invalid",
-        ));
-    }
-    if safe_id(&command.job_id).is_none()
-        || command.job_id.len() > MAX_MEDIA_DOWNLOAD_ID_BYTES
-        || safe_id(&command.candidate_id).is_none()
-        || command.candidate_id.len() > MAX_MEDIA_DOWNLOAD_ID_BYTES
-    {
-        return Err(media_download_error(
-            "invalid-media-download-id",
-            "job and candidate identifiers must be bounded local tokens",
-        ));
-    }
-    if !bounded_text(&command.url, MAX_MEDIA_DOWNLOAD_URL_BYTES)
-        || !valid_http_url(&command.url)
-        || command.referrer.as_ref().is_some_and(|referrer| {
-            !bounded_text(referrer, MAX_MEDIA_DOWNLOAD_URL_BYTES) || !valid_http_url(referrer)
-        })
-    {
-        return Err(media_download_error(
-            "invalid-media-download-url",
-            "media URL and referrer must be public HTTP or HTTPS URLs",
-        ));
-    }
-    if !bounded_text(&command.title, MAX_MEDIA_DOWNLOAD_TITLE_BYTES) {
-        return Err(media_download_error(
-            "invalid-media-download-title",
-            "media title is invalid or oversized",
-        ));
-    }
-    if !matches!(
-        command.input_kind.as_str(),
-        "PROGRESSIVE" | "HLS_MASTER" | "HLS_MEDIA" | "DASH"
-    ) {
-        return Err(media_download_error(
-            "unsupported-media-download-kind",
-            "media input kind is unsupported",
-        ));
-    }
-    if (!command.user_agent.is_empty() && !valid_user_agent(&command.user_agent))
-        || (!command.accept_language.is_empty() && !valid_accept_language(&command.accept_language))
-    {
-        return Err(media_download_error(
-            "invalid-media-download-browser-context",
-            "browser request metadata is invalid or oversized",
-        ));
-    }
-    Ok(())
+    media_download::validate_fields(command)
 }
 
 fn validate_media_download_command(
     raw: &Value,
     message_bytes: usize,
 ) -> Result<MediaDownloadCommand, MediaDownloadValidationError> {
-    if message_bytes == 0 || message_bytes > MAX_MEDIA_DOWNLOAD_MESSAGE_BYTES {
-        return Err(media_download_error(
-            "media-download-payload-too-large",
-            "media download command exceeds the local payload limit",
-        ));
-    }
-    if contains_sensitive_header(raw) {
-        return Err(media_download_error(
-            "media-download-secret-rejected",
-            "cookies, authorization, and arbitrary headers are not accepted",
-        ));
-    }
-    let command: MediaDownloadCommand = serde_json::from_value(raw.clone()).map_err(|_| {
-        media_download_error(
-            "invalid-media-download-command",
-            "media download command shape is invalid",
-        )
-    })?;
-    validate_media_download_fields(&command)?;
-    Ok(command)
+    media_download::validate_command(raw, message_bytes)
 }
 
 #[cfg(test)]
 fn parse_media_download_command_bytes(
     data: &[u8],
 ) -> Result<MediaDownloadCommand, MediaDownloadValidationError> {
-    if data.len() > MAX_MEDIA_DOWNLOAD_MESSAGE_BYTES {
-        return Err(media_download_error(
-            "media-download-payload-too-large",
-            "media download command exceeds the local payload limit",
-        ));
-    }
-    let raw: Value = serde_json::from_slice(data).map_err(|_| {
-        media_download_error(
-            "invalid-media-download-command",
-            "media download command is not valid JSON",
-        )
-    })?;
-    validate_media_download_command(&raw, data.len())
+    media_download::parse_command_bytes(data)
 }
 
 fn media_download_command_from_request(request: &Request) -> MediaDownloadCommand {
@@ -1102,7 +763,7 @@ where
 
 fn spawn_subtitle_process(path: &Path) -> io::Result<()> {
     let path_text = path.to_string_lossy().into_owned();
-    spawn_detached(&["--run-subtitle-job", &path_text])
+    process::spawn_detached(&["--run-subtitle-job", &path_text])
 }
 
 fn run_error(code: &'static str, message: &'static str) -> SubtitleRunError {
@@ -2072,9 +1733,6 @@ struct MediaWriter {
     last_state_persisted_bytes: u64,
 }
 
-const MEDIA_STATE_PERSIST_INTERVAL_MS: u64 = 750;
-const MEDIA_STATE_PERSIST_BYTE_INTERVAL: u64 = 8 * 1024 * 1024;
-
 fn default_quality() -> String {
     "best".into()
 }
@@ -2107,76 +1765,44 @@ fn now_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
+#[cfg(test)]
 fn parse_request_bytes(data: &[u8]) -> io::Result<Request> {
-    let raw_message: Value = serde_json::from_slice(data).map_err(io::Error::other)?;
-    let mut request: Request =
-        serde_json::from_value(raw_message.clone()).map_err(io::Error::other)?;
+    let (mut request, raw_message) = protocol::parse_request_bytes::<Request>(data)?;
     request.raw_message = raw_message;
     request.message_bytes = data.len();
     Ok(request)
 }
 
 fn read_message() -> io::Result<Option<Request>> {
-    let mut length = [0_u8; 4];
-    let mut stdin = io::stdin().lock();
-    match stdin.read_exact(&mut length) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(error),
-    }
-    let size = u32::from_le_bytes(length) as usize;
-    if size == 0 || size > MAX_NATIVE_MESSAGE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid native message length",
-        ));
-    }
-    let mut data = vec![0_u8; size];
-    stdin.read_exact(&mut data)?;
-    parse_request_bytes(&data).map(Some)
-}
-
-fn write_message(value: &Value) -> io::Result<()> {
-    let data = serde_json::to_vec(value).map_err(io::Error::other)?;
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(&(data.len() as u32).to_le_bytes())?;
-    stdout.write_all(&data)?;
-    stdout.flush()
+    let Some((mut request, raw_message, message_bytes)) =
+        protocol::read_native_message::<Request>()?
+    else {
+        return Ok(None);
+    };
+    request.raw_message = raw_message;
+    request.message_bytes = message_bytes;
+    Ok(Some(request))
 }
 
 fn reply(request: &Request, body: Value) {
-    let mut object = body.as_object().cloned().unwrap_or_default();
-    if !request.request_id.is_empty() {
-        object.insert(
-            "requestId".into(),
-            Value::String(request.request_id.clone()),
-        );
-    }
-    let _ = write_message(&Value::Object(object));
+    let body = protocol::reply_body(&request.request_id, body);
+    let _ = protocol::write_native_message(&body);
 }
 
 fn companion_root() -> io::Result<PathBuf> {
-    if let Some(local) = env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(local).join("Aura Media").join("Companion"));
-    }
-    let executable = env::current_exe()?;
-    Ok(executable.parent().unwrap_or(Path::new(".")).to_path_buf())
+    job_store::companion_root()
 }
 
 fn jobs_dir() -> io::Result<PathBuf> {
-    let path = companion_root()?.join("jobs");
-    fs::create_dir_all(&path)?;
-    Ok(path)
+    job_store::jobs_dir()
 }
 
 fn subtitle_request_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(directory.join(format!("{safe}.subtitle.request.json")))
+    job_store::subtitle_request_path_in(directory, job_id)
 }
 
 fn settings_path(root: &Path) -> PathBuf {
-    root.join("settings.json")
+    job_store::settings_path(root)
 }
 
 fn valid_license_key(value: &str) -> bool {
@@ -2246,24 +1872,7 @@ fn default_download_dir() -> io::Result<PathBuf> {
 /// Anything else falls back to the default rather than writing media somewhere
 /// a malformed settings file happens to point at.
 fn valid_download_folder(value: &str) -> Option<PathBuf> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() > 32_767 {
-        return None;
-    }
-    if trimmed.chars().any(char::is_control) {
-        return None;
-    }
-    let path = Path::new(trimmed);
-    if !path.is_absolute() {
-        return None;
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return None;
-    }
-    Some(path.to_path_buf())
+    job_store::valid_download_folder(value)
 }
 
 fn read_download_folder_setting(root: &Path) -> Option<PathBuf> {
@@ -2296,29 +1905,15 @@ fn aura_subtitles_dir() -> io::Result<PathBuf> {
 }
 
 fn safe_id(value: &str) -> Option<String> {
-    if value.is_empty() || value.len() > 128 {
-        return None;
-    }
-    if value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        Some(value.to_string())
-    } else {
-        None
-    }
+    job_store::safe_id(value)
 }
 
 fn job_request_path(job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(jobs_dir()?.join(format!("{safe}.request.json")))
+    job_store::request_path_in(&jobs_dir()?, job_id)
 }
 
 fn job_state_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(directory.join(format!("{safe}.state.json")))
+    job_store::state_path_in(directory, job_id)
 }
 
 fn job_state_path(job_id: &str) -> io::Result<PathBuf> {
@@ -2326,9 +1921,7 @@ fn job_state_path(job_id: &str) -> io::Result<PathBuf> {
 }
 
 fn job_cancel_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(directory.join(format!("{safe}.cancel")))
+    job_store::cancel_path_in(directory, job_id)
 }
 
 fn job_cancel_path(job_id: &str) -> io::Result<PathBuf> {
@@ -2341,9 +1934,7 @@ fn job_cancel_path(job_id: &str) -> io::Result<PathBuf> {
 /// terminal and drops the partial file's future, pause keeps yt-dlp's `.part`
 /// so a later resume continues from the same byte.
 fn job_pause_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let safe = safe_id(job_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
-    Ok(directory.join(format!("{safe}.pause")))
+    job_store::pause_path_in(directory, job_id)
 }
 
 fn job_pause_path(job_id: &str) -> io::Result<PathBuf> {
@@ -2386,7 +1977,7 @@ fn restart_job(job_id: &str) -> io::Result<()> {
     persist_job_state(&mut state)?;
 
     let request_path_text = request_path.to_string_lossy().into_owned();
-    spawn_detached(&["--run-job", &request_path_text])
+    process::spawn_detached(&["--run-job", &request_path_text])
 }
 
 /// Writes the shared download folder into `settings.json`.
@@ -2458,93 +2049,20 @@ fn open_media_file(_file_name: &str) -> io::Result<PathBuf> {
     ))
 }
 
-fn replace_file_atomic(temporary: &Path, path: &Path) -> io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        let source = temporary
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        let destination = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        let result = unsafe {
-            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-                source.as_ptr(),
-                destination.as_ptr(),
-                windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
-                    | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if result == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        return Ok(());
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        fs::rename(temporary, path)
-    }
-}
-
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temporary = PathBuf::from(format!(
-        "{}.{}.{}.tmp",
-        path.display(),
-        std::process::id(),
-        NEXT_SUBTITLE_JOB_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        replace_file_atomic(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    job_store::write_bytes_atomic(path, bytes)
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> io::Result<()> {
-    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
-    write_bytes_atomic(path, &bytes)
+    job_store::write_json_atomic(path, value)
 }
 
 fn read_job_state(path: &Path) -> Option<JobState> {
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    job_store::read_json(path)
 }
 
 fn list_job_states_in(directory: &Path) -> io::Result<Vec<JobState>> {
-    let mut states = Vec::new();
-    for entry in fs::read_dir(directory)? {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("");
-        if !name.ends_with(".state.json") {
-            continue;
-        }
-        if let Some(state) = read_job_state(&path) {
-            states.push(state);
-        }
-    }
-    states.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    states.truncate(100);
-    Ok(states)
+    job_store::list_job_states_in(directory)
 }
 
 fn list_job_states() -> io::Result<Vec<JobState>> {
@@ -2552,9 +2070,7 @@ fn list_job_states() -> io::Result<Vec<JobState>> {
 }
 
 fn persist_job_state_in(directory: &Path, state: &mut JobState, updated_at: u64) -> io::Result<()> {
-    fs::create_dir_all(directory)?;
-    state.updated_at = updated_at;
-    write_json_atomic(&job_state_path_in(directory, &state.job_id)?, state)
+    job_store::persist_job_state_in(directory, state, updated_at)
 }
 
 fn persist_job_state(state: &mut JobState) -> io::Result<()> {
@@ -2723,11 +2239,7 @@ fn initial_media_writer_state(
         },
         title: (!request.title.trim().is_empty()).then(|| request.title.clone()),
         error: None,
-        progress: request.total.filter(|total| *total > 0).map(|total| {
-            ((bytes_written as f64 / total as f64) * 100.0)
-                .round()
-                .clamp(0.0, 99.0) as u8
-        }),
+        progress: legacy_writer::progress(bytes_written, request.total),
         file_name: final_path
             .file_name()
             .map(|value| value.to_string_lossy().into_owned()),
@@ -2836,18 +2348,14 @@ fn handle_media_request(request: &Request, writer: &mut Option<MediaWriter>) {
                 return;
             }
             let active = writer.as_mut().expect("matching writer checked above");
-            match BASE64.decode(request.data.as_bytes()) {
+            match legacy_writer::decode_chunk(&request.data) {
                 Ok(bytes) => match active.file.write_all(&bytes) {
                     Ok(()) => {
                         active.bytes_written =
                             active.bytes_written.saturating_add(bytes.len() as u64);
                         active.state.completed = Some(active.bytes_written);
                         active.state.progress =
-                            active.state.total.filter(|total| *total > 0).map(|total| {
-                                ((active.bytes_written as f64 / total as f64) * 100.0)
-                                    .round()
-                                    .clamp(0.0, 99.0) as u8
-                            });
+                            legacy_writer::progress(active.bytes_written, active.state.total);
                         active.state.status_text = match active.state.progress {
                             Some(progress) => format!("브라우저에서 미디어를 받는 중… {progress}%"),
                             None => format!(
@@ -2856,13 +2364,12 @@ fn handle_media_request(request: &Request, writer: &mut Option<MediaWriter>) {
                             ),
                         };
                         let now = now_millis();
-                        if now.saturating_sub(active.last_state_persisted_at)
-                            >= MEDIA_STATE_PERSIST_INTERVAL_MS
-                            || active
-                                .bytes_written
-                                .saturating_sub(active.last_state_persisted_bytes)
-                                >= MEDIA_STATE_PERSIST_BYTE_INTERVAL
-                        {
+                        if legacy_writer::should_persist_state(
+                            now,
+                            active.last_state_persisted_at,
+                            active.bytes_written,
+                            active.last_state_persisted_bytes,
+                        ) {
                             let _ = persist_job_state(&mut active.state);
                             active.last_state_persisted_at = now;
                             active.last_state_persisted_bytes = active.bytes_written;
@@ -3028,98 +2535,20 @@ fn handle_media_request(request: &Request, writer: &mut Option<MediaWriter>) {
 }
 
 fn command_tools() -> io::Result<(PathBuf, PathBuf, PathBuf)> {
-    let tools = tools_dir()?;
-    let yt_dlp = tools.join("yt-dlp.exe");
-    let node = tools.join("node.exe");
-    let ffmpeg = tools.join("ffmpeg");
-    if !yt_dlp.is_file() || !ffmpeg.join("ffmpeg.exe").is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "tools-not-installed",
-        ));
-    }
-    Ok((yt_dlp, node, ffmpeg))
+    youtube::command_tools(&tools_dir()?)
 }
 
 fn apply_hidden_process(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
+    youtube::apply_hidden_process(command);
 }
 
 fn apply_ytdlp_runtime(command: &mut Command, node: &Path, ffmpeg: &Path) {
-    command.arg("--ffmpeg-location").arg(ffmpeg);
-    // The detached native host reads yt-dlp through UTF-8 Rust pipes. Windows
-    // filename substitutions can include characters outside the active OEM
-    // code page (for example `⧸`), which otherwise makes yt-dlp finish the
-    // file and then exit with Errno 22 while printing AURA_FILE.
-    command.arg("--encoding").arg("utf-8");
-    // yt-dlp's Windows filename sanitizer maps `/` to `⧸`, a glyph absent
-    // from the manager's Korean UI font. Normalize path separators in the
-    // title before filename sanitization so both metadata and filenames use a
-    // readable ASCII separator without stripping Korean text.
-    command
-        .arg("--replace-in-metadata")
-        .arg("title")
-        .arg(r"\s*[/\\]\s*")
-        .arg(" - ");
-    // YouTube media URLs are short-lived and occasionally return a transient
-    // 403 even though a fresh extraction succeeds immediately. Let yt-dlp
-    // retry bounded transport/extractor failures before surfacing the job as
-    // failed; the manager's explicit Retry action remains the final fallback.
-    command
-        .arg("--retries")
-        .arg("3")
-        .arg("--fragment-retries")
-        .arg("3")
-        .arg("--extractor-retries")
-        .arg("3")
-        .arg("--retry-sleep")
-        .arg("http:linear=1::2");
-    if node.is_file() {
-        command
-            .arg("--js-runtimes")
-            .arg(format!("node:{}", node.display()));
-    }
+    youtube::apply_runtime(command, node, ffmpeg);
 }
 
 fn youtube_info(request: &Request) -> Result<Value, String> {
-    if !(request.url.starts_with("https://") || request.url.starts_with("http://")) {
-        return Err("invalid-youtube-url".into());
-    }
-    let (yt_dlp, node, ffmpeg) = command_tools().map_err(|error| error.to_string())?;
-    let mut command = Command::new(yt_dlp);
-    command
-        .arg("--dump-single-json")
-        .arg("--skip-download")
-        .arg("--no-playlist")
-        .arg("--no-warnings");
-    apply_ytdlp_runtime(&mut command, &node, &ffmpeg);
-    command.arg(&request.url);
-    apply_hidden_process(&mut command);
-    let output = command.output().map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        return Err(detail.trim().chars().take(500).collect());
-    }
-    let parsed: Value =
-        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
-    let title = parsed
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let mut qualities = parsed
-        .get("formats")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|format| format.get("height").and_then(Value::as_u64))
-        .filter(|height| *height > 0 && *height <= 4320)
-        .collect::<Vec<_>>();
-    qualities.sort_unstable_by(|left, right| right.cmp(left));
-    qualities.dedup();
-    Ok(json!({ "title": title, "qualities": qualities }))
+    let tools = command_tools().map_err(|error| error.to_string())?;
+    youtube::info(&request.url, tools)
 }
 
 fn initial_job_state(request: &Request) -> JobState {
@@ -3175,7 +2604,7 @@ where
 }
 
 fn should_restart_youtube_download(error: &str, attempt: u8) -> bool {
-    attempt < 2 && error.to_ascii_lowercase().contains("http error 403")
+    youtube::should_restart(error, attempt)
 }
 
 fn should_retry_media_download_with_impersonation(
@@ -4052,36 +3481,14 @@ where
     let outcome = loop {
         attempt += 1;
         let mut command = Command::new(&yt_dlp);
-        command
-            .arg("--newline")
-            .arg("--no-playlist")
-            .arg("--windows-filenames")
-            // Explicit so a resumed job continues the existing `.part` instead of
-            // starting the transfer over. This is yt-dlp's default, stated here
-            // because pause and resume depend on it.
-            .arg("--continue")
-            .arg("--merge-output-format")
-            .arg("mp4")
-            .arg("--paths")
-            .arg(format!("home:{}", downloads.display()))
-            .arg("--output")
-            .arg(YOUTUBE_OUTPUT_TEMPLATE)
-            .arg("--print")
-            .arg("before_dl:AURA_TITLE:%(title)s")
-            .arg("--print")
-            .arg("after_move:AURA_FILE:%(filepath)s")
-            .arg("--progress-template")
-            .arg("download:AURA_PROGRESS:%(progress._percent_str)s %(progress._speed_str)s ETA %(progress._eta_str)s")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        apply_ytdlp_runtime(&mut command, &node, &ffmpeg);
-        if let Some(height) = quality_height(&request.quality) {
-            command
-                .arg("--format")
-                .arg(format!("bv*[height<={height}]+ba/b[height<={height}]"));
-        }
-        command.arg(&request.url);
-        apply_hidden_process(&mut command);
+        youtube::configure_download_command(
+            &mut command,
+            &request.url,
+            quality_height(&request.quality),
+            &downloads,
+            &node,
+            &ffmpeg,
+        );
 
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -4219,20 +3626,6 @@ where
     update_state(&mut state, &notify);
 }
 
-fn spawn_detached(arguments: &[&str]) -> io::Result<()> {
-    let executable = env::current_exe()?;
-    let mut command = Command::new(executable);
-    command.args(arguments);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command.spawn()?;
-    Ok(())
-}
-
 fn spawn_job_runner(request: &Request) -> io::Result<()> {
     let request_path = job_request_path(&request.job_id)?;
     write_json_atomic(&request_path, request)?;
@@ -4242,7 +3635,7 @@ fn spawn_job_runner(request: &Request) -> io::Result<()> {
         let _ = fs::remove_file(cancel_path);
     }
     let request_path_text = request_path.to_string_lossy().into_owned();
-    spawn_detached(&["--run-job", &request_path_text])?;
+    process::spawn_detached(&["--run-job", &request_path_text])?;
     Ok(())
 }
 
@@ -4250,17 +3643,13 @@ fn spawn_job_runner(request: &Request) -> io::Result<()> {
 ///
 /// The window lives in a separate crate (`companion-gui`) so the native
 /// messaging host stays a small stdio process with no GUI dependencies.
-#[cfg(target_os = "windows")]
-const MANAGER_EXECUTABLE: &str = "aura-media-manager.exe";
-
 fn spawn_manager() -> io::Result<()> {
     #[cfg(target_os = "windows")]
     if focus_existing_manager() {
         return Ok(());
     }
     let mut command = Command::new(manager_executable()?);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    process::apply_detached_creation_flags(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -4296,20 +3685,7 @@ fn manager_executable() -> io::Result<PathBuf> {
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no install directory"))?;
-    manager_executable_in(&directory)
-}
-
-/// Split out so the host-only install case is testable without a real install.
-#[cfg(target_os = "windows")]
-fn manager_executable_in(directory: &Path) -> io::Result<PathBuf> {
-    let path = directory.join(MANAGER_EXECUTABLE);
-    if path.is_file() {
-        return Ok(path);
-    }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "manager-not-installed",
-    ))
+    process::manager_executable_in(&directory)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -4357,6 +3733,15 @@ fn companion_capabilities() -> &'static [&'static str] {
     ]
 }
 
+fn hello_response() -> Value {
+    json!({
+        "ok": true,
+        "protocol": PROTOCOL_VERSION,
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": companion_capabilities(),
+    })
+}
+
 fn run_native_host() {
     if let Ok(directory) = jobs_dir() {
         let _ = cleanup_stale_subtitle_requests_in(&directory, now_millis());
@@ -4364,15 +3749,7 @@ fn run_native_host() {
     let mut writer: Option<MediaWriter> = None;
     while let Ok(Some(request)) = read_message() {
         match request.kind.as_str() {
-            "hello" => reply(
-                &request,
-                json!({
-                    "ok": true,
-                    "protocol": PROTOCOL_VERSION,
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "capabilities": companion_capabilities(),
-                }),
-            ),
+            "hello" => reply(&request, hello_response()),
             "status" => {
                 let subtitle_ready = companion_root()
                     .ok()
@@ -4930,7 +4307,7 @@ mod tests {
         let mut oversized_url = sample_command();
         oversized_url["media"]["resourceUrl"] = Value::String(format!(
             "https://media.example/{}",
-            "x".repeat(MAX_SUBTITLE_URL_BYTES)
+            "x".repeat(subtitle::MAX_URL_BYTES)
         ));
         let url_error = parse_subtitle_command_bytes(
             serde_json::to_vec(&oversized_url)
@@ -5752,7 +5129,7 @@ mod tests {
             assert!(parse_media_download_command_bytes(&encoded).is_err());
         }
 
-        let oversized = vec![b'x'; MAX_MEDIA_DOWNLOAD_MESSAGE_BYTES + 1];
+        let oversized = vec![b'x'; media_download::MAX_MESSAGE_BYTES + 1];
         assert_eq!(
             parse_media_download_command_bytes(&oversized)
                 .expect_err("oversized payload is rejected")
@@ -5967,14 +5344,69 @@ mod tests {
         let fixture: Value =
             serde_json::from_str(include_str!("../../test-fixtures/companion/hello-v2.json"))
                 .expect("shared hello fixture parses");
-        assert_eq!(fixture["protocol"], PROTOCOL_VERSION);
-        let expected = fixture["capabilities"]
-            .as_array()
-            .expect("capabilities are an array")
-            .iter()
-            .map(|value| value.as_str().expect("capability is text"))
-            .collect::<Vec<_>>();
-        assert_eq!(companion_capabilities(), expected.as_slice());
+        let mut actual = hello_response();
+        actual
+            .as_object_mut()
+            .expect("hello response is an object")
+            .remove("version");
+        assert_eq!(actual["ok"], true);
+        actual
+            .as_object_mut()
+            .expect("hello response is an object")
+            .remove("ok");
+        assert_eq!(actual, fixture);
+
+        let correlated = protocol::reply_body("hello-request-123", hello_response());
+        assert_eq!(correlated["requestId"], "hello-request-123");
+        assert_eq!(correlated["protocol"], fixture["protocol"]);
+        assert_eq!(correlated["capabilities"], fixture["capabilities"]);
+    }
+
+    #[test]
+    fn shared_job_state_fixtures_preserve_current_and_legacy_disk_json() {
+        let current_json: Value = serde_json::from_str(include_str!(
+            "../../test-fixtures/companion/job-state-v1.json"
+        ))
+        .expect("current state fixture parses");
+        let current: JobState =
+            serde_json::from_value(current_json.clone()).expect("current state loads");
+        assert_eq!(current.job_id, "job-state-fixture");
+        assert_eq!(current.execution_status.as_deref(), Some("running"));
+        assert_eq!(current.progress, Some(42));
+
+        let serialized = serde_json::to_value(&current).expect("current state serializes");
+        for key in [
+            "jobId",
+            "jobType",
+            "requestId",
+            "candidateId",
+            "inputKind",
+            "executionStatus",
+            "status",
+            "statusText",
+            "title",
+            "progress",
+            "fileName",
+            "createdAt",
+            "updatedAt",
+        ] {
+            assert_eq!(serialized[key], current_json[key], "field drifted: {key}");
+        }
+        assert!(serialized.get("futureField").is_none());
+
+        let legacy_json: Value = serde_json::from_str(include_str!(
+            "../../test-fixtures/companion/job-state-legacy-v1.json"
+        ))
+        .expect("legacy state fixture parses");
+        let legacy: JobState =
+            serde_json::from_value(legacy_json.clone()).expect("legacy state loads");
+        assert_eq!(legacy.job_id, legacy_json["jobId"]);
+        assert_eq!(legacy.status, legacy_json["status"]);
+        assert_eq!(
+            legacy.file_name.as_deref(),
+            legacy_json["fileName"].as_str()
+        );
+        assert_eq!(legacy.created_at, 0);
     }
 
     #[test]
@@ -6000,9 +5432,9 @@ mod tests {
         assert!(arguments
             .windows(4)
             .any(|window| { window == ["--replace-in-metadata", "title", r"\s*[/\\]\s*", " - "] }));
-        assert!(!YOUTUBE_OUTPUT_TEMPLATE.contains("%(id)"));
+        assert!(!youtube::OUTPUT_TEMPLATE.contains("%(id)"));
         assert_eq!(
-            YOUTUBE_OUTPUT_TEMPLATE,
+            youtube::OUTPUT_TEMPLATE,
             "[%(height)sp] %(title).170B.%(ext)s"
         );
     }
@@ -6021,29 +5453,5 @@ mod tests {
             "ERROR: Video unavailable",
             1
         ));
-    }
-
-    #[test]
-    fn a_host_only_install_reports_that_the_window_binary_is_missing() {
-        // The window lives in a separate binary now. When only the host is
-        // installed, `show-ui` must say so rather than appearing to do nothing.
-        let directory = test_directory();
-        fs::create_dir_all(&directory).expect("directory creates");
-        assert!(
-            !directory.join(MANAGER_EXECUTABLE).exists(),
-            "the fixture must not contain a manager binary"
-        );
-
-        let error = manager_executable_in(&directory).expect_err("resolution fails");
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert_eq!(error.to_string(), "manager-not-installed");
-
-        fs::write(directory.join(MANAGER_EXECUTABLE), b"stub").expect("stub writes");
-        assert_eq!(
-            manager_executable_in(&directory).expect("resolution succeeds"),
-            directory.join(MANAGER_EXECUTABLE)
-        );
-
-        fs::remove_dir_all(directory).expect("test directory removes");
     }
 }

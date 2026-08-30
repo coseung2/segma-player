@@ -280,6 +280,39 @@ each extraction.
 Exit gate: `main.rs` is composition-oriented, all frozen fixtures are
 byte/field compatible, and the host test suite has no behavior regression.
 
+#### Phase 2 result — 2026-08-30
+
+Completed as a behavior-neutral native-host split at development version
+`0.4.56`:
+
+- Native Messaging framing, typed parse/reply correlation, and message limits
+  now live in `protocol.rs`.
+- Companion path validation, atomic JSON, shared `JobState`, state listing, and
+  persistence now live in `job_store.rs`.
+- Detached self-launch and manager-binary resolution now live in `process.rs`.
+- The bounded `media-download-v1` command model, public URL validation, secret
+  rejection, and field validation now live in `media_download.rs`.
+- yt-dlp tool discovery, Windows process setup, runtime flags, info extraction,
+  download command construction, and the bounded 403 retry predicate now live
+  in `youtube.rs`.
+- Local subtitle path/audio command primitives and title encoding now live in
+  `subtitle.rs`; the long-running transport/state orchestration remains in
+  `main.rs` until a later behavior-preserving follow-up has an independent
+  executable seam.
+- Legacy `media-open/chunk/close/abort/suspend` chunk decoding, persistence
+  thresholds, and progress calculation are isolated in `legacy_writer.rs`;
+  dispatch stays in `main.rs` to preserve reply and manager-launch behavior.
+- Host-side fixture checks now cover every disk ABI filename, current and
+  legacy job-state deserialization/serialization, the real hello body, and
+  `requestId` reply correlation. Source-text architecture checks were narrowed
+  to the retired Win32 per-job UI invariant; Rust behavior tests own the moved
+  process and disk contracts.
+
+Validation at this checkpoint: native-host 52 passed; focused Companion
+architecture/client 21 passed; Cargo check and Rust formatting passed;
+development staging refreshed with 54 files at `0.4.56`. No live installed
+Native Messaging or browser flow is claimed by this refactor phase.
+
 ### Phase 3 — unify the host/GUI disk contract
 
 Create a small local shared Rust crate or module containing only stable disk ABI

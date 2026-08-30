@@ -4,31 +4,30 @@ import { readFile } from "node:fs/promises";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
-test("companion jobs are detached from the native bridge", async () => {
-  const source = await read("./native-host/src/main.rs");
-  // A submitted job runs in its own process so the transfer survives the
-  // browser closing the native messaging port.
-  assert.match(source, /spawn_detached\(&\["--run-job", &request_path_text\]\)/);
-  assert.match(source, /Some\("--run-job"\)/);
-  assert.match(source, /execute_download\(request, \|_\| \{\}\)/);
-  assert.match(source, /read_job_state/);
-});
-
 test("the per-job Win32 progress window is gone and the manager binary owns the UI", async () => {
-  const source = await read("./native-host/src/main.rs");
+  const [source, process, nativeModules] = await Promise.all([
+    read("./native-host/src/main.rs"),
+    read("./native-host/src/process.rs"),
+    Promise.all([
+      "main.rs",
+      "process.rs",
+      "protocol.rs",
+      "job_store.rs",
+    ].map((file) => read(`./native-host/src/${file}`))).then((parts) => parts.join("\n")),
+  ]);
   // Progress used to open a throwaway Win32 window per job. The manager window
   // in `companion-gui` replaced it, so the host must carry no window code and
   // must not spawn a per-job UI process.
-  assert.doesNotMatch(source, /--job-ui/);
-  assert.doesNotMatch(source, /mod windows_ui/);
-  assert.doesNotMatch(source, /run_job_ui/);
-  assert.doesNotMatch(source, /CreateWindowExW/);
+  assert.doesNotMatch(nativeModules, /--job-ui/);
+  assert.doesNotMatch(nativeModules, /mod windows_ui/);
+  assert.doesNotMatch(nativeModules, /run_job_ui/);
+  assert.doesNotMatch(nativeModules, /CreateWindowExW/);
 
   // `--manager` stays so an old Start Menu shortcut still opens the window, and
   // it must resolve the separate binary rather than re-running the host.
   assert.match(source, /Some\("--manager"\)/);
-  assert.match(source, /MANAGER_EXECUTABLE: &str = "aura-media-manager\.exe"/);
-  assert.match(source, /manager-not-installed/);
+  assert.match(process, /MANAGER_EXECUTABLE: &str = "aura-media-manager\.exe"/);
+  assert.match(process, /manager-not-installed/);
   assert.match(source, /focus_existing_manager/);
   assert.match(source, /SetForegroundWindow/);
   assert.match(source, /request\.show_ui\.unwrap_or\(true\)/);

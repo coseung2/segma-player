@@ -32,10 +32,10 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | Phase | Status | Completion evidence |
 | --- | --- | --- |
 | 0. Stable baseline | Complete | 2026-08-30 baseline plus committed PiP result |
-| 1. Trustworthy tests and frozen contracts | Reopened | Complete missing status/rejection/folder/diagnostic fixtures and test categorization |
-| 2. Native-host module split | Reopened | Move remaining media/subtitle execution out of `main.rs` |
-| 3. Shared host/GUI disk contract | Reopened | Restore host-only durable `JobState` writer ownership |
-| 4. Shipped extension split | Reopened | Replace route source slicing with handoff behavior tests |
+| 1. Trustworthy tests and frozen contracts | In progress | Missing status/rejection/folder/diagnostic fixtures are frozen; test categorization remains |
+| 2. Native-host module split | Complete | Media execution and subtitle transport/state orchestration moved out of `main.rs`; native host 58 passed |
+| 3. Shared host/GUI disk contract | Complete | Host is the only durable `JobState` writer; manager writes markers and transient notices only |
+| 4. Shipped extension split | Complete | Ranked-candidate and pasted-link routes share one behavior-tested Companion router |
 | 5. Packaging and retired runtime | Reopened | Physically quarantine retained legacy extension source and tests |
 | 6. Native manager split | Reopened | Finish player/PiP module boundary and re-audit native ownership |
 | 7. Integrated validation and handoff | Reopened | Pending remediation, version reconciliation, staging, and fresh audit |
@@ -55,7 +55,7 @@ label is therefore withdrawn until all of these items are closed:
 - make the host the only durable `JobState` writer while the manager writes
   only command/request markers and keeps transient feedback in memory;
 - move retained extension-primary engines and their tests into an explicit
-  compatibility area without allowing them into the 57-file shipped graph;
+  compatibility area without allowing them into the 58-file shipped graph;
 - finish the manager player/PiP module boundary and reconcile all product
   component versions before rebuilding staging.
 
@@ -281,6 +281,17 @@ cross-process fixtures.
   was treated as baseline and not rewritten.
 - Both Rust format checks and `git diff --check` pass after formatting.
 
+#### Phase 1 remediation — 2026-08-31
+
+- Added shared `status-v2`, media-command rejection, download-folder, and
+  redacted-diagnostic fixtures under `test-fixtures/companion/`.
+- JavaScript and Rust tests consume the same fixtures for response correlation,
+  stable rejection codes, path validation, and public diagnostic redaction.
+- Replaced ranked-candidate/pasted-link source slicing with behavior tests over
+  the shared `background-download-router.js` handoff.
+- Test categorization remains part of the Phase 5 compatibility quarantine, so
+  Phase 1 stays in progress until those runnable category commands land.
+
 ### Phase 2 — split the native host inside the existing crate
 
 Move code without changing JSON, CLI, error, job, or execution behavior. The
@@ -302,7 +313,7 @@ each extraction.
 Exit gate: `main.rs` is composition-oriented, all frozen fixtures are
 byte/field compatible, and the host test suite has no behavior regression.
 
-#### Phase 2 result — 2026-08-30
+#### Phase 2 result — 2026-08-31
 
 Completed as a behavior-neutral native-host split at development version
 `0.4.56`:
@@ -317,10 +328,12 @@ Completed as a behavior-neutral native-host split at development version
 - yt-dlp tool discovery, Windows process setup, runtime flags, info extraction,
   download command construction, and the bounded 403 retry predicate now live
   in `youtube.rs`.
-- Local subtitle path/audio command primitives and title encoding now live in
-  `subtitle.rs`; the long-running transport/state orchestration remains in
-  `main.rs` until a later behavior-preserving follow-up has an independent
-  executable seam.
+- Subtitle command validation, HTTP transport, remote response parsing,
+  cancellation, audio extraction/upload, VTT normalization and saving, and the
+  long-running state orchestration now live in `subtitle.rs`.
+- Progressive range execution, adaptive concurrency, cancellation/pause
+  handling, browser-context yt-dlp preparation, and media state updates now
+  live in `media_download.rs`.
 - Legacy `media-open/chunk/close/abort/suspend` chunk decoding, persistence
   thresholds, and progress calculation are isolated in `legacy_writer.rs`;
   dispatch stays in `main.rs` to preserve reply and manager-launch behavior.
@@ -330,10 +343,10 @@ Completed as a behavior-neutral native-host split at development version
   to the retired Win32 per-job UI invariant; Rust behavior tests own the moved
   process and disk contracts.
 
-Validation at this checkpoint: native-host 52 passed; focused Companion
-architecture/client 21 passed; Cargo check and Rust formatting passed;
-development staging refreshed with 54 files at `0.4.56`. No live installed
-Native Messaging or browser flow is claimed by this refactor phase.
+Validation after remediation: native-host 58 passed; focused Companion
+architecture/client/background behavior tests 29 passed; Cargo check and Rust
+formatting passed; `git diff --check` passed. No live installed Native
+Messaging or browser flow is claimed by this behavior-preserving extraction.
 
 ### Phase 3 — unify the host/GUI disk contract
 
@@ -379,6 +392,17 @@ passed; focused manager jobs 38 passed and full manager 185 passed; Rust format
 checks passed; manager Cargo check retained only three pre-existing
 unused-method warnings; development staging refreshed with 54 files at
 `0.4.57`.
+
+#### Phase 3 remediation — 2026-08-31
+
+- Removed the manager's durable state rewrites for cancel, pause, restart, and
+  subtitle startup. The GUI now writes only request/marker files and launches
+  the existing host runner.
+- Row-action feedback is held in transient manager notice state, and library
+  subtitle startup uses the existing Native Messaging command so the host
+  creates the initial durable state.
+- Shared manager tests assert that action initiation leaves existing
+  `JobState` bytes unchanged. Host-only durable writer ownership is restored.
 
 ### Phase 4 — simplify and split the shipped extension
 
@@ -446,6 +470,16 @@ passed. No Chrome/Whale or installed Companion interaction was run for this
 behavior-neutral split, so live validation is `NOT_RUN` and no live behavior is
 claimed.
 
+#### Phase 4 remediation — 2026-08-31
+
+- Added `background-download-router.js` as the single candidate/link routing
+  boundary and included it in the packaged runtime declaration.
+- Behavior tests now prove that ranked candidates and pasted links converge on
+  the same bounded Companion handoff; source-slice/index assertions were
+  removed from this route.
+- The packaged closure is therefore 58 files, not the 57-file count recorded by
+  the first Phase 5/7 pass.
+
 ### Phase 5 — unify packaging and quarantine retired runtime
 
 1. Make the staging/store runtime allowlist one source of truth consumed or
@@ -484,7 +518,7 @@ Completed at development version `0.4.59`:
   `options.html` and `options.js` were removed from the shipped graph. Legacy
   browser download, player, subtitle, license, collection, and file-writer
   source remains only as explicit reference/test code outside the package.
-- `runtime-graph.test.mjs` proves the current 57-file closure and rejects both a
+- `runtime-graph.test.mjs` proved the then-current 57-file closure and rejects both a
   synthetic retired-module import and an unreachable allowlist addition. The
   obsolete duplicate expected-file list in the store package test was removed.
 - Current README, documentation map, and site/provider mode contract now
@@ -604,7 +638,9 @@ Completed at development handoff version `0.4.61`:
 - `git diff --check`: passed.
 
 The Pro development staging directory was rebuilt from the `0.4.61` source
-manifest and audited as the exact 57-file runtime graph. No development ZIP was
+manifest and audited as the exact then-current 57-file runtime graph. The
+shared background download router subsequently raised the current graph to 58
+files, which will be re-audited in the final handoff. No development ZIP was
 created. This final phase changed only the handoff version and plan status after
 the integrated checks; it did not change runtime behavior.
 

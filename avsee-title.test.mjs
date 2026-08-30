@@ -2,12 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { avseeSite } from "./sites/avsee/profile.js";
 import { avseePlayerFrameUrl, avseeTitleFixtures } from "./sites/avsee/regressions.js";
 import { isPlayerFrameUrl, siteProfileForUrls, titleSelectorsForPage } from "./sites/registry.js";
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (value) => value.slice(1)));
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const BOARD_URL = "https://01.avsee.is/bbs/board.php?bo_table=javmgs&wr_id=90512";
 
 /**

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   availableActions,
   detailLine,
@@ -33,7 +34,7 @@ import {
   TransportError,
 } from "./companion-ui/scripts/transport.js";
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (value) => value.slice(1)));
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const UI_DIRECTORY = path.join(ROOT, "companion-ui");
 
 async function readFixture() {

@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (value) => value.slice(1)));
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const TEXT_EXTENSIONS = new Set([".css", ".html", ".js", ".json", ".md", ".mjs", ".ps1", ".rs", ".toml"]);
 const SKIP_DIRECTORIES = new Set([".codegraph", ".git", "_metadata", "artifacts", "dist", "node_modules", "target"]);
 

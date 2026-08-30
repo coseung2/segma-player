@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { makeCandidate } from "../candidate.js";
-import { SITE_PROFILES, siteProfileForUrls } from "./registry.js";
+import {
+  SITE_PROFILES,
+  isPlayerFrameUrl,
+  siteProfileForUrls,
+  titleSelectorsForPage,
+} from "./registry.js";
 
 test("site profiles keep module selection local to one site file", () => {
   const missav = siteProfileForUrls("https://missav123.com/ko/example");
@@ -58,6 +63,42 @@ test("Recu keeps mediafront archive streams on the shared HLS downloader", () =>
   assert.equal(profile.primaryMode, "HLS_MANIFEST");
   assert.equal(profile.modules.primaryDownloader, "hls");
   assert.deepEqual(profile.modules.fallbackDownloaders, ["progressive"]);
+});
+
+test("Gogoanime keeps the episode title and Megaplay player frame in the site profile", () => {
+  const pageUrl = "https://gogoanime.by/bleach-sennen-kessen-hen-kashin-tan-episode-4-english-subbed/";
+  const profile = siteProfileForUrls(pageUrl);
+  assert.equal(profile.id, "gogoanime");
+  assert.equal(profile.primaryMode, "HLS_MANIFEST");
+  assert.equal(profile.modules.primaryDownloader, "hls");
+  assert.deepEqual(titleSelectorsForPage(pageUrl), ["article h1", "h1"]);
+  assert.equal(isPlayerFrameUrl("https://gogoanime.by/player/?source=embed&url=encoded"), true);
+  assert.equal(isPlayerFrameUrl("https://megaplay.su/embed.php?sid=encoded"), false);
+});
+
+test("AnimePahe keeps both documented domains on the progressive Blogger-video path", () => {
+  for (const host of ["animepahe.ng", "animepahe.ch"]) {
+    const pageUrl = `https://${host}/sample-episode/`;
+    const profile = siteProfileForUrls(pageUrl);
+    assert.equal(profile.id, "animepahe");
+    assert.equal(profile.primaryMode, "DIRECT_PROGRESSIVE");
+    assert.equal(profile.modules.primaryDownloader, "progressive");
+    assert.deepEqual(titleSelectorsForPage(pageUrl), ["article h1", "h1"]);
+  }
+});
+
+test("Zoro, AniWatch, and HiAnime bookmarks share one stable site policy", () => {
+  for (const url of [
+    "https://zoro.to/watch/sample?ep=1",
+    "https://aniwatch.to/watch/sample?ep=1",
+    "https://hianime.to/watch/sample?ep=1",
+    "https://hianime.me/watch/sample?ep=1",
+  ]) {
+    const profile = siteProfileForUrls(url);
+    assert.equal(profile.id, "zoro");
+    assert.equal(profile.primaryMode, "PLAYER_API");
+    assert.deepEqual(profile.modules.providers, ["player-api", "hlsjs", "generic"]);
+  }
 });
 
 test("site registry ids and host ownership are unique", () => {

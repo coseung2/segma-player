@@ -799,6 +799,77 @@ test.skip("legacy remote YouTube server failure path moved to Companion", async 
   assert.match(result.response.error || "", /YouTube 서버에 연결할 수 없습니다|서버 주소를 확인/);
 });
 
+test("Blogger googlevideo media remains detectable when embedded by Gogoanime", async () => {
+  const handler = runtimeListeners.onMessage[0];
+  handler({ type: "clear-tab", tabId: 1 }, popupSender, () => {});
+  let exactHeading = "Futsutsuka na Akujo dewa Gozaimasu ga: Suuguu Chouso Torikae Den Episode 8 English Subbed";
+  let titleSelectorRequests = 0;
+  tabsSendHandler = async (_tabId, message, options) => {
+    if (message?.type === "set-title-selectors") {
+      assert.deepEqual(options, { frameId: 0 });
+      titleSelectorRequests += 1;
+      return { ok: true, pageTitle: exactHeading };
+    }
+    return null;
+  };
+
+  handler({
+    type: "resource",
+    resourceUrl: "https://rr4---sn-npoe7nl6.googlevideo.com/videoplayback?id=blogger-video",
+    contentType: "video/mp4",
+    main: true,
+    frameUrl: "https://gogoanime.by/player/?source=blogger&url=encoded",
+  }, {
+    id: runtimeId,
+    tab: {
+      id: 1,
+      url: "https://gogoanime.by/futsutsuka-na-akujo-dewa-gozaimasu-ga-suuguu-chouso-torikae-den-episode-8-english-subbed/",
+      title: "Futsutsuka na Akujo dewa Gozaimasu ga: Suuguu Chouso Torikae Den Episode 8 English Subbed - Gogoanime",
+    },
+    url: "https://gogoanime.by/player/?source=blogger&url=encoded",
+    frameId: 228,
+  }, () => {});
+
+  await settle();
+
+  const listed = await runtimeMessage({ type: "list-candidates" }, popupSender);
+  assert.equal(listed.response.candidates.length, 1);
+  assert.equal(listed.response.candidates[0].siteId, "gogoanime");
+  assert.equal(listed.response.candidates[0].mediaType, "PROGRESSIVE");
+  assert.equal(listed.response.candidates[0].pageTitle, exactHeading);
+  assert.equal(listed.response.candidates[0].sourceUrl,
+    "https://gogoanime.by/player/?source=blogger&url=encoded");
+
+  handler({ type: "clear-tab", tabId: 1 }, popupSender, () => {});
+  exactHeading = "Bleach: Sennen Kessen-hen - Kashin-tan Episode 4 English Subbed";
+  handler({
+    type: "resource",
+    resourceUrl: "https://rr4---sn-npoe7nl6.googlevideo.com/videoplayback?id=blogger-video-next",
+    contentType: "video/mp4",
+    main: true,
+    frameUrl: "https://gogoanime.by/player/?source=blogger&url=next",
+  }, {
+    id: runtimeId,
+    tab: {
+      id: 1,
+      url: "https://gogoanime.by/bleach-sennen-kessen-hen-kashin-tan-episode-4-english-subbed/",
+      title: "Bleach: Sennen Kessen-hen - Kashin-tan Episode 4 English Subbed - Gogoanime",
+    },
+    url: "https://gogoanime.by/player/?source=blogger&url=next",
+    frameId: 229,
+  }, () => {});
+
+  await settle();
+
+  const rescanned = await runtimeMessage({ type: "list-candidates" }, popupSender);
+  assert.equal(rescanned.response.candidates.length, 1);
+  assert.equal(rescanned.response.candidates[0].pageTitle, exactHeading,
+    "explicit rescan must not reuse the previous page's resolved heading");
+  assert.equal(titleSelectorRequests, 2,
+    "explicit rescan must request the current page heading again");
+  tabsSendHandler = null;
+});
+
 test.skip("legacy extension subtitle handoff is now Companion-only outside the extension", async () => {
   localStorage.delete("auraLicense");
   runtimeMessages.length = 0;

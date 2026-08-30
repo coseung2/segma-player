@@ -146,13 +146,14 @@ function canonicalYouTubeUrl(value) {
 }
 
 function isYouTubeDetectionCandidate(candidate) {
-  if (canonicalYouTubeUrl(candidate?.pageUrl)) return true;
+  // googlevideo.com also backs Blogger-hosted players embedded by sites such
+  // as Gogoanime. Suppress it only for an actual YouTube page; otherwise the
+  // site's progressive video would never reach the candidate list.
+  if (canonicalYouTubeUrl(candidate?.pageUrl) || canonicalYouTubeUrl(candidate?.siteUrl)) return true;
   const resource = canonicalHttpUrl(candidate?.resourceUrl);
   if (!resource) return false;
   const host = resource.hostname.toLowerCase();
-  return host === "googlevideo.com"
-    || host.endsWith(".googlevideo.com")
-    || host === "youtube.com"
+  return host === "youtube.com"
     || host.endsWith(".youtube.com")
     || host === "youtu.be";
 }
@@ -364,6 +365,28 @@ function observeCandidate(candidate, { nonPersistent = false } = {}) {
 // profile. The background owns the registry, so it pushes them to the reporting
 // frame once per tab and the content script re-reports with the better title.
 const titleSelectorTabs = new Map();
+const resolvedTitleByTab = new Map();
+
+function validResolvedPageTitle(value) {
+  const title = typeof value === "string" ? value.trim() : "";
+  return title && [...title].length <= LIMITS.titleCharacters
+    && !/[\u0000-\u001f\u007f]/.test(title)
+    ? title
+    : "";
+}
+
+function applyResolvedTitleToTab(tabId, pageTitle) {
+  const title = validResolvedPageTitle(pageTitle);
+  if (!title) return;
+  resolvedTitleByTab.set(tabId, title);
+  for (const candidate of candidates.values()) {
+    if (candidate.tabId === tabId && titleSelectorsForPage(candidate.pageUrl, candidate.siteUrl).length) {
+      candidate.pageTitle = title;
+    }
+  }
+  rerankTabCandidates(tabId);
+  persistCandidates();
+}
 
 async function applyTitleSelectors(candidate) {
   const tabId = candidate?.tabId;
@@ -371,11 +394,20 @@ async function applyTitleSelectors(candidate) {
   const selectors = titleSelectorsForPage(candidate?.pageUrl, candidate?.siteUrl);
   if (!selectors.length) return;
 
+  const cachedTitle = resolvedTitleByTab.get(tabId);
+  if (cachedTitle) candidate.pageTitle = cachedTitle;
+
   const signature = `${candidate.siteUrl || candidate.pageUrl || ""}|${selectors.join(",")}`;
   if (titleSelectorTabs.get(tabId) === signature) return;
   titleSelectorTabs.set(tabId, signature);
 
-  await sendTabMessageWithTimeout(tabId, { type: "set-title-selectors", selectors }, 2_000);
+  const response = await sendTabMessageWithTimeout(
+    tabId,
+    { type: "set-title-selectors", selectors },
+    2_000,
+    { frameId: 0 },
+  );
+  applyResolvedTitleToTab(tabId, response?.pageTitle);
 }
 
 function persistCandidates() {
@@ -613,6 +645,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   frameLayoutsByTab.delete(tabId);
   frameStatesByTab.delete(tabId);
   tabTitleCache.delete(tabId);
+  titleSelectorTabs.delete(tabId);
+  resolvedTitleByTab.delete(tabId);
   clearDoodDirectForTab(tabId);
 });
 
@@ -625,6 +659,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   frameLayoutsByTab.delete(tabId);
   frameStatesByTab.delete(tabId);
   tabTitleCache.delete(tabId);
+  titleSelectorTabs.delete(tabId);
+  resolvedTitleByTab.delete(tabId);
   clearDoodDirectForTab(tabId);
   for (const [key, item] of candidates) {
     if (item.tabId === tabId) candidates.delete(key);
@@ -978,6 +1014,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     mainFramesByTab.delete(message.tabId);
     frameLayoutsByTab.delete(message.tabId);
     frameStatesByTab.delete(message.tabId);
+    titleSelectorTabs.delete(message.tabId);
+    resolvedTitleByTab.delete(message.tabId);
     persistCandidates();
     sendResponse({ ok: true });
     return false;

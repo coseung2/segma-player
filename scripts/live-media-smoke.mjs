@@ -32,6 +32,14 @@ const allowBlocked = process.argv.includes("--allow-blocked")
   || process.env.AURA_MONITOR_ALLOW_BLOCKED === "1";
 const requireCompanion = process.argv.includes("--require-companion")
   || process.env.AURA_MONITOR_REQUIRE_COMPANION === "1";
+const downloadCandidateMode = process.argv.includes("--download-candidate")
+  || process.env.AURA_MONITOR_DOWNLOAD_CANDIDATE === "1";
+const downloadTimeoutArgument = process.argv
+  .find((argument) => argument.startsWith("--download-timeout-seconds="))
+  ?.slice("--download-timeout-seconds=".length)
+  || process.env.AURA_MONITOR_DOWNLOAD_TIMEOUT_SECONDS
+  || "180";
+const downloadTimeoutMs = Math.max(30, Math.min(900, Number(downloadTimeoutArgument) || 180)) * 1_000;
 const disableSandbox = process.env.AURA_MONITOR_NO_SANDBOX === "1";
 const challengeWaitArgument = process.argv.find((argument) => argument === "--wait-for-challenge"
   || argument.startsWith("--wait-for-challenge="));
@@ -160,6 +168,22 @@ function evaluateCase(fixture, candidates) {
       reason: "unexpected-primary-host",
       expected: expected.primaryHost,
       actual: displayHost(primary),
+    };
+  }
+  if (expected.primaryHostSuffix && !displayHost(primary).endsWith(expected.primaryHostSuffix)) {
+    return {
+      ok: false,
+      reason: "unexpected-primary-host-suffix",
+      expected: expected.primaryHostSuffix,
+      actual: displayHost(primary),
+    };
+  }
+  if (expected.primaryTitle && primary?.pageTitle !== expected.primaryTitle) {
+    return {
+      ok: false,
+      reason: "unexpected-primary-title",
+      expected: expected.primaryTitle,
+      actual: primary?.pageTitle || "",
     };
   }
   if (expected.primaryPlayer && primary?.player !== expected.primaryPlayer) {
@@ -346,11 +370,81 @@ async function candidateSnapshot(controlPage, tabId) {
   }, tabId);
 }
 
+async function popupRescanSnapshot(controlPage, tabId) {
+  return controlPage.evaluate(async (targetTabId) => {
+    if (!Number.isInteger(targetTabId)) return { ok: false, candidates: [], error: "invalid-tab" };
+    await chrome.tabs.update(targetTabId, { active: true });
+    const button = document.querySelector("#rescan");
+    if (!(button instanceof HTMLButtonElement)) {
+      return { ok: false, candidates: [], error: "rescan-button-missing" };
+    }
+    button.click();
+    const deadline = Date.now() + 8_000;
+    while (button.disabled && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const response = await chrome.runtime.sendMessage({ type: "list-candidates", tabId: targetTabId });
+    return {
+      ok: button.disabled === false && response?.type === "candidates",
+      buttonEnabled: button.disabled === false,
+      statusText: String(document.querySelector("#status")?.textContent || "").slice(0, 160),
+      candidates: Array.isArray(response?.candidates) ? response.candidates : [],
+    };
+  }, tabId);
+}
+
 async function probeProgressiveCandidate(controlPage, candidateId) {
   return controlPage.evaluate(async (id) => chrome.runtime.sendMessage({
     type: "probe-progressive-candidate",
     candidateId: id,
   }), candidateId);
+}
+
+async function companionJobSnapshot(controlPage, jobId) {
+  return controlPage.evaluate(async (id) => {
+    const { listCompanionJobs } = await import(chrome.runtime.getURL("companion-client.js"));
+    const response = await listCompanionJobs();
+    const job = Array.isArray(response?.jobs)
+      ? response.jobs.find((item) => item?.jobId === id) || null
+      : null;
+    if (!job) return null;
+    return {
+      jobId: job.jobId,
+      status: job.status,
+      statusText: job.statusText,
+      title: job.title,
+      inputKind: job.inputKind,
+      completed: job.completed,
+      total: job.total,
+      fileName: job.fileName,
+      error: job.error,
+    };
+  }, jobId);
+}
+
+async function downloadCandidateAndWait(controlPage, candidateId) {
+  const startedAt = Date.now();
+  const accepted = await controlPage.evaluate(async (id) => chrome.runtime.sendMessage({
+    type: "download-candidate",
+    candidateId: id,
+  }), candidateId);
+  if (accepted?.ok !== true || typeof accepted.jobId !== "string") {
+    return { ok: false, reason: accepted?.error || "download-not-accepted" };
+  }
+  const deadline = Date.now() + downloadTimeoutMs;
+  let job = null;
+  while (Date.now() < deadline) {
+    job = await companionJobSnapshot(controlPage, accepted.jobId);
+    if (["completed", "failed", "cancelled"].includes(job?.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  const completedBytes = Number(job?.completed);
+  return {
+    ok: job?.status === "completed" && Number.isFinite(completedBytes) && completedBytes > 0,
+    reason: job?.status || "download-timeout",
+    elapsedMs: Date.now() - startedAt,
+    job,
+  };
 }
 
 async function nativePlaybackSnapshot(page) {
@@ -752,13 +846,16 @@ async function main() {
         }
         pageState.mediaResponses = [...new Map(mediaResponses.map((item) => [`${item.host}|${item.resourceType}|${item.status}`, item])).values()];
         pageState.nativePlayback = await nativePlaybackSnapshot(page);
-        const snapshot = await candidateSnapshot(controlPage, caseTabId);
+        const initialSnapshot = await candidateSnapshot(controlPage, caseTabId);
+        const rescanSnapshot = await popupRescanSnapshot(controlPage, caseTabId);
+        const snapshot = rescanSnapshot.ok ? rescanSnapshot : initialSnapshot;
         const candidates = snapshot.candidates.map((candidate) => ({
           id: candidate.id,
           main: candidate.main,
           classification: candidate.classification,
           score: candidate.score,
           mediaType: candidate.mediaType,
+          pageTitle: candidate.pageTitle,
           displayUrl: candidate.displayUrl,
           sourceUrl: candidate.sourceUrl,
           player: candidate.player,
@@ -837,6 +934,15 @@ async function main() {
             };
           }
         }
+        let extensionDownload = null;
+        if (downloadCandidateMode && primary) {
+          extensionDownload = await downloadCandidateAndWait(controlPage, primary.id);
+          if (extensionDownload.ok && evaluation.reason === "progressive-size-unknown") {
+            evaluation = { ok: true, reason: "extension-download-completed" };
+          } else if (!extensionDownload.ok && evaluation.ok) {
+            evaluation = { ok: false, reason: "extension-download-failed" };
+          }
+        }
         results.push({
           id: fixture.id,
           startedAt,
@@ -844,8 +950,16 @@ async function main() {
           adblockState,
           environment,
           page: pageState,
+          rescan: {
+            ok: rescanSnapshot.ok === true && rescanSnapshot.candidates.length > 0,
+            buttonEnabled: rescanSnapshot.buttonEnabled === true,
+            candidateCount: rescanSnapshot.candidates.length,
+            statusText: rescanSnapshot.statusText || "",
+            error: rescanSnapshot.error || "",
+          },
           ...evaluation,
           progressiveProbe,
+          extensionDownload,
           candidateCount: candidates.length,
           candidates: reportedCandidates,
         });
@@ -896,6 +1010,7 @@ async function main() {
     autoplay,
     allowBlocked,
     requireCompanion,
+    downloadCandidateMode,
     companionReady,
     companionStatus,
     challengeWaitSeconds,

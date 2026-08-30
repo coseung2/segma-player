@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -53,6 +53,11 @@ const MAX_SUBTITLE_AUDIO_BYTES: u64 = 80 * 1024 * 1024;
 const MAX_SUBTITLE_DURATION_SECONDS: u64 = 60 * 60;
 const MEDIA_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36";
+const PROGRESSIVE_RANGE_MIN_CONCURRENCY: usize = 2;
+const PROGRESSIVE_RANGE_INITIAL_CONCURRENCY: usize = 4;
+const PROGRESSIVE_RANGE_MAX_CONCURRENCY: usize = 16;
+const PROGRESSIVE_RANGE_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+const PROGRESSIVE_RANGE_RETRIES: usize = 3;
 static NEXT_SUBTITLE_JOB_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -3315,6 +3320,69 @@ fn progressive_total_bytes(headers: &reqwest::header::HeaderMap, offset: u64) ->
         .map(|length| length.saturating_add(offset))
 }
 
+fn progressive_content_range(headers: &reqwest::header::HeaderMap) -> Option<(u64, u64, u64)> {
+    let value = headers
+        .get(reqwest::header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?
+        .trim();
+    let value = value.strip_prefix("bytes ")?;
+    let (range, total) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = start.parse::<u64>().ok()?;
+    let end = end.parse::<u64>().ok()?;
+    let total = total.parse::<u64>().ok()?;
+    (start <= end && end < total).then_some((start, end, total))
+}
+
+fn progressive_range_concurrency_limit() -> usize {
+    thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(PROGRESSIVE_RANGE_INITIAL_CONCURRENCY)
+        .clamp(
+            PROGRESSIVE_RANGE_MIN_CONCURRENCY,
+            PROGRESSIVE_RANGE_MAX_CONCURRENCY,
+        )
+}
+
+fn progressive_range_batch(start: u64, total: u64, concurrency: usize) -> Vec<(u64, u64)> {
+    let mut ranges = Vec::new();
+    let mut cursor = start;
+    let concurrency = concurrency.clamp(
+        PROGRESSIVE_RANGE_MIN_CONCURRENCY,
+        PROGRESSIVE_RANGE_MAX_CONCURRENCY,
+    );
+    while cursor < total && ranges.len() < concurrency {
+        let end = cursor
+            .saturating_add(PROGRESSIVE_RANGE_CHUNK_BYTES - 1)
+            .min(total - 1);
+        ranges.push((cursor, end));
+        cursor = end.saturating_add(1);
+    }
+    ranges
+}
+
+fn adaptive_progressive_range_concurrency(
+    current: usize,
+    limit: usize,
+    previous_bytes_per_second: Option<f64>,
+    bytes_per_second: f64,
+) -> usize {
+    let current = current.clamp(PROGRESSIVE_RANGE_MIN_CONCURRENCY, limit);
+    let Some(previous) = previous_bytes_per_second.filter(|speed| *speed > 0.0) else {
+        return (current + 1).min(limit);
+    };
+    if bytes_per_second >= previous * 0.92 {
+        (current + 1).min(limit)
+    } else if bytes_per_second < previous * 0.65 {
+        current
+            .saturating_sub(1)
+            .max(PROGRESSIVE_RANGE_MIN_CONCURRENCY)
+    } else {
+        current
+    }
+}
+
 fn direct_progressive_client() -> Result<Client, String> {
     Client::builder()
         .no_proxy()
@@ -3340,6 +3408,141 @@ fn request_origin(referrer: &str) -> Option<String> {
         return None;
     }
     Some(parsed.origin().ascii_serialization())
+}
+
+fn progressive_request(
+    client: &Client,
+    request: &Request,
+    range: Option<(u64, Option<u64>)>,
+) -> reqwest::blocking::RequestBuilder {
+    let mut builder = client
+        .get(&request.url)
+        .header(
+            reqwest::header::ACCEPT,
+            "video/*,audio/*;q=0.9,application/octet-stream;q=0.8",
+        )
+        .header(
+            reqwest::header::USER_AGENT,
+            if request.user_agent.is_empty() {
+                MEDIA_USER_AGENT
+            } else {
+                request.user_agent.as_str()
+            },
+        );
+    if let Some(referrer) = request.referrer.as_deref() {
+        builder = builder.header(reqwest::header::REFERER, referrer);
+        if let Some(origin) = request_origin(referrer) {
+            builder = builder.header(reqwest::header::ORIGIN, origin);
+        }
+    }
+    if !request.accept_language.is_empty() {
+        builder = builder.header(reqwest::header::ACCEPT_LANGUAGE, &request.accept_language);
+    }
+    if let Some((start, end)) = range {
+        let value = end
+            .map(|end| format!("bytes={start}-{end}"))
+            .unwrap_or_else(|| format!("bytes={start}-"));
+        builder = builder.header(reqwest::header::RANGE, value);
+    }
+    builder
+}
+
+fn progressive_content_type_from_response(
+    response: &reqwest::blocking::Response,
+) -> Result<(), String> {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if progressive_content_type_allowed(content_type) {
+        Ok(())
+    } else {
+        Err(format!(
+            "progressive response is not media ({})",
+            content_type.split(';').next().unwrap_or("unknown")
+        ))
+    }
+}
+
+fn fetch_progressive_range(
+    client: Client,
+    request: Request,
+    start: u64,
+    end: u64,
+    expected_total: u64,
+) -> Result<(u64, Vec<u8>), String> {
+    let expected_length = end.saturating_sub(start).saturating_add(1);
+    let mut last_error = String::new();
+    for attempt in 0..PROGRESSIVE_RANGE_RETRIES {
+        let response = progressive_request(&client, &request, Some((start, Some(end)))).send();
+        let mut response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = error.to_string();
+                if attempt + 1 < PROGRESSIVE_RANGE_RETRIES {
+                    thread::sleep(Duration::from_millis(250 * (attempt as u64 + 1)));
+                }
+                continue;
+            }
+        };
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            last_error = format!("progressive range HTTP {}", response.status().as_u16());
+            if attempt + 1 < PROGRESSIVE_RANGE_RETRIES {
+                thread::sleep(Duration::from_millis(250 * (attempt as u64 + 1)));
+            }
+            continue;
+        }
+        progressive_content_type_from_response(&response)?;
+        if progressive_content_range(response.headers()) != Some((start, end, expected_total)) {
+            return Err("progressive range response does not match the requested bytes".into());
+        }
+        let mut bytes = Vec::with_capacity(expected_length.min(usize::MAX as u64) as usize);
+        if let Err(error) = response
+            .by_ref()
+            .take(expected_length.saturating_add(1))
+            .read_to_end(&mut bytes)
+        {
+            last_error = error.to_string();
+            if attempt + 1 < PROGRESSIVE_RANGE_RETRIES {
+                thread::sleep(Duration::from_millis(250 * (attempt as u64 + 1)));
+            }
+            continue;
+        }
+        if bytes.len() as u64 == expected_length {
+            return Ok((start, bytes));
+        }
+        last_error = format!(
+            "progressive range length mismatch: expected {expected_length}, received {}",
+            bytes.len()
+        );
+    }
+    Err(last_error)
+}
+
+fn update_progressive_transfer_state<F>(
+    state: &mut JobState,
+    notify: &F,
+    written: u64,
+    total: Option<u64>,
+    started_at: Instant,
+) where
+    F: Fn(&JobState),
+{
+    state.completed = Some(written);
+    state.progress =
+        total.map(|total| ((written.saturating_mul(100) / total.max(1)).min(100)) as u8);
+    let seconds = started_at.elapsed().as_secs_f64();
+    let speed_mib = if seconds > 0.0 {
+        written as f64 / 1_048_576.0 / seconds
+    } else {
+        0.0
+    };
+    state.status_text = match total {
+        Some(total) => format!("다운로드 중 · {written} / {total} bytes · {speed_mib:.2} MB/s"),
+        None => format!("다운로드 중 · {written} bytes · {speed_mib:.2} MB/s"),
+    };
+    update_state(state, notify);
 }
 
 fn execute_progressive_download<F>(
@@ -3370,57 +3573,34 @@ where
         Ok(client) => client,
         Err(error) => return DownloadAttemptResult::SpawnError(error),
     };
-    let mut builder = client
-        .get(&request.url)
-        .header(
-            reqwest::header::ACCEPT,
-            "video/*,audio/*;q=0.9,application/octet-stream;q=0.8",
-        )
-        .header(
-            reqwest::header::USER_AGENT,
-            if request.user_agent.is_empty() {
-                MEDIA_USER_AGENT
-            } else {
-                request.user_agent.as_str()
-            },
-        );
-    if let Some(referrer) = request.referrer.as_deref() {
-        builder = builder.header(reqwest::header::REFERER, referrer);
-        if let Some(origin) = request_origin(referrer) {
-            builder = builder.header(reqwest::header::ORIGIN, origin);
-        }
-    }
-    if !request.accept_language.is_empty() {
-        builder = builder.header(reqwest::header::ACCEPT_LANGUAGE, &request.accept_language);
-    }
-    if offset > 0 {
-        builder = builder.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-    }
-    let mut response = match builder.send() {
-        Ok(response) => response,
-        Err(error) => return DownloadAttemptResult::Failed(error.to_string()),
-    };
+    // A one-byte request proves that the exact authenticated URL honors byte
+    // ranges. Googlevideo and other progressive CDNs commonly throttle one
+    // long response; when the probe succeeds, receive six bounded ranges at a
+    // time while committing them to the partial file in byte order.
+    let mut response =
+        match progressive_request(&client, request, Some((offset, Some(offset)))).send() {
+            Ok(response) => response,
+            Err(error) => return DownloadAttemptResult::Failed(error.to_string()),
+        };
     if !response.status().is_success() {
         return DownloadAttemptResult::Failed(format!(
             "progressive HTTP {}",
             response.status().as_u16()
         ));
     }
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if !progressive_content_type_allowed(content_type) {
-        return DownloadAttemptResult::Failed(format!(
-            "progressive response is not media ({})",
-            content_type.split(';').next().unwrap_or("unknown")
-        ));
+    if let Err(error) = progressive_content_type_from_response(&response) {
+        return DownloadAttemptResult::Failed(error);
     }
+    let range = (response.status() == StatusCode::PARTIAL_CONTENT)
+        .then(|| progressive_content_range(response.headers()))
+        .flatten()
+        .filter(|(start, end, total)| *start == offset && *end == offset && *total > offset);
     if offset > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
         offset = 0;
     }
-    let total = progressive_total_bytes(response.headers(), offset);
+    let total = range
+        .map(|(_, _, total)| total)
+        .or_else(|| progressive_total_bytes(response.headers(), offset));
     let mut file = match OpenOptions::new()
         .create(true)
         .write(true)
@@ -3439,39 +3619,137 @@ where
     state.status_text = "미디어를 직접 저장하는 중…".into();
     update_state(state, notify);
 
+    let started_at = Instant::now();
     let mut written = offset;
     let mut last_reported = offset;
-    let mut buffer = [0_u8; 256 * 1024];
-    loop {
-        if cancel_path.is_some_and(Path::exists) {
-            drop(file);
-            let _ = fs::remove_file(&part_path);
-            return DownloadAttemptResult::Cancelled;
-        }
-        if pause_path.is_some_and(Path::exists) {
-            let _ = file.flush();
-            let _ = file.sync_all();
-            return DownloadAttemptResult::Paused;
-        }
-        let count = match response.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) => return DownloadAttemptResult::Failed(error.to_string()),
-        };
-        if let Err(error) = file.write_all(&buffer[..count]) {
+    if let Some((_, _, range_total)) = range {
+        let mut probe = [0_u8; 1];
+        if let Err(error) = response.read_exact(&mut probe) {
             return DownloadAttemptResult::Failed(error.to_string());
         }
-        written = written.saturating_add(count as u64);
-        if written.saturating_sub(last_reported) >= 1024 * 1024 {
-            last_reported = written;
-            state.completed = Some(written);
-            state.progress =
-                total.map(|total| ((written.saturating_mul(100) / total.max(1)).min(100)) as u8);
-            state.status_text = match total {
-                Some(total) => format!("다운로드 중 · {written} / {total} bytes"),
-                None => format!("다운로드 중 · {written} bytes"),
+        if let Err(error) = file.write_all(&probe) {
+            return DownloadAttemptResult::Failed(error.to_string());
+        }
+        written = written.saturating_add(1);
+        update_progressive_transfer_state(state, notify, written, Some(range_total), started_at);
+
+        let concurrency_limit = progressive_range_concurrency_limit();
+        let mut concurrency = PROGRESSIVE_RANGE_INITIAL_CONCURRENCY.min(concurrency_limit);
+        let mut previous_batch_speed = None;
+        while written < range_total {
+            if cancel_path.is_some_and(Path::exists) {
+                drop(file);
+                let _ = fs::remove_file(&part_path);
+                return DownloadAttemptResult::Cancelled;
+            }
+            if pause_path.is_some_and(Path::exists) {
+                let _ = file.flush();
+                let _ = file.sync_all();
+                return DownloadAttemptResult::Paused;
+            }
+            let ranges = progressive_range_batch(written, range_total, concurrency);
+            let batch_started_at = Instant::now();
+            let batch_bytes = ranges
+                .iter()
+                .map(|(start, end)| end.saturating_sub(*start).saturating_add(1))
+                .sum::<u64>();
+            let (sender, receiver) = mpsc::channel();
+            let mut workers = Vec::with_capacity(ranges.len());
+            for (start, end) in ranges.iter().copied() {
+                let sender = sender.clone();
+                let client = client.clone();
+                let request = request.clone();
+                workers.push(thread::spawn(move || {
+                    let _ = sender.send(fetch_progressive_range(
+                        client,
+                        request,
+                        start,
+                        end,
+                        range_total,
+                    ));
+                }));
+            }
+            drop(sender);
+            let mut chunks = std::collections::BTreeMap::new();
+            let mut batch_error = None;
+            for result in receiver {
+                match result {
+                    Ok((start, bytes)) => {
+                        chunks.insert(start, bytes);
+                    }
+                    Err(error) => batch_error = Some(error),
+                }
+            }
+            for worker in workers {
+                if worker.join().is_err() && batch_error.is_none() {
+                    batch_error = Some("progressive range worker stopped unexpectedly".into());
+                }
+            }
+            if let Some(error) = batch_error {
+                return DownloadAttemptResult::Failed(error);
+            }
+            for (start, end) in ranges {
+                let Some(bytes) = chunks.remove(&start) else {
+                    return DownloadAttemptResult::Failed(
+                        "progressive range response is missing".into(),
+                    );
+                };
+                if start != written || bytes.len() as u64 != end - start + 1 {
+                    return DownloadAttemptResult::Failed(
+                        "progressive range order is invalid".into(),
+                    );
+                }
+                if let Err(error) = file.write_all(&bytes) {
+                    return DownloadAttemptResult::Failed(error.to_string());
+                }
+                written = written.saturating_add(bytes.len() as u64);
+                update_progressive_transfer_state(
+                    state,
+                    notify,
+                    written,
+                    Some(range_total),
+                    started_at,
+                );
+            }
+            let batch_seconds = batch_started_at.elapsed().as_secs_f64().max(0.001);
+            let batch_speed = batch_bytes as f64 / batch_seconds;
+            concurrency = adaptive_progressive_range_concurrency(
+                concurrency,
+                concurrency_limit,
+                previous_batch_speed,
+                batch_speed,
+            );
+            previous_batch_speed = Some(batch_speed);
+        }
+    } else {
+        // The server ignored the probe Range and returned the complete body.
+        // Preserve the single-stream path for servers that do not support
+        // bounded reception.
+        let mut buffer = [0_u8; 256 * 1024];
+        loop {
+            if cancel_path.is_some_and(Path::exists) {
+                drop(file);
+                let _ = fs::remove_file(&part_path);
+                return DownloadAttemptResult::Cancelled;
+            }
+            if pause_path.is_some_and(Path::exists) {
+                let _ = file.flush();
+                let _ = file.sync_all();
+                return DownloadAttemptResult::Paused;
+            }
+            let count = match response.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => count,
+                Err(error) => return DownloadAttemptResult::Failed(error.to_string()),
             };
-            update_state(state, notify);
+            if let Err(error) = file.write_all(&buffer[..count]) {
+                return DownloadAttemptResult::Failed(error.to_string());
+            }
+            written = written.saturating_add(count as u64);
+            if written.saturating_sub(last_reported) >= 1024 * 1024 {
+                last_reported = written;
+                update_progressive_transfer_state(state, notify, written, total, started_at);
+            }
         }
     }
     if written == 0 {
@@ -5506,6 +5784,37 @@ mod tests {
         assert!(!progressive_content_type_allowed(
             "text/html; charset=utf-8"
         ));
+    }
+
+    #[test]
+    fn progressive_range_batches_honor_the_runtime_concurrency_window() {
+        let ranges = progressive_range_batch(10, 20 * 1024 * 1024, 5);
+        assert_eq!(ranges.len(), 5);
+        assert_eq!(ranges[0], (10, 10 + PROGRESSIVE_RANGE_CHUNK_BYTES - 1));
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].1 + 1, pair[1].0);
+        }
+        assert!(
+            (PROGRESSIVE_RANGE_MIN_CONCURRENCY..=PROGRESSIVE_RANGE_MAX_CONCURRENCY)
+                .contains(&progressive_range_concurrency_limit())
+        );
+    }
+
+    #[test]
+    fn progressive_range_concurrency_adapts_to_observed_throughput() {
+        assert_eq!(adaptive_progressive_range_concurrency(4, 12, None, 10.0), 5);
+        assert_eq!(
+            adaptive_progressive_range_concurrency(5, 12, Some(10.0), 9.5),
+            6
+        );
+        assert_eq!(
+            adaptive_progressive_range_concurrency(6, 12, Some(10.0), 5.0),
+            5
+        );
+        assert_eq!(
+            adaptive_progressive_range_concurrency(12, 12, Some(10.0), 12.0),
+            12
+        );
     }
 
     #[test]

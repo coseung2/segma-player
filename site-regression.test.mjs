@@ -42,8 +42,12 @@ for (const fixture of fixtures) {
     } else {
       assert.equal(Array.isArray(fixture.candidates) && fixture.candidates.length > 0, true);
       assert.equal(typeof fixture.expected.primaryHost, "string");
-      if (fixture.expected.livePrimaryHostFlexible) assert.equal(typeof fixture.expected.primaryPlayer, "string");
+      if (fixture.expected.livePrimaryHostFlexible && fixture.expected.primaryPlayer !== undefined) {
+        assert.equal(typeof fixture.expected.primaryPlayer, "string");
+      }
     }
+    if (fixture.expected.primaryHostSuffix) assert.match(fixture.expected.primaryHostSuffix, /^\.[a-z0-9.-]+$/);
+    if (fixture.expected.primaryTitle) assert.equal(typeof fixture.expected.primaryTitle, "string");
   });
 
   if (fixture.liveOnly) continue;
@@ -74,6 +78,10 @@ for (const fixture of fixtures) {
     assert.ok(primary, "a non-ad primary candidate must be selected");
     assert.equal(new URL(primary.resourceUrl).hostname, fixture.expected.primaryHost);
     assert.equal(primary.siteId, siteProfileForUrls(fixture.liveUrl)?.id);
+    if (fixture.expected.primaryHostSuffix) {
+      assert.equal(new URL(primary.resourceUrl).hostname.endsWith(fixture.expected.primaryHostSuffix), true);
+    }
+    if (fixture.expected.primaryTitle) assert.equal(primary.pageTitle, fixture.expected.primaryTitle);
     if (fixture.expected.primaryPlayer) assert.equal(primary.player, fixture.expected.primaryPlayer);
     if (fixture.expected.rejectedAdvertisementHost) {
       const advertisement = ranked.find((candidate) =>

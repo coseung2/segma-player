@@ -1,4 +1,5 @@
 (() => {
+  const RESCAN_EVENT_TYPE = "aura-media-detector-rescan-v1";
   if (globalThis.__auraMediaDetectorInstalledV4) return;
   globalThis.__auraMediaDetectorInstalledV4 = true;
   const MAX_URL_BYTES = 4096;
@@ -1014,7 +1015,8 @@
       return false;
     }
     if (message?.type === "rescan") {
-      scheduleScan(true);
+      performExplicitRescan();
+      sendResponse({ ok: true });
       return false;
     }
     // The background owns the site registry, so it tells this frame where the
@@ -1028,7 +1030,11 @@
           .slice(0, 8)
         : [];
       scheduleScan(true);
-      sendResponse({ ok: true, applied: titleSelectors.length });
+      sendResponse({
+        ok: true,
+        applied: titleSelectors.length,
+        pageTitle: resolvedPageTitle(),
+      });
       return false;
     }
     if (handleRefreshMediaSource(message, sendResponse)) return true;
@@ -1315,6 +1321,27 @@
     void reportDoodPlayer();
   }
 
+  function performExplicitRescan() {
+    // The popup clears the background candidate list before asking every frame
+    // to scan again. Clear the content-side dedupe as well, otherwise an
+    // unchanged media URL is silently suppressed and the button appears dead.
+    seen.clear();
+    scriptsDirty = true;
+    doodDirty = true;
+    scheduleScan(true);
+
+    // MAIN-world player adapters retain sources that a video element exposes
+    // only as blob:. Ask them to replay their bounded source snapshot too.
+    try {
+      window.postMessage({
+        type: PAGE_MEDIA_SNAPSHOT_REQUEST_TYPE,
+        requestId: crypto.randomUUID(),
+      }, "*");
+    } catch {
+      // DOM/media-element scanning above still covers ordinary progressive media.
+    }
+  }
+
   function markRelevantDirty(records) {
     const markNode = (node, includeDescendants = true) => {
       const tag = node?.tagName;
@@ -1420,6 +1447,7 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => handleMessage(message, sendResponse));
   window.addEventListener("message", handlePageMediaEvent);
+  window.addEventListener(RESCAN_EVENT_TYPE, performExplicitRescan);
   window.postMessage({ type: LEVEL5_MEDIA_DISCOVERY_REQUEST }, "*");
   try {
     const frameStateHeartbeat = setInterval(() => reportFrameMediaState(mediaElements()), 15_000);

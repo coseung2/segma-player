@@ -26,6 +26,7 @@ const companionHelpElement = byId("companion-help");
 const companionOpenElement = byId("companion-open");
 
 let lastCandidates = [];
+const RESCAN_EVENT_TYPE = "aura-media-detector-rescan-v1";
 
 function sendBackground(message) {
   return chrome.runtime.sendMessage(message);
@@ -197,7 +198,7 @@ function renderCandidates(candidates) {
   candidatesElement.replaceChildren();
   if (!shown.length) {
     candidatesElement.append(text("div", "empty-state", t("detect.empty")));
-    return;
+    return 0;
   }
   for (const candidate of shown) {
     const card = document.createElement("article");
@@ -238,16 +239,19 @@ function renderCandidates(candidates) {
     card.append(info);
     candidatesElement.append(card);
   }
+  return shown.length;
 }
 
 async function requestCandidates() {
   statusElement.textContent = t("detect.scanning");
   try {
     const response = await sendBackground({ type: "list-candidates" });
-    renderCandidates(response?.candidates || []);
+    const count = renderCandidates(response?.candidates || []);
     statusElement.textContent = t("detect.ready");
+    return count;
   } catch {
     statusElement.textContent = t("detect.reloadExtension");
+    return 0;
   }
 }
 
@@ -302,11 +306,26 @@ async function rescan() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab?.id) {
       await sendBackground({ type: "clear-tab", tabId: tab.id }).catch(() => {});
-      await chrome.tabs.sendMessage(tab.id, { type: "rescan" }).catch(async () => {
-        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
-      });
+      // A player usually lives in a subframe. Inject missing detectors into all
+      // frames, then wake every existing detector through a same-world DOM
+      // event so the button also works after the popup was opened pre-playback.
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ["content.js"],
+      }).catch(() => {});
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: (eventType) => window.dispatchEvent(new Event(eventType)),
+        args: [RESCAN_EVENT_TYPE],
+      }).catch(() => {});
+
+      for (const delayMs of [200, 600, 1_200]) {
+        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        if (await requestCandidates() > 0) break;
+      }
+      return;
     }
-    window.setTimeout(() => void requestCandidates(), 250);
+    await requestCandidates();
   } finally {
     button.disabled = false;
   }

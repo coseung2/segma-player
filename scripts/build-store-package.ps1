@@ -85,11 +85,13 @@ $runtimeFiles = @(
   'providers/player-api.js',
   'providers/registry.js',
   'providers/signals.js',
+  'sites/animepahe/profile.js',
   'sites/asianporn/profile.js',
   'sites/av19/profile.js',
   'sites/avsee/profile.js',
   'sites/beeg/profile.js',
   'sites/dood/profile.js',
+  'sites/gogoanime/profile.js',
   'sites/missav/profile.js',
   'sites/onlyjerk/profile.js',
   'sites/playmogo/profile.js',
@@ -101,6 +103,7 @@ $runtimeFiles = @(
   'sites/profile.js',
   'sites/registry.js',
   'sites/youtube/profile.js',
+  'sites/zoro/profile.js',
   'edition.js',
   'manifest.json'
 )

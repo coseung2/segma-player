@@ -51,6 +51,8 @@ function baseEnvironment({
   doodHtml = "",
   withPerformanceObserver = false,
   runtimeHandler = null,
+  pageTitle = "Test video",
+  selectorTitles = {},
 } = {}) {
   const sent = [];
   const posted = [];
@@ -189,13 +191,17 @@ function baseEnvironment({
     return nodes;
   }
   globalThis.document = {
-    title: "Test video",
+    title: pageTitle,
     documentElement,
     createElement(tagName) {
       return new globalThis.Element(tagName);
     },
     getElementById(id) {
       return elementsById.get(id) || null;
+    },
+    querySelector(selector) {
+      const title = selectorTitles[selector];
+      return typeof title === "string" ? { textContent: title } : null;
     },
     querySelectorAll(selector) {
       if (selector === "video, audio, source") return [...videos];
@@ -762,6 +768,57 @@ test("an explicit rescan runs prompt detection", async () => {
   assert.equal(env.countScans, scansBefore + 1);
   await delay(180);
   assert.equal(env.countScans, scansBefore + 1, "no extra scan after the prompt rescan");
+});
+
+test("an explicit rescan re-reports an unchanged media URL after popup clearing", async () => {
+  const env = baseEnvironment();
+  const url = "https://media.example/unchanged.mp4";
+  env.videos.push(mediaElement({ url, paused: false }));
+  await import(`./content.js?test=${++moduleCounter}`);
+  assert.equal(countResource(env.sent, url), 1);
+
+  const response = await new Promise((resolve) => {
+    env.onMessage({ type: "rescan" }, {}, resolve);
+  });
+
+  assert.deepEqual(response, { ok: true });
+  assert.equal(countResource(env.sent, url), 2,
+    "rescan must clear content-side dedupe after the background list was cleared");
+  assert.ok(env.posted.some((message) =>
+    message.type === "aura-media-observer-snapshot-request-v1" && message.requestId));
+});
+
+test("site title selectors return the parent page heading for iframe candidates", async () => {
+  const env = baseEnvironment({
+    pageTitle: "Episode 8 - Gogoanime",
+    selectorTitles: {
+      "article h1": "Futsutsuka na Akujo Episode 8 English Subbed",
+    },
+  });
+  await import(`./content.js?test=${++moduleCounter}`);
+
+  const response = await new Promise((resolve) => {
+    env.onMessage({ type: "set-title-selectors", selectors: ["article h1", "h1"] }, {}, resolve);
+  });
+
+  assert.deepEqual(response, {
+    ok: true,
+    applied: 2,
+    pageTitle: "Futsutsuka na Akujo Episode 8 English Subbed",
+  });
+});
+
+test("the all-frame popup wake event performs the same explicit rescan", async () => {
+  const env = baseEnvironment();
+  const url = "https://media.example/frame-rescan.mp4";
+  env.videos.push(mediaElement({ url, paused: false }));
+  await import(`./content.js?test=${++moduleCounter}`);
+  assert.equal(countResource(env.sent, url), 1);
+
+  const handlers = env.windowEventHandlers["aura-media-detector-rescan-v1"] || [];
+  assert.equal(handlers.length, 1);
+  handlers[0]();
+  assert.equal(countResource(env.sent, url), 2);
 });
 
 test("download overlay acknowledges its top-frame activation after the first refresh", async () => {

@@ -1,8 +1,10 @@
 import { asianpornSite } from "./asianporn/profile.js";
+import { animepaheSite } from "./animepahe/profile.js";
 import { av19Site } from "./av19/profile.js";
 import { avseeSite } from "./avsee/profile.js";
 import { beegSite } from "./beeg/profile.js";
 import { doodSite } from "./dood/profile.js";
+import { gogoanimeSite } from "./gogoanime/profile.js";
 import { jamakSite } from "./jamak/profile.js";
 import { lulustreamSite } from "./lulustream/profile.js";
 import { missavSite } from "./missav/profile.js";
@@ -12,21 +14,25 @@ import { pimpbunnySite } from "./pimpbunny/profile.js";
 import { recuSite } from "./recu/profile.js";
 import { shackledshowSite } from "./shackledshow/profile.js";
 import { youtubeSite } from "./youtube/profile.js";
+import { zoroSite } from "./zoro/profile.js";
 
 export const SITE_PROFILES = Object.freeze([
   missavSite,
+  animepaheSite,
   av19Site,
   avseeSite,
   asianpornSite,
   onlyjerkSite,
   beegSite,
   doodSite,
+  gogoanimeSite,
   jamakSite,
   lulustreamSite,
   playmogoSite,
   pimpbunnySite,
   recuSite,
   shackledshowSite,
+  zoroSite,
   youtubeSite,
 ]);
 

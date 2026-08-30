@@ -90,6 +90,15 @@ test("candidate downloads queue without subtitle translation work", async () => 
   assert.doesNotMatch(popupJs, /translatedTitle|translateTitleToKorean/);
 });
 
+test("rescan wakes every player frame and waits for a rebuilt candidate list", async () => {
+  const { popupJs } = await readOwned();
+  assert.match(popupJs, /target:\s*\{\s*tabId:\s*tab\.id,\s*allFrames:\s*true\s*\}/s);
+  assert.match(popupJs, /aura-media-detector-rescan-v1/);
+  assert.match(popupJs, /window\.dispatchEvent\(new Event\(eventType\)\)/);
+  assert.match(popupJs, /for \(const delayMs of \[200, 600, 1_200\]\)/);
+  assert.doesNotMatch(popupJs, /tabs\.sendMessage\(tab\.id,\s*\{\s*type:\s*"rescan"/);
+});
+
 test("popover sizes to its content and keeps one document scroller", async () => {
   const { popupHtml, popupJs, popupCss } = await readOwned();
   assert.doesNotMatch(popupCss, /height:\s*600px|min-height:\s*600px/);

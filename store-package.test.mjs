@@ -78,6 +78,7 @@ const retiredExpectedFiles = [
   "providers/player-api.js",
   "providers/registry.js",
   "providers/signals.js",
+  "sites/animepahe/profile.js",
   "sites/asianporn/profile.js",
   "sites/av19/profile.js",
   "sites/avsee/profile.js",
@@ -94,6 +95,7 @@ const retiredExpectedFiles = [
   "sites/profile.js",
   "sites/registry.js",
   "sites/youtube/profile.js",
+  "sites/zoro/profile.js",
   "worker-lifecycle.js",
   "youtube-server.js",
 ].sort();

@@ -738,3 +738,82 @@ The av19 result is a confirmed current live detection regression and remains the
 - extension-download: `PASS` — the exact existing request reproduced Cloudflare HTTP 403 with browser headers. The extractor-local impersonation hint still returned 403, while global Chrome impersonation parsed the live manifest as `generic:m3u8_native`. Installed Native Host `0.4.40` then exercised the Cloudflare-only retry and completed the exact persisted Companion job at 100%.
 - Evidence: tokenized URLs remain redacted. Native Host 40/40 and focused architecture/staging/package/site tests 35/35 pass. Build and installed Host SHA-256 both equal `a5e196313f5e482a93ab449e5759d60d8680ce45cd9e9424355f511f8c7046e3`. The saved MP4 is 3,076,881,087 bytes; ffprobe reports duration 7,112.363167 seconds, 1920x1080 H.264 video, and AAC audio. Full `npm test` has only the pre-existing encoded-workspace-path `ENOENT` failures.
 - Incident: `INC-2026-08-29-045`.
+
+## 2026-08-30 Gogoanime title/profile and Megaplay HLS handoff (0.4.51)
+
+- Browser/channel: Chrome external user session, active Gogoanime tab; source/staging was not reloaded into the user's active extension profile
+- Extension version: source/staging `0.4.51`; installed extension version was not re-read
+- Site URL / ID: `https://gogoanime.by/bleach-sennen-kessen-hen-kashin-tan-episode-4-english-subbed/` / `gogoanime`
+- AdBlock/VPN mode: not reported
+- Detect: `CODE-FIXED / LIVE-UNVERIFIED` - live page inspection found the episode title in `document.title` and `article h1`; deterministic regression covers the HLS candidate and title/player profile routing, but the refreshed extension candidate list was not opened
+- Progressive-probe: `NOT_RUN`
+- Extension-download: `CODE-FIXED / LIVE-UNVERIFIED` - the live player graph resolved `/player/` to a `megaplay.su` HLS manifest; the manifest and first segment returned `200 OK`, and installed yt-dlp `2026.08.19` parsed the manifest with its player referer. No extension-triggered Companion job or saved file was verified
+- Playback: `PASS` - the active page's nested JW Player was playing the Megaplay HLS stream
+- Subtitle / overlay / tab switching / Aura AdBlock on-off: `NOT_RUN`
+- Evidence: `sites/gogoanime/profile.js`, `sites/gogoanime/regressions.js`, focused tests 42/42, staging tests 34/34
+- Incident: `INC-2026-08-30-046`; retain `LIVE-UNVERIFIED` until the user's refreshed Chrome/Whale staging path completes a non-empty save with the episode title
+
+## 2026-08-30 AnimePahe and Zoro-family site-pool registration (0.4.51)
+
+- Browser/channel: Chrome external user session for AnimePahe; Zoro-family live page was not opened because the browser safety policy blocked the historical/current host
+- Extension version: source/staging `0.4.51`; installed extension version was not re-read
+- Site IDs: `animepahe` (`animepahe.ng`, `animepahe.ch`) and `zoro` (`zoro.to`, `z.to`, `z.is`, `aniwatch.to`, `hianime.to`, `hianime.nz`, `hianime.bz`, `hianime.do`, `hianime.pe`, `hianime.cx`, `hianime.tv`, `hianime.me`)
+- AdBlock/VPN mode: not reported
+- AnimePahe detect: `CODE-FIXED / LIVE-UNVERIFIED` - live page exposes the complete episode title in `article h1` and an external Blogger video iframe; deterministic profile and liveOnly regression are registered
+- AnimePahe extension-download: `CODE-FIXED / LIVE-UNVERIFIED` - direct extension handoff and non-empty file were not run; the external iframe did not expose a stable direct URL in the inspected DOM
+- Zoro-family detect / extension-download: `CODE-FIXED / LIVE-UNVERIFIED` - stable site profile, title selectors, provider/downloader policy, and liveOnly regression are registered; no current operating official Zoro-family domain was verified
+- Playback / progressive-probe / subtitle / overlay / tab switching / Aura AdBlock on-off: `NOT_RUN` except AnimePahe's existing browser playback surface, which did not expose accessible nested player content in this check
+- Evidence: focused media-site tests 46/46, staging/package tests 4/4, Store and development allowlists include both new profiles
+- Incident: `INC-2026-08-30-046`; keep live claims unverified until each site's refreshed browser path produces a candidate and a non-empty saved file
+
+## 2026-08-30 Gogoanime Blogger progressive detection and functional rescan (0.4.52)
+
+- Browser/channel: connected user Chrome session, active Gogoanime Episode 8 tab; source/staging `0.4.52` was not yet reloaded into that extension profile
+- Extension version: installed version was not exposed by the browser-control surface; source/staging target `0.4.52`
+- Site URL / ID: `https://gogoanime.by/futsutsuka-na-akujo-dewa-gozaimasu-ga-suuguu-chouso-torikae-den-episode-8-english-subbed/` / `gogoanime`
+- AdBlock/VPN mode: an ad-quality request was observed as `ERR_BLOCKED_BY_CLIENT`; exact product/mode was not identified
+- Native-page playback: `PASS` - the visible Episode 8 player was playing in the user tab
+- Detect on installed baseline: `FAIL` - the page diagnostic candidate snapshot was `[]` despite the nested `/player/?source=blogger...` frame receiving `googlevideo.com/videoplayback` as HTTP 206 `video/mp4`
+- Detect in `0.4.52`: `CODE-FIXED / LIVE-UNVERIFIED` - Googlevideo suppression is now scoped to actual YouTube-owned candidates, the exact Episode 8 fixture passes, and unchanged URLs are re-emitted after popup clearing
+- Rescan in `0.4.52`: `CODE-FIXED / LIVE-UNVERIFIED` - all frames are injected/woken, content dedupe is cleared, MAIN-world player sources are replayed, and the popup polls for rebuilt candidates
+- Title: `CODE-FIXED / LIVE-UNVERIFIED` - the live `h1` and document title both contain the complete episode title; the regression asserts that title on the retained Blogger candidate
+- Extension-download / progressive-probe / subtitle / overlay / tab switching: `NOT_RUN` with `0.4.52`; a completed non-empty saved file is still required
+- Evidence: `artifacts` were not created from the user page; live diagnostic was captured under `%LOCALAPPDATA%\Temp\segma-gogo-live`, focused tests `43 pass / 0 fail / 17 skip`, media-site tests `48/48`
+- Incident: `INC-2026-08-30-046`; status remains `CODE-FIXED / LIVE-UNVERIFIED`
+
+## 2026-08-30 Gogoanime Blogger adaptive download and exact title (0.4.53)
+
+- Browser/channel: temporary Playwright-cache Chrome with unpacked Pro staging `0.4.53`; Companion `0.4.53`; Aura AdBlock loaded and enabled
+- Site URL / ID: `https://gogoanime.by/futsutsuka-na-akujo-dewa-gozaimasu-ga-suuguu-chouso-torikae-den-episode-8-english-subbed/` / `gogoanime`
+- Detect: `PASS` - one main non-advertisement Googlevideo progressive candidate was rebuilt after explicit rescan
+- Playback: `PASS` - nested native video reached readyState 4 and advanced while unpaused
+- Rescan: `PASS` - popup button re-enabled, status recovered, and candidate count was 1
+- Title: `PASS` - candidate/job title exactly matched `article h1` without the ` - Gogoanime` document suffix
+- Progressive-probe: `INCONCLUSIVE` - browser range probe reported no size; this did not block the authoritative Companion save
+- Extension-download: `PASS` - the real `download-candidate` message was accepted by Companion and completed `86,837,675 / 86,837,675` bytes in 10,846 ms to a non-empty title-derived MP4
+- Subtitle / overlay / tab switching: `NOT_RUN`; Aura AdBlock off: `NOT_RUN`
+- Evidence: `artifacts/live-media-0.4.53-gogoanime-episode-8.json`; focused popup/content/background `44/44` with 17 skips, media sites `48/48`, Native Host `45/45`, staging/package `4/4`
+- Incident: `INC-2026-08-30-046`; temporary-staging path resolved, while the user's installed extension profile and exact Episode 4 click path remain `LIVE-UNVERIFIED`
+
+## 2026-08-30 AnimePahe Blogger adaptive download (0.4.53)
+
+- Browser/channel: temporary Playwright-cache Chrome with unpacked Pro staging `0.4.53`; Companion `0.4.53`; Aura AdBlock loaded and enabled
+- Site URL / ID: `https://animepahe.ng/bleach-thousand-year-blood-war-the-calamity-episode-6-english-subbed/` / `animepahe`
+- Detect: `PASS` - one main non-advertisement Blogger/Googlevideo progressive candidate
+- Playback: `PASS` - nested player reached readyState 4 and advanced while unpaused
+- Rescan: `PASS` - popup button re-enabled and rebuilt one candidate
+- Title: `PASS` - candidate/job title exactly matched the article heading
+- Progressive-probe: `INCONCLUSIVE` - browser range probe did not determine size
+- Extension-download: `PASS` - Companion completed `262,478,244 / 262,478,244` bytes in 6,778 ms to a non-empty title-derived MP4
+- Subtitle / overlay / tab switching: `NOT_RUN`; Aura AdBlock off: `NOT_RUN`
+- Evidence: `artifacts/live-media-0.4.53-animepahe.json`
+- Incident: `INC-2026-08-30-046`
+
+## 2026-08-30 Zoro / AniWatch / HiAnime live navigation (0.4.53)
+
+- Browser/channel: temporary Playwright-cache Chrome with unpacked Pro staging `0.4.53`; Companion `0.4.53`; Aura AdBlock loaded and enabled
+- Site URL / ID: `https://hianime.to/watch/one-piece-100?ep=2142` / `zoro`
+- Detect / playback / progressive-probe / extension-download / subtitle / overlay / tab switching: `BLOCKED / NOT_RUN` - the page did not reach `domcontentloaded` within 30 seconds, so no product surface was exercised
+- Deterministic coverage: `PASS` - Zoro/AniWatch/HiAnime host aliases, title selectors, player/API policy, and HLS/progressive/DASH module selection remain registered and media-site tests pass `48/48`
+- Evidence: `artifacts/live-media-0.4.53-zoro.json`
+- Incident: `INC-2026-08-30-046`; do not classify the navigation timeout as an extension failure

@@ -37,7 +37,7 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | 3. Shared host/GUI disk contract | Complete | Host is the only durable `JobState` writer; manager writes markers and transient notices only |
 | 4. Shipped extension split | Complete | Ranked-candidate and pasted-link routes share one behavior-tested Companion router |
 | 5. Packaging and retired runtime | Reopened | Physically quarantine retained legacy extension source and tests |
-| 6. Native manager split | Reopened | Finish player/PiP module boundary and re-audit native ownership |
+| 6. Native manager split | Complete | Player/PiP state, HWND lifecycle, geometry, and orchestration have explicit owners; GUI 202 passed |
 | 7. Integrated validation and handoff | Reopened | Pending remediation, version reconciliation, staging, and fresh audit |
 
 ### Completion audit reopening — 2026-08-31
@@ -574,20 +574,26 @@ Completed in `cfa3d9f` at development version `0.4.60`:
   `ThumbnailCoordinator` owns the worker channels, pending/unavailable keys,
   and GPU texture map as one lifecycle.
 - `player_session.rs` groups the existing player backend, GIF export, seek
-  preview, shortcut, loaded-media, native HWND, and fullscreen lifetime. PiP
-  state is grouped separately while Win32 layout, mpv command flow, geometry,
-  and the existing PiP/player UI routines remain unchanged in `app.rs`.
+  preview, shortcut, loaded-media, and fullscreen lifetime. It no longer owns
+  native HWND or PiP geometry fields.
+- `player_surface.rs` is the sole owner of Win32 child-HWND creation,
+  positioning, clipping, visibility, cursor access, and idempotent destruction.
+  The existing `SetVideoWindow` command remains the only mpv handle handoff.
+- `pip_controller.rs` owns PiP activation/dismissal, floating-area geometry,
+  drag/resize state, controls, preview coordination, and transition outputs.
+  `app.rs` now wires event/update/render flow and preserves the established
+  player/PiP command order without creating another native or egui window.
 - No protocol, disk-ABI, extension runtime, package graph, or site behavior was
   changed. The source movement intentionally does not update `INCIDENTS.md` or
   `SITE_QA_LOG.md`.
 
-Validation at this checkpoint: focused controller tests and the full Companion
-GUI suite 198 passed; media-site suite 48 passed; full Node suite 528 passed
-and 22 explicitly skipped; shared contract 2 passed; native host 53 passed;
-both Rust format checks and `git diff --check` passed. The development staging
-artifact was rebuilt from the `0.4.60` source manifest without creating a ZIP.
-No live installed-window, Chrome, or Whale interaction is claimed for this
-behavior-neutral responsibility move; live validation is `NOT_RUN`.
+Validation after the completed player/PiP extraction: focused root
+architecture/UI/hygiene tests 43 passed; the full Companion GUI suite 202
+passed; Cargo check passed with the three pre-existing `jobs.rs` dead-code
+warnings; Rust formatting and `git diff --check` passed. The earlier integrated
+suite and staging figures remain historical checkpoints and will be rerun at
+the final handoff. No live installed-window, pointer interaction, mpv render,
+Chrome, or Whale result is claimed; live validation remains `NOT_RUN`.
 
 ### Phase 7 — integrated validation and handoff
 

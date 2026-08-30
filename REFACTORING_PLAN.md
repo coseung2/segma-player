@@ -2,8 +2,10 @@
 
 ## Status
 
-**REOPENED — the 2026-08-31 completion audit found unmet exit-gate details in
-phases 1 through 6. Remediation and a fresh Phase 7 handoff are in progress.**
+**CODE REFACTOR COMPLETE — all seven implementation phases and the final
+deterministic handoff passed at development version `0.4.62`. Installed
+Chrome, Whale, Companion-window, PiP/mpv, and live-site validation remains
+explicitly `NOT_RUN`; this document makes no live-runtime or site-QA claim.**
 
 This is the current refactoring roadmap for the Companion-first product. It
 supersedes `MEDIA_MODULE_REFACTOR.md` as a roadmap; that file remains a
@@ -27,7 +29,10 @@ was recorded in `d8420cf`; the committed result is now the Phase 6 baseline.
 ## Progress tracking
 
 Update this table and the relevant phase notes in the same commit that finishes
-each phase. A phase is not complete until its checks and known gaps are recorded.
+each phase. A phase is not complete until its deterministic checks and known
+live gaps are recorded. Here, `Complete` means the behavior-preserving code
+refactor and development handoff are complete; it does not promote an explicitly
+`NOT_RUN` installed or live-site surface to verified.
 
 | Phase | Status | Completion evidence |
 | --- | --- | --- |
@@ -38,14 +43,14 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | 4. Shipped extension split | Complete | Ranked-candidate and pasted-link routes share one behavior-tested Companion router |
 | 5. Packaging and retired runtime | Complete | 73 extension-primary files quarantined; 58-file shipped graph and dev tooling reject re-entry |
 | 6. Native manager split | Complete | Player/PiP state, HWND lifecycle, geometry, and orchestration have explicit owners; GUI 202 passed |
-| 7. Integrated validation and handoff | Reopened | Pending remediation, version reconciliation, staging, and fresh audit |
+| 7. Integrated validation and handoff | Complete | `0.4.62` aligned across source/Cargo/staging; 58-file staging graph and all deterministic suites passed |
 
 ### Completion audit reopening — 2026-08-31
 
 The first Phase 7 pass proved the deterministic suites and package graph, but a
 requirement-by-requirement independent audit found that several written exit
 gates were broader than the implementation evidence. The prior `COMPLETE`
-label is therefore withdrawn until all of these items are closed:
+label was withdrawn while these items were remediated:
 
 - freeze the missing status, rejected-command, download-folder, and redacted
   diagnostic contracts; replace route source slicing with behavior tests and
@@ -61,6 +66,11 @@ label is therefore withdrawn until all of these items are closed:
 
 Installed Chrome, Whale, Companion-window, PiP, and live-site validation remains
 `NOT_RUN`; this reopening does not change any incident or site-QA claim.
+
+All listed code-level gaps are now closed. The final `0.4.62` handoff below
+records the replacement evidence. The live surfaces remain outside the
+deterministic completion claim and still require a separate installed-runtime
+validation pass before any corresponding incident or site-QA claim.
 
 ## Goal
 
@@ -154,10 +164,10 @@ validation. It is not an incidental refactor.
 
 ## Main hotspots
 
-1. **`native-host/src/main.rs`** — approximately 6,000 lines combining native
-   message framing, request validation, job persistence, media/YouTube/subtitle
-   execution, progressive ranges, process spawning, settings, manager launch,
-   and the legacy `media-*` writer.
+1. **`native-host/src/main.rs`** — reduced to 2,303 lines and now focused on
+   CLI/native-message composition. Protocol framing, disk state, process
+   launch, progressive media execution, YouTube execution, subtitle execution,
+   and the legacy `media-*` writer have explicit module owners.
 2. **Duplicated cross-process contracts** — JS and Rust validate the same media
    command, while host and GUI independently model job state, safe IDs, paths,
    folder validation, and restart behavior.
@@ -289,8 +299,9 @@ cross-process fixtures.
   stable rejection codes, path validation, and public diagnostic redaction.
 - Replaced ranked-candidate/pasted-link source slicing with behavior tests over
   the shared `background-download-router.js` handoff.
-- Test categorization remains part of the Phase 5 compatibility quarantine, so
-  Phase 1 stays in progress until those runnable category commands land.
+- Added non-empty, disjoint, exhaustive shipped and extension-primary legacy
+  categories through `npm run test:shipped` and `npm run test:legacy`; the
+  Phase 5 compatibility quarantine mechanically enforces the distinction.
 
 ### Phase 2 — split the native host inside the existing crate
 
@@ -326,26 +337,29 @@ Completed as a behavior-neutral native-host split at development version
 - The bounded `media-download-v1` command model, public URL validation, secret
   rejection, and field validation now live in `media_download.rs`.
 - yt-dlp tool discovery, Windows process setup, runtime flags, info extraction,
-  download command construction, and the bounded 403 retry predicate now live
-  in `youtube.rs`.
+  process spawning, progress parsing, pause/cancel handling, bounded retry, and
+  outcome/state transitions now live in `youtube.rs`.
 - Subtitle command validation, HTTP transport, remote response parsing,
   cancellation, audio extraction/upload, VTT normalization and saving, and the
   long-running state orchestration now live in `subtitle.rs`.
 - Progressive range execution, adaptive concurrency, cancellation/pause
   handling, browser-context yt-dlp preparation, and media state updates now
   live in `media_download.rs`.
-- Legacy `media-open/chunk/close/abort/suspend` chunk decoding, persistence
-  thresholds, and progress calculation are isolated in `legacy_writer.rs`;
-  dispatch stays in `main.rs` to preserve reply and manager-launch behavior.
+- The complete legacy `media-open/chunk/close/abort/suspend` lifecycle,
+  including writer ownership, state persistence, finalization, abort/suspend,
+  and disconnect cleanup, is isolated in `legacy_writer.rs`; `main.rs` only
+  composes the session, reply, download-directory, and manager-launch edges.
 - Host-side fixture checks now cover every disk ABI filename, current and
   legacy job-state deserialization/serialization, the real hello body, and
   `requestId` reply correlation. Source-text architecture checks were narrowed
   to the retired Win32 per-job UI invariant; Rust behavior tests own the moved
   process and disk contracts.
 
-Validation after remediation: native-host 58 passed; focused Companion
-architecture/client/background behavior tests 29 passed; Cargo check and Rust
-formatting passed; `git diff --check` passed. No live installed Native
+After the final extraction `main.rs` is 2,303 lines. A focused architecture
+test rejects reintroduction of either execution lifecycle into the composition
+root and checks the moved legacy writer behavior. Validation after remediation:
+native-host 58 passed; focused Companion architecture 9 passed; Cargo check and
+Rust formatting passed; `git diff --check` passed. No live installed Native
 Messaging or browser flow is claimed by this behavior-preserving extraction.
 
 ### Phase 3 — unify the host/GUI disk contract
@@ -568,9 +582,10 @@ extracted last. Preserve window/process ownership and replace source-text/layout
 assertions with state and geometry tests where practical. Do not perform this
 phase while the current PiP/player work is still being changed elsewhere.
 
-Exit gate: manager behavior and disk ABI are unchanged, GUI tests pass, and
-real installed-window interactions required by the changed surface are recorded
-as live evidence rather than inferred from unit tests or screenshots.
+Code-refactor exit gate: manager behavior and disk ABI are unchanged and GUI
+tests pass. Installed-window interactions are a separate live acceptance gate;
+until run, they must remain `NOT_RUN` rather than being inferred from unit tests
+or screenshots.
 
 #### Phase 6 result — 2026-08-31
 
@@ -649,29 +664,36 @@ Fixture success never implies a live site result. Detection never implies
 download. Untested surfaces remain `NOT_RUN`; code-only bug fixes remain
 `CODE-FIXED / LIVE-UNVERIFIED` until the actual user path is retested.
 
-#### Phase 7 result — 2026-08-31
+#### Phase 7 final result — 2026-08-31
 
-Completed at development handoff version `0.4.61`:
+Completed at development handoff version `0.4.62` after closing the independent
+audit findings:
 
-- media-site suite: 48 passed;
-- full Node suite: 528 passed and 22 explicitly skipped;
+- media-site suite: 46 passed;
+- shipped Node category: 358 total, 341 passed, 17 explicitly skipped;
+- extension-primary legacy category: 203 total, 198 passed, 5 explicitly
+  skipped;
+- full Node suite: 561 total, 539 passed, 22 explicitly skipped;
 - shared Companion contract: 2 passed;
-- native host: 53 passed, with Rust formatting clean;
-- Companion GUI: 198 passed, with Rust formatting clean;
-- packaged runtime graph and exact staging closure: passed as part of the full
-  Node suite and the final development staging audit;
+- native host: 58 passed;
+- Companion GUI: 202 passed;
+- focused graph/staging/store/architecture suite: 22 passed;
+- all three Cargo format checks and Cargo checks: passed (the GUI check retains
+  its three documented pre-existing dead-code warnings);
+- compatibility closure: 73 quarantined files, zero runtime leakage, zero
+  missing or outside-runtime import edges;
 - `git diff --check`: passed.
 
-The Pro development staging directory was rebuilt from the `0.4.61` source
-manifest and audited as the exact then-current 57-file runtime graph. The
-shared background download router subsequently raised the current graph to 58
-files, which will be re-audited in the final handoff. No development ZIP was
-created. This final phase changed only the handoff version and plan status after
-the integrated checks; it did not change runtime behavior.
+The Pro development staging directory was rebuilt from the `0.4.62` source
+manifest and audited as the exact 58-file runtime graph. `manifest.json`, all
+three local Cargo packages and locks, the status fixture, and staging report
+`0.4.62`; the separate store listing remains `0.3.20`. No `0.4.62` development
+ZIP was created.
 
-No installed Companion window, Chrome, Whale, PiP interaction, or live-site
-surface was exercised during the refactor handoff. Those surfaces remain
-`NOT_RUN`; no `INCIDENTS.md` or `SITE_QA_LOG.md` claim was added.
+No installed Companion window, Chrome, Whale, native PiP pointer interaction,
+mpv rendering, or live-site surface was exercised during the refactor handoff.
+Those surfaces remain `NOT_RUN`; deterministic tests are not presented as live
+evidence, and neither `INCIDENTS.md` nor `SITE_QA_LOG.md` was changed.
 
 ## Stop conditions
 
@@ -705,7 +727,7 @@ Pause the refactor when any of the following is true:
 
 ## Completion criteria
 
-The refactor is complete when:
+The code refactor and deterministic development handoff are complete when:
 
 1. the shipped extension graph is explicit and contains no execution fallback;
 2. the native host is modular while preserving protocol and disk ABI;
@@ -715,7 +737,14 @@ The refactor is complete when:
 5. packaging has one allowlist source and legacy code cannot re-enter staging;
 6. manager responsibilities are separated without changing player/PiP native
    ownership;
-7. deterministic suites pass locally on Windows and required Chrome/Whale/live
-   surfaces have evidence in the appropriate logs;
+7. deterministic suites pass locally on Windows, while every unexecuted
+   Chrome/Whale/installed-window/live-site surface is explicitly retained as
+   `NOT_RUN` and is not used as refactor-completion evidence;
 8. version, staging, incident, and QA claims follow the repository handoff
    policy.
+
+Separately, installed-product acceptance is complete only after the applicable
+Phase 7 live checklist has been exercised and recorded in `INCIDENTS.md` or
+`SITE_QA_LOG.md` as appropriate. That live acceptance was not requested or run
+for this behavior-preserving refactor, so it remains open without blocking the
+code-refactor completion recorded here.

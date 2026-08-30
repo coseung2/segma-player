@@ -1,5 +1,9 @@
+use crate::media_download::safe_filename;
+use crate::youtube::apply_hidden_process;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 
 pub const WORKER_URL: &str = "https://aura.mdownloader.workers.dev/api/subtitles";
 #[cfg(test)]

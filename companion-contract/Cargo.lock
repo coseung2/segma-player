@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aura-companion-contract"
-version = "0.4.57"
+version = "0.4.62"
 dependencies = [
  "serde",
  "serde_json",

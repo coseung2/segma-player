@@ -42,8 +42,9 @@ test("shared diagnostics fixture passes through the shipped redaction behavior",
 });
 
 test("the per-job Win32 progress window is gone and the manager binary owns the UI", async () => {
-  const [source, process, nativeModules] = await Promise.all([
+  const [source, legacyWriter, process, nativeModules] = await Promise.all([
     read("./native-host/src/main.rs"),
+    read("./native-host/src/legacy_writer.rs"),
     read("./native-host/src/process.rs"),
     Promise.all([
       "main.rs",
@@ -67,8 +68,31 @@ test("the per-job Win32 progress window is gone and the manager binary owns the 
   assert.match(process, /manager-not-installed/);
   assert.match(source, /focus_existing_manager/);
   assert.match(source, /SetForegroundWindow/);
-  assert.match(source, /request\.show_ui\.unwrap_or\(true\)/);
-  assert.match(source, /persist_job_state\(&mut opened\.state\)/);
+  assert.match(legacyWriter, /request\.show_ui\.unwrap_or\(true\)/);
+  assert.match(legacyWriter, /persist_job_state\(&mut opened\.state\)/);
+});
+
+test("native execution lifecycles stay outside the composition root", async () => {
+  const [source, legacyWriter, youtube] = await Promise.all([
+    read("./native-host/src/main.rs"),
+    read("./native-host/src/legacy_writer.rs"),
+    read("./native-host/src/youtube.rs"),
+  ]);
+
+  assert.doesNotMatch(source, /struct MediaWriter/);
+  assert.doesNotMatch(source, /fn handle_media_request/);
+  assert.doesNotMatch(source, /fn execute_youtube_download/);
+  assert.doesNotMatch(source, /Command::new\(&yt_dlp\)/);
+  assert.doesNotMatch(source, /RecvTimeoutError/);
+
+  assert.match(legacyWriter, /pub fn handle_request/);
+  assert.match(legacyWriter, /pub fn disconnect/);
+  for (const command of ["media-open", "media-chunk", "media-close", "media-abort", "media-suspend"]) {
+    assert.match(legacyWriter, new RegExp(`"${command}"`));
+  }
+  assert.match(youtube, /pub fn execute/);
+  assert.match(youtube, /Command::new\(&yt_dlp\)/);
+  assert.match(youtube, /RecvTimeoutError/);
 });
 
 test("Companion owns persistent recovery and cancellation outside the extension UI", async () => {

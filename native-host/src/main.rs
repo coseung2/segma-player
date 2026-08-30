@@ -14,13 +14,11 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtitle::*;
 
@@ -138,39 +136,12 @@ fn media_download_command_from_request(request: &Request) -> MediaDownloadComman
     }
 }
 
-struct MediaWriter {
-    job_id: String,
-    file: File,
-    temporary_path: PathBuf,
-    final_path: PathBuf,
-    state: JobState,
-    bytes_written: u64,
-    last_state_persisted_at: u64,
-    last_state_persisted_bytes: u64,
-}
-
 fn default_quality() -> String {
     "best".into()
 }
 
-fn quality_height(value: &str) -> Option<u16> {
-    match value {
-        "4320" => Some(4320),
-        "2160" => Some(2160),
-        "1440" => Some(1440),
-        "1080" => Some(1080),
-        "720" => Some(720),
-        "480" => Some(480),
-        "360" => Some(360),
-        "240" => Some(240),
-        "144" => Some(144),
-        "best" => None,
-        _ => None,
-    }
-}
-
 fn valid_quality(value: &str) -> bool {
-    value == "best" || quality_height(value).is_some()
+    youtube::valid_quality(value)
 }
 
 fn now_millis() -> u64 {
@@ -493,469 +464,8 @@ fn persist_job_state(state: &mut JobState) -> io::Result<()> {
     persist_job_state_in(&jobs_dir()?, state, now_millis())
 }
 
-fn safe_filename(value: &str) -> String {
-    let mut name: String = value
-        .chars()
-        .map(|character| {
-            if character.is_control() || "<>:\"/\\|?*".contains(character) {
-                '_'
-            } else {
-                character
-            }
-        })
-        .take(180)
-        .collect();
-    while name.ends_with([' ', '.']) {
-        name.pop();
-    }
-    if name.is_empty() || name == "." || name == ".." {
-        "aura-media.ts".into()
-    } else {
-        name
-    }
-}
-
-fn unique_media_path(directory: &Path, filename: &str) -> PathBuf {
-    let requested = Path::new(filename);
-    let stem = requested
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("aura-media");
-    let extension = requested
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    for index in 0..10_000 {
-        let suffix = if index == 0 {
-            String::new()
-        } else {
-            format!(" ({index})")
-        };
-        let candidate = if extension.is_empty() {
-            format!("{stem}{suffix}")
-        } else {
-            format!("{stem}{suffix}.{extension}")
-        };
-        let path = directory.join(candidate);
-        let temporary = PathBuf::from(format!("{}.part", path.display()));
-        if !path.exists() && !temporary.exists() {
-            return path;
-        }
-    }
-    directory.join(format!("aura-media-{}.ts", std::process::id()))
-}
-
-fn open_media_writer(request: &Request) -> io::Result<MediaWriter> {
-    let directory = aura_downloads_dir()?;
-    open_media_writer_in(&directory, request)
-}
-
-fn open_media_writer_in(directory: &Path, request: &Request) -> io::Result<MediaWriter> {
-    let (final_path, temporary_path, file, bytes_written) =
-        if request.resume_file_name.trim().is_empty() {
-            let filename = safe_filename(&request.filename);
-            let final_path = unique_media_path(&directory, &filename);
-            let temporary_path = PathBuf::from(format!("{}.part", final_path.display()));
-            let file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary_path)?;
-            (final_path, temporary_path, file, 0)
-        } else {
-            let requested = request.resume_file_name.trim();
-            let safe = safe_filename(requested);
-            if safe != requested
-                || Path::new(requested)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    != Some(requested)
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid resume filename",
-                ));
-            }
-            let final_path = directory.join(requested);
-            let temporary_path = PathBuf::from(format!("{}.part", final_path.display()));
-            if final_path.exists() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "completed output already exists",
-                ));
-            }
-            let mut file = OpenOptions::new()
-                .write(true)
-                .read(true)
-                .open(&temporary_path)?;
-            let mut bytes_written = file.metadata()?.len();
-            if request
-                .resume_from
-                .is_some_and(|expected| expected > bytes_written)
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "resume checkpoint exceeds partial file",
-                ));
-            }
-            if let Some(expected) = request
-                .resume_from
-                .filter(|expected| *expected < bytes_written)
-            {
-                file.set_len(expected)?;
-                bytes_written = expected;
-            }
-            file.seek(SeekFrom::End(0))?;
-            (final_path, temporary_path, file, bytes_written)
-        };
-    let now = now_millis();
-    let state = initial_media_writer_state(request, &final_path, now, bytes_written);
-    Ok(MediaWriter {
-        job_id: request.job_id.clone(),
-        file,
-        temporary_path,
-        final_path,
-        state,
-        bytes_written,
-        last_state_persisted_at: now,
-        last_state_persisted_bytes: bytes_written,
-    })
-}
-
-fn initial_media_writer_state(
-    request: &Request,
-    final_path: &Path,
-    now: u64,
-    bytes_written: u64,
-) -> JobState {
-    JobState {
-        job_id: request.job_id.clone(),
-        job_type: None,
-        request_id: (!request.request_id.is_empty()).then(|| request.request_id.clone()),
-        candidate_id: None,
-        source_language: None,
-        target_language: None,
-        input_kind: (!request.input_kind.trim().is_empty()).then(|| request.input_kind.clone()),
-        output_format: None,
-        execution_status: None,
-        tab_id: None,
-        frame_id: None,
-        remote_job_id: None,
-        phase: Some("receiving".into()),
-        completed: Some(bytes_written),
-        total: request.total.filter(|value| *value > 0),
-        model: None,
-        status: "running".into(),
-        status_text: if bytes_written > 0 {
-            format!(
-                "브라우저 다운로드 이어받는 중… {} MB",
-                bytes_written / 1_048_576
-            )
-        } else {
-            "브라우저에서 미디어를 받는 중…".into()
-        },
-        title: (!request.title.trim().is_empty()).then(|| request.title.clone()),
-        error: None,
-        progress: legacy_writer::progress(bytes_written, request.total),
-        file_name: final_path
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned()),
-        created_at: now,
-        updated_at: now,
-    }
-}
-
-fn cancel_media_writer_in(mut active: MediaWriter, jobs_directory: &Path) -> io::Result<()> {
-    active.state.status = "cancelled".into();
-    active.state.status_text = "다운로드를 취소했습니다.".into();
-    active.state.error = None;
-    persist_job_state_in(jobs_directory, &mut active.state, now_millis())?;
-
-    let temporary_path = active.temporary_path.clone();
-    let cancel_path = job_cancel_path_in(jobs_directory, &active.job_id)?;
-    let _ = active.file.flush();
-    drop(active);
-    match fs::remove_file(temporary_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let _ = fs::remove_file(cancel_path);
-    Ok(())
-}
-
-fn handle_media_request(request: &Request, writer: &mut Option<MediaWriter>) {
-    match request.kind.as_str() {
-        "media-open" => match open_media_writer(request) {
-            Ok(mut opened) => {
-                let file_name = opened
-                    .final_path
-                    .file_name()
-                    .map(|value| value.to_string_lossy().into_owned());
-                let bytes_written = opened.bytes_written;
-                let _ = persist_job_state(&mut opened.state);
-                if request.show_ui.unwrap_or(true) {
-                    let _ = spawn_manager();
-                }
-                *writer = Some(opened);
-                reply(
-                    request,
-                    json!({
-                        "ok": true,
-                        "jobId": request.job_id,
-                        "status": "opened",
-                        "statusText": "Downloads\\Aura Media 폴더에 저장을 시작합니다.",
-                        "fileName": file_name,
-                        "bytesWritten": bytes_written,
-                    }),
-                );
-            }
-            Err(error) => reply(
-                request,
-                json!({
-                    "ok": false,
-                    "jobId": request.job_id,
-                    "status": "failed",
-                    "statusText": "로컬 파일을 만들지 못했습니다.",
-                    "error": error.to_string(),
-                }),
-            ),
-        },
-        "media-chunk" => {
-            let matching_writer = writer
-                .as_ref()
-                .is_some_and(|active| active.job_id == request.job_id);
-            if !matching_writer {
-                reply(
-                    request,
-                    json!({
-                        "ok": false,
-                        "jobId": request.job_id,
-                        "status": "failed",
-                        "errorCode": "media-writer-not-open",
-                        "error": "열린 미디어 파일이 없습니다.",
-                    }),
-                );
-                return;
-            }
-            let jobs_directory = jobs_dir();
-            let cancel_requested = jobs_directory
-                .as_ref()
-                .ok()
-                .and_then(|directory| job_cancel_path_in(directory, &request.job_id).ok())
-                .is_some_and(|path| path.exists());
-            if cancel_requested {
-                let result = jobs_directory.and_then(|directory| {
-                    let active = writer.take().expect("matching writer checked above");
-                    cancel_media_writer_in(active, &directory)
-                });
-                reply(
-                    request,
-                    json!({
-                        "ok": false,
-                        "jobId": request.job_id,
-                        "status": "cancelled",
-                        "errorCode": "download-cancelled",
-                        "error": result.err().map_or_else(
-                            || "다운로드를 취소했습니다.".to_string(),
-                            |error| format!("다운로드 취소 정리 중 오류가 발생했습니다: {error}"),
-                        ),
-                    }),
-                );
-                return;
-            }
-            let active = writer.as_mut().expect("matching writer checked above");
-            match legacy_writer::decode_chunk(&request.data) {
-                Ok(bytes) => match active.file.write_all(&bytes) {
-                    Ok(()) => {
-                        active.bytes_written =
-                            active.bytes_written.saturating_add(bytes.len() as u64);
-                        active.state.completed = Some(active.bytes_written);
-                        active.state.progress =
-                            legacy_writer::progress(active.bytes_written, active.state.total);
-                        active.state.status_text = match active.state.progress {
-                            Some(progress) => format!("브라우저에서 미디어를 받는 중… {progress}%"),
-                            None => format!(
-                                "브라우저에서 미디어를 받는 중… {} MB",
-                                active.bytes_written / 1_048_576
-                            ),
-                        };
-                        let now = now_millis();
-                        if legacy_writer::should_persist_state(
-                            now,
-                            active.last_state_persisted_at,
-                            active.bytes_written,
-                            active.last_state_persisted_bytes,
-                        ) {
-                            let _ = persist_job_state(&mut active.state);
-                            active.last_state_persisted_at = now;
-                            active.last_state_persisted_bytes = active.bytes_written;
-                        }
-                        reply(
-                            request,
-                            json!({
-                                "ok": true,
-                                "jobId": request.job_id,
-                                "status": "chunk",
-                                "bytes": bytes.len(),
-                                "bytesWritten": active.bytes_written,
-                            }),
-                        );
-                    }
-                    Err(error) => {
-                        active.state.status = "failed".into();
-                        active.state.status_text = "다운로드 파일을 쓰지 못했습니다.".into();
-                        active.state.error = Some(error.to_string());
-                        let _ = persist_job_state(&mut active.state);
-                        reply(
-                            request,
-                            json!({
-                                "ok": false,
-                                "jobId": request.job_id,
-                                "status": "failed",
-                                "error": error.to_string(),
-                            }),
-                        );
-                    }
-                },
-                Err(error) => reply(
-                    request,
-                    json!({
-                        "ok": false,
-                        "jobId": request.job_id,
-                        "status": "failed",
-                        "errorCode": "invalid-media-data",
-                        "error": error.to_string(),
-                    }),
-                ),
-            }
-        }
-        "media-close" => {
-            let Some(mut active) = writer
-                .take()
-                .filter(|active| active.job_id == request.job_id)
-            else {
-                reply(
-                    request,
-                    json!({
-                        "ok": false,
-                        "jobId": request.job_id,
-                        "status": "failed",
-                        "errorCode": "media-writer-not-open",
-                    }),
-                );
-                return;
-            };
-            let result = active.file.flush().and_then(|_| active.file.sync_all());
-            drop(active.file);
-            match result.and_then(|_| fs::rename(&active.temporary_path, &active.final_path)) {
-                Ok(()) => {
-                    active.state.status = "completed".into();
-                    active.state.status_text = "다운로드 폴더에 저장했습니다.".into();
-                    active.state.phase = Some("completed".into());
-                    active.state.completed = Some(active.bytes_written);
-                    if active.state.total.is_none() {
-                        active.state.total = Some(active.bytes_written);
-                    }
-                    active.state.progress = Some(100);
-                    active.state.error = None;
-                    let _ = persist_job_state(&mut active.state);
-                    reply(
-                        request,
-                        json!({
-                            "ok": true,
-                            "jobId": request.job_id,
-                            "status": "closed",
-                            "statusText": "Downloads\\Aura Media 폴더에 저장했습니다.",
-                            "fileName": active.final_path.file_name().map(|value| value.to_string_lossy().into_owned()),
-                        }),
-                    );
-                }
-                Err(error) => {
-                    let _ = fs::remove_file(&active.temporary_path);
-                    active.state.status = "failed".into();
-                    active.state.status_text = "다운로드 파일을 마무리하지 못했습니다.".into();
-                    active.state.error = Some(error.to_string());
-                    let _ = persist_job_state(&mut active.state);
-                    reply(
-                        request,
-                        json!({
-                            "ok": false,
-                            "jobId": request.job_id,
-                            "status": "failed",
-                            "error": error.to_string(),
-                        }),
-                    );
-                }
-            }
-        }
-        "media-abort" => {
-            if let Some(mut active) = writer.take() {
-                drop(active.file);
-                let _ = fs::remove_file(active.temporary_path);
-                active.state.status = "cancelled".into();
-                active.state.status_text = "다운로드를 취소했습니다.".into();
-                active.state.error = None;
-                let _ = persist_job_state(&mut active.state);
-            }
-            reply(
-                request,
-                json!({
-                    "ok": true,
-                    "jobId": request.job_id,
-                    "status": "aborted",
-                }),
-            );
-        }
-        "media-suspend" => {
-            if let Some(mut active) = writer.take() {
-                let _ = active.file.flush();
-                let _ = active.file.sync_all();
-                drop(active.file);
-                active.state.status = "failed".into();
-                active.state.status_text = "연결이 끊겨 이어받기 지점을 보존했습니다.".into();
-                active.state.error = Some("download-interrupted-resumable".into());
-                active.state.completed = Some(active.bytes_written);
-                let _ = persist_job_state(&mut active.state);
-                reply(
-                    request,
-                    json!({
-                        "ok": true,
-                        "jobId": request.job_id,
-                        "status": "suspended",
-                        "fileName": active.final_path.file_name().map(|value| value.to_string_lossy().into_owned()),
-                        "bytesWritten": active.bytes_written,
-                    }),
-                );
-                return;
-            }
-            reply(
-                request,
-                json!({
-                    "ok": true,
-                    "jobId": request.job_id,
-                    "status": "suspended",
-                    "bytesWritten": 0,
-                }),
-            );
-        }
-        _ => reply(
-            request,
-            json!({
-                "ok": false,
-                "jobId": request.job_id,
-                "status": "failed",
-                "errorCode": "invalid-media-request",
-            }),
-        ),
-    }
-}
-
 fn command_tools() -> io::Result<(PathBuf, PathBuf, PathBuf)> {
     youtube::command_tools(&tools_dir()?)
-}
-
-fn apply_hidden_process(command: &mut Command) {
-    youtube::apply_hidden_process(command);
 }
 
 fn youtube_info(request: &Request) -> Result<Value, String> {
@@ -999,35 +509,6 @@ fn initial_job_state(request: &Request) -> JobState {
     }
 }
 
-fn parse_progress(value: &str) -> Option<u8> {
-    let token = value
-        .split_whitespace()
-        .find(|part| part.trim_end_matches('%').parse::<f32>().is_ok())?;
-    let number = token.trim_end_matches('%').parse::<f32>().ok()?;
-    Some(number.clamp(0.0, 100.0).round() as u8)
-}
-
-fn update_state<F>(state: &mut JobState, notify: &F)
-where
-    F: Fn(&JobState),
-{
-    let _ = persist_job_state(state);
-    notify(state);
-}
-
-fn should_restart_youtube_download(error: &str, attempt: u8) -> bool {
-    youtube::should_restart(error, attempt)
-}
-
-enum DownloadAttemptResult {
-    Completed,
-    Failed(String),
-    SpawnError(String),
-    StatusError(String),
-    Cancelled,
-    Paused,
-}
-
 fn execute_download<F>(request: Request, notify: F)
 where
     F: Fn(&JobState),
@@ -1042,201 +523,16 @@ where
         };
         media_download::execute(command, context, notify);
     } else {
-        execute_youtube_download(request, notify);
-    }
-}
-
-fn execute_youtube_download<F>(request: Request, notify: F)
-where
-    F: Fn(&JobState),
-{
-    let mut state = initial_job_state(&request);
-    state.status = "running".into();
-    state.status_text = "YouTube 정보를 확인하는 중…".into();
-    update_state(&mut state, &notify);
-
-    if request.kind != "youtube-download"
-        || safe_id(&request.job_id).is_none()
-        || !(request.url.starts_with("https://") || request.url.starts_with("http://"))
-        || !valid_quality(&request.quality)
-    {
-        state.status = "failed".into();
-        state.status_text = "올바른 YouTube 요청이 아닙니다.".into();
-        state.error = Some("invalid-request".into());
-        update_state(&mut state, &notify);
-        return;
-    }
-
-    let (yt_dlp, node, ffmpeg) = match command_tools() {
-        Ok(tools) => tools,
-        Err(error) => {
-            state.status = "failed".into();
-            state.status_text = "미디어 도구가 설치되지 않았습니다.".into();
-            state.error = Some(error.to_string());
-            update_state(&mut state, &notify);
-            return;
-        }
-    };
-    let downloads = match aura_downloads_dir() {
-        Ok(path) => path,
-        Err(error) => {
-            state.status = "failed".into();
-            state.status_text = "Downloads\\Aura Media 폴더를 준비하지 못했습니다.".into();
-            state.error = Some(error.to_string());
-            update_state(&mut state, &notify);
-            return;
-        }
-    };
-
-    let cancel_path = job_cancel_path(&request.job_id).ok();
-    let pause_path = job_pause_path(&request.job_id).ok();
-    let mut attempt = 0_u8;
-    let outcome = loop {
-        attempt += 1;
-        let mut command = Command::new(&yt_dlp);
-        youtube::configure_download_command(
-            &mut command,
-            &request.url,
-            quality_height(&request.quality),
-            &downloads,
-            &node,
-            &ffmpeg,
-        );
-
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => break DownloadAttemptResult::SpawnError(error.to_string()),
+        let job_id = request.job_id.clone();
+        let cancel_job_id = job_id.clone();
+        let context = youtube::ExecutionContext {
+            tools: || command_tools().map_err(|error| error.to_string()),
+            downloads: || aura_downloads_dir().map_err(|error| error.to_string()),
+            cancel_path: move || job_cancel_path(&cancel_job_id).ok(),
+            pause_path: move || job_pause_path(&job_id).ok(),
         };
-        let (tx, rx) = mpsc::channel();
-        if let Some(stdout) = child.stdout.take() {
-            let tx = tx.clone();
-            thread::spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    let _ = tx.send(line);
-                }
-            });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let tx = tx.clone();
-            thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    let _ = tx.send(line);
-                }
-            });
-        }
-        drop(tx);
-
-        let mut last_error = String::new();
-        let mut cancelled = false;
-        let mut paused = false;
-        loop {
-            if cancel_path.as_ref().is_some_and(|path| path.exists()) {
-                let _ = child.kill();
-                cancelled = true;
-                break;
-            }
-            // Pause stops the child but leaves yt-dlp's `.part` file in place, so a
-            // later resume continues from the same byte instead of restarting.
-            if pause_path.as_ref().is_some_and(|path| path.exists()) {
-                let _ = child.kill();
-                paused = true;
-                break;
-            }
-            match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(line) => {
-                    if let Some(title) = line.strip_prefix("AURA_TITLE:") {
-                        state.title = Some(title.trim().to_string());
-                        state.status_text = "영상 다운로드를 시작합니다…".into();
-                        update_state(&mut state, &notify);
-                    } else if let Some(progress) = line.strip_prefix("AURA_PROGRESS:") {
-                        state.progress = parse_progress(progress);
-                        state.status_text = format!("다운로드 중 · {}", progress.trim());
-                        update_state(&mut state, &notify);
-                    } else if let Some(path) = line.strip_prefix("AURA_FILE:") {
-                        state.file_name = Path::new(path.trim())
-                            .file_name()
-                            .map(|value| value.to_string_lossy().into_owned());
-                    } else if line.starts_with("ERROR:") {
-                        last_error = line.trim().chars().take(500).collect();
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if child.try_wait().ok().flatten().is_some() {
-                        break;
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        let status = child.wait();
-        if cancelled {
-            break DownloadAttemptResult::Cancelled;
-        }
-        if paused {
-            break DownloadAttemptResult::Paused;
-        }
-        match status {
-            Ok(status) if status.success() => break DownloadAttemptResult::Completed,
-            Ok(status) => {
-                let error = if last_error.is_empty() {
-                    format!("yt-dlp exit {status}")
-                } else {
-                    last_error
-                };
-                if should_restart_youtube_download(&error, attempt) {
-                    state.progress = None;
-                    state.status_text = "일시적인 403 오류입니다. 링크를 새로 확인하는 중…".into();
-                    state.error = None;
-                    update_state(&mut state, &notify);
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
-                break DownloadAttemptResult::Failed(error);
-            }
-            Err(error) => break DownloadAttemptResult::StatusError(error.to_string()),
-        }
-    };
-    if let Some(path) = cancel_path {
-        let _ = fs::remove_file(path);
+        youtube::execute(request, context, notify);
     }
-
-    match outcome {
-        DownloadAttemptResult::Completed => {
-            state.status = "completed".into();
-            state.status_text = "Downloads\\Aura Media 폴더에 저장했습니다.".into();
-            state.progress = Some(100);
-            state.error = None;
-        }
-        DownloadAttemptResult::Failed(error) => {
-            state.status = "failed".into();
-            state.status_text = "YouTube 다운로드에 실패했습니다.".into();
-            state.error = Some(error);
-        }
-        DownloadAttemptResult::SpawnError(error) => {
-            state.status = "failed".into();
-            state.status_text = "yt-dlp를 실행하지 못했습니다.".into();
-            state.error = Some(error);
-        }
-        DownloadAttemptResult::StatusError(error) => {
-            state.status = "failed".into();
-            state.status_text = "yt-dlp 종료 상태를 확인하지 못했습니다.".into();
-            state.error = Some(error);
-        }
-        DownloadAttemptResult::Cancelled => {
-            state.status = "cancelled".into();
-            state.status_text = "다운로드를 취소했습니다.".into();
-            state.error = None;
-        }
-        // The pause marker is deliberately left on disk: it is what tells the
-        // manager window this job is paused rather than stopped, and `resume`
-        // removes it.
-        DownloadAttemptResult::Paused => {
-            state.status = "paused".into();
-            state.status_text = "일시정지했습니다. 이어받기를 누르면 계속합니다.".into();
-            state.error = None;
-        }
-    }
-    update_state(&mut state, &notify);
 }
 
 fn spawn_job_runner(request: &Request) -> io::Result<()> {
@@ -1359,7 +655,7 @@ fn run_native_host() {
     if let Ok(directory) = jobs_dir() {
         let _ = cleanup_stale_subtitle_requests_in(&directory, now_millis());
     }
-    let mut writer: Option<MediaWriter> = None;
+    let mut legacy_writer = legacy_writer::Session::default();
     while let Ok(Some(request)) = read_message() {
         match request.kind.as_str() {
             "hello" => reply(&request, hello_response()),
@@ -1528,24 +824,24 @@ fn run_native_host() {
                 Ok(()) => reply(&request, json!({ "ok": true })),
                 Err(error) => reply(&request, json!({ "ok": false, "error": error.to_string() })),
             },
-            kind if kind.starts_with("media-") => handle_media_request(&request, &mut writer),
+            kind if kind.starts_with("media-") => {
+                let response = legacy_writer::handle_request(
+                    &request,
+                    &mut legacy_writer,
+                    aura_downloads_dir,
+                    || {
+                        let _ = spawn_manager();
+                    },
+                );
+                reply(&request, response);
+            }
             _ => reply(
                 &request,
                 json!({ "ok": false, "errorCode": "unsupported-request", "error": "지원하지 않는 Aura Companion 요청입니다." }),
             ),
         }
     }
-    if let Some(active) = writer.take() {
-        let mut active = active;
-        drop(active.file);
-        let _ = fs::remove_file(active.temporary_path);
-        if active.state.status == "running" {
-            active.state.status = "failed".into();
-            active.state.status_text = "브라우저와 Companion 연결이 끊겼습니다.".into();
-            active.state.error = Some("media-companion-disconnected".into());
-            let _ = persist_job_state(&mut active.state);
-        }
-    }
+    legacy_writer::disconnect(&mut legacy_writer);
 }
 
 fn run_job_from_path(path: &Path) -> io::Result<()> {
@@ -1608,6 +904,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::collections::VecDeque;
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
@@ -1786,9 +1083,9 @@ mod tests {
 
     #[test]
     fn validates_supported_quality_caps() {
-        assert_eq!(quality_height("4320"), Some(4320));
-        assert_eq!(quality_height("1080"), Some(1080));
-        assert_eq!(quality_height("best"), None);
+        assert_eq!(youtube::quality_height("4320"), Some(4320));
+        assert_eq!(youtube::quality_height("1080"), Some(1080));
+        assert_eq!(youtube::quality_height("best"), None);
         assert!(valid_quality("best"));
         assert!(valid_quality("144"));
         assert!(!valid_quality("123"));
@@ -1803,8 +1100,11 @@ mod tests {
 
     #[test]
     fn parses_progress_lines() {
-        assert_eq!(parse_progress(" 72.4% 12.0MiB/s ETA 00:12"), Some(72));
-        assert_eq!(parse_progress("unknown"), None);
+        assert_eq!(
+            youtube::parse_progress(" 72.4% 12.0MiB/s ETA 00:12"),
+            Some(72)
+        );
+        assert_eq!(youtube::parse_progress("unknown"), None);
     }
 
     #[test]
@@ -2635,7 +1935,8 @@ mod tests {
         request.input_kind = "PROGRESSIVE".into();
         request.total = Some(1_234_567);
 
-        let state = initial_media_writer_state(&request, Path::new("clip.mp4"), 123, 0);
+        let state =
+            legacy_writer::initial_media_writer_state(&request, Path::new("clip.mp4"), 123, 0);
         assert_eq!(state.job_id, "extension-job-42");
         assert_eq!(state.request_id.as_deref(), Some("native-request-7"));
         assert_eq!(state.title.as_deref(), Some("Playmogo clip"));
@@ -2840,7 +2141,8 @@ mod tests {
         request.resume_file_name = "clip.mp4".into();
         request.resume_from = Some(2_048);
 
-        let writer = open_media_writer_in(&directory, &request).expect("partial file reopens");
+        let writer = legacy_writer::open_media_writer_in(&directory, &request)
+            .expect("partial file reopens");
         assert_eq!(writer.bytes_written, 2_048);
         assert_eq!(writer.state.completed, Some(2_048));
         assert_eq!(writer.temporary_path, partial_path);
@@ -2858,8 +2160,8 @@ mod tests {
         request.kind = "media-open".into();
         request.filename = "cancelled.mp4".into();
 
-        let mut writer =
-            open_media_writer_in(&media_directory, &request).expect("media writer opens");
+        let mut writer = legacy_writer::open_media_writer_in(&media_directory, &request)
+            .expect("media writer opens");
         writer
             .file
             .write_all(b"partial bytes")
@@ -2869,7 +2171,7 @@ mod tests {
             job_cancel_path_in(&jobs_directory, &request.job_id).expect("cancel path resolves");
         fs::write(&cancel_path, b"cancel").expect("cancel marker writes");
 
-        cancel_media_writer_in(writer, &jobs_directory).expect("writer cancels");
+        legacy_writer::cancel_media_writer_in(writer, &jobs_directory).expect("writer cancels");
 
         assert!(
             !partial_path.exists(),
@@ -2988,17 +2290,14 @@ mod tests {
 
     #[test]
     fn youtube_403_restarts_extraction_once_but_not_forever() {
-        assert!(should_restart_youtube_download(
+        assert!(youtube::should_restart(
             "ERROR: unable to download video data: HTTP Error 403: Forbidden",
             1
         ));
-        assert!(!should_restart_youtube_download(
+        assert!(!youtube::should_restart(
             "ERROR: unable to download video data: HTTP Error 403: Forbidden",
             2
         ));
-        assert!(!should_restart_youtube_download(
-            "ERROR: Video unavailable",
-            1
-        ));
+        assert!(!youtube::should_restart("ERROR: Video unavailable", 1));
     }
 }

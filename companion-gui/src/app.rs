@@ -3,34 +3,33 @@
 //! Job state is polled from disk on a fixed interval. The manager never talks
 //! to the native messaging host process; the jobs folder is the interface.
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, Vec2};
 
-use crate::gif_export::{GifExportController, GifExportRequest, GifExportStatus};
+use crate::gif_export::{GifExportRequest, GifExportStatus};
 use crate::icons::Icon;
-use crate::jobs::{self, JobState, MediaFile};
-use crate::library_state::{LibraryState, WatchState};
+use crate::jobs;
+use crate::library_controller::{LibraryController, LibraryFilter, LibrarySort};
+use crate::library_state::WatchState;
+use crate::license_controller::{LicenseController, LicenseNotice};
+use crate::manager_poll::{ManagerPoll, PollResult, POLL_INTERVAL};
 use crate::model::{
-    self, library_entries, missing_output_count, queue_summary, queue_views, subtitle_summary,
-    subtitle_views, JobView, RestartableJobs,
+    self, library_entries, missing_output_count, queue_summary, subtitle_summary, subtitle_views,
 };
-use crate::player_backend::PlayerController;
 use crate::player_contract::{PhysicalVideoRect, PlayerCommand};
+use crate::player_session::{PipSessionState, PlayerSession};
 use crate::player_ui::{self, PlayerUiInput};
-use crate::seek_preview::SeekPreviewController;
+use crate::queue_controller::QueueController;
 use crate::shortcuts::{self, CaptureResult, PlayerShortcuts, ShortcutAction};
-use crate::theme::{color, corner, hairline, margin, margin_xy, metric, radius, space, text, Tone};
-use crate::thumbnails::{ThumbnailRequest, ThumbnailResult};
+use crate::theme::{color, corner, hairline, margin_xy, metric, radius, space, text, Tone};
+use crate::thumbnails::ThumbnailCoordinator;
 use crate::widgets::{
     button, empty_state, icon_button, job_row, media_thumbnail, menu_row, nav_item, tile_menu,
     ButtonStyle, RowEvent, TileMenuEvent,
 };
 
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// A notice stays long enough to read, then clears itself so a stale message
 /// never looks like current state.
 const NOTICE_LIFETIME: Duration = Duration::from_secs(6);
@@ -87,95 +86,6 @@ impl View {
 
     pub fn title(self) -> &'static str {
         self.label()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueFilter {
-    All,
-    Active,
-    Paused,
-    Complete,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LibraryFilter {
-    All,
-    Favorite,
-    Unwatched,
-    InProgress,
-    Completed,
-}
-
-impl LibraryFilter {
-    const ALL: [Self; 5] = [
-        Self::All,
-        Self::Favorite,
-        Self::Unwatched,
-        Self::InProgress,
-        Self::Completed,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "전체",
-            Self::Favorite => "찜",
-            Self::Unwatched => "미시청",
-            Self::InProgress => "보는 중",
-            Self::Completed => "완료",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LibrarySort {
-    Newest,
-    Rating,
-    Title,
-}
-
-impl LibrarySort {
-    const ALL: [Self; 3] = [Self::Newest, Self::Rating, Self::Title];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Newest => "최신순",
-            Self::Rating => "별점순",
-            Self::Title => "제목순",
-        }
-    }
-}
-
-impl QueueFilter {
-    pub const ALL: [QueueFilter; 5] = [
-        QueueFilter::All,
-        QueueFilter::Active,
-        QueueFilter::Paused,
-        QueueFilter::Complete,
-        QueueFilter::Failed,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            QueueFilter::All => "전체",
-            QueueFilter::Active => "진행 중",
-            QueueFilter::Paused => "일시정지",
-            QueueFilter::Complete => "완료",
-            QueueFilter::Failed => "실패",
-        }
-    }
-
-    pub fn matches(self, view: &JobView) -> bool {
-        match self {
-            QueueFilter::All => true,
-            QueueFilter::Active => view.active,
-            // Paused is neither active nor terminal, so it needs its own filter
-            // or it would only ever appear under 전체.
-            QueueFilter::Paused => view.paused,
-            QueueFilter::Complete => view.tone == Tone::Success,
-            QueueFilter::Failed => view.tone == Tone::Danger,
-        }
     }
 }
 
@@ -293,177 +203,28 @@ struct Notice {
 
 pub struct ManagerApp {
     view: View,
-    queue_filter: QueueFilter,
-    jobs: Vec<JobState>,
-    /// Media files actually present in the download folder. The library is built
-    /// from this, not from job history, so a moved or deleted file disappears
-    /// and a hand-placed file shows up.
-    media_files: Vec<MediaFile>,
-    /// Job ids whose `.request.json` still exists, refreshed with each poll.
-    /// Resume and retry need that record, so a row without it shows no restart
-    /// button instead of one that fails.
-    restartable: RestartableJobs,
-    /// Kept separate from `jobs` so a failed poll does not clear the list. An
-    /// empty list would make a transient read error look like lost history.
-    read_error: Option<String>,
-    last_poll: Instant,
+    poll_state: ManagerPoll,
+    queue: QueueController,
+    library: LibraryController,
     notice: Option<Notice>,
-    search: String,
-    library_filter: LibraryFilter,
-    library_sort: LibrarySort,
-    library_min_rating: i32,
-    library_state: LibraryState,
-    /// File name waiting for the delete confirmation modal.
-    pending_delete: Option<String>,
-    /// Stable folder/file keys selected for one recoverable batch action.
-    library_selection: HashSet<jobs::LibraryFileRef>,
-    library_selection_mode: bool,
-    pending_batch_delete: bool,
-    /// Preview-first automatic organization and its most recent reversible
-    /// journal. Neither is persisted: undo is scoped to this app session.
-    pending_organization: Option<jobs::LibraryOrganizationPlan>,
-    organization_journal: Option<jobs::LibraryMoveJournal>,
-    /// `None` shows the download folder root; `Some(name)` shows one folder.
-    library_folder: Option<String>,
-    library_folders: Vec<jobs::LibraryFolder>,
-    /// File name waiting for a move-destination choice.
-    pending_move: Option<String>,
-    /// Draft name for the create-folder modal; `Some` means the modal is open.
-    pending_folder_name: Option<String>,
-    /// Existing name and editable draft for the rename-folder modal.
-    pending_folder_rename: Option<(String, String)>,
-    /// File currently dragged from a library tile. Folder chips consume it on
-    /// pointer release and the existing move routine performs the safe rename.
-    dragged_library_file: Option<String>,
-    /// Folder that just received a dropped file and the animation deadline for
-    /// its settle ring. Cleared when the deadline passes, so no state persists.
-    library_drop_settle: Option<(Option<String>, f64)>,
-    player: PlayerController,
-    gif_export: GifExportController,
-    seek_preview: SeekPreviewController,
-    player_parent_hwnd: isize,
-    taskbar_icon_applied: bool,
-    player_video_hwnd: isize,
-    player_loaded_file: Option<String>,
-    player_media: Option<MediaFile>,
-    pending_resume_position: Option<f64>,
-    last_resume_save: Instant,
-    /// Folder the currently loaded file came from.
-    player_loaded_folder: Option<String>,
-    /// Last Player surface is also the PiP surface after navigation. Keeping
-    /// one rectangle avoids creating a second popup/window composition.
-    last_player_video_rect: PhysicalVideoRect,
-    last_player_video_logical_rect: egui::Rect,
-    fullscreen: bool,
-    downloads_folder: Option<String>,
-    player_shortcuts: PlayerShortcuts,
-    shortcut_capture: Option<ShortcutAction>,
-    thumbnail_requests: Sender<ThumbnailRequest>,
-    thumbnail_results: Receiver<ThumbnailResult>,
-    thumbnail_textures: HashMap<String, egui::TextureHandle>,
-    thumbnail_pending: HashSet<String>,
-    thumbnail_unavailable: HashSet<String>,
-    license: crate::license::AppLicense,
-    license_key_input: String,
-    license_checking: bool,
-    license_checking_existing: bool,
-    license_focus_requested: bool,
-    license_result_sender: Sender<Result<crate::license::AppLicense, crate::license::LicenseError>>,
-    license_result_receiver:
-        Receiver<Result<crate::license::AppLicense, crate::license::LicenseError>>,
-    pip_armed: bool,
-    pip_dismissed: bool,
-    pip_position: Option<egui::Pos2>,
-    pip_width: f32,
-    /// Until this instant the egui surface follows the OS cursor directly.
-    /// This keeps PiP moving after the pointer crosses onto the native mpv
-    /// child, where egui no longer receives drag events.
-    pip_move_until: Option<Instant>,
-    /// Pointer grab offset inside the PiP surface for OS-cursor tracking.
-    pip_move_offset: Vec2,
-    /// Fixed position captured when the dedicated PiP drag strip is pressed.
-    pip_move_start: Option<egui::Pos2>,
-    /// Geometry captured at the start of an edge drag. Resizing uses
-    /// `Response::total_drag_delta`, so it must derive from this fixed baseline.
-    pip_resize_drag: Option<PipResizeDrag>,
+    player_session: PlayerSession,
+    thumbnails: ThumbnailCoordinator,
+    license: LicenseController,
+    pip: PipSessionState<PipResizeDrag>,
 }
 
 impl Default for ManagerApp {
     fn default() -> Self {
-        let thumbnails = crate::thumbnails::start_worker();
-        let (license_result_sender, license_result_receiver) = std::sync::mpsc::channel();
-        let license = crate::license::load();
-        let license_key_input = if license.pro {
-            String::new()
-        } else {
-            license.key.clone()
-        };
         Self {
             view: View::Queue,
-            queue_filter: QueueFilter::All,
-            jobs: Vec::new(),
-            media_files: Vec::new(),
-            restartable: RestartableJobs::new(),
-            read_error: None,
-            last_poll: Instant::now() - POLL_INTERVAL,
+            poll_state: ManagerPoll::default(),
+            queue: QueueController::default(),
+            library: LibraryController::default(),
             notice: None,
-            search: String::new(),
-            library_filter: LibraryFilter::All,
-            library_sort: LibrarySort::Newest,
-            library_min_rating: 0,
-            library_state: LibraryState::load().unwrap_or_default(),
-            pending_delete: None,
-            library_selection: HashSet::new(),
-            library_selection_mode: false,
-            pending_batch_delete: false,
-            pending_organization: None,
-            organization_journal: None,
-            library_folder: None,
-            library_folders: Vec::new(),
-            pending_move: None,
-            pending_folder_name: None,
-            pending_folder_rename: None,
-            dragged_library_file: None,
-            library_drop_settle: None,
-            player: PlayerController::new(),
-            gif_export: GifExportController::new(),
-            seek_preview: SeekPreviewController::new(),
-            player_parent_hwnd: 0,
-            taskbar_icon_applied: false,
-            player_video_hwnd: 0,
-            player_loaded_file: None,
-            player_media: None,
-            pending_resume_position: None,
-            last_resume_save: Instant::now() - Duration::from_secs(3),
-            player_loaded_folder: None,
-            last_player_video_rect: PhysicalVideoRect::default(),
-            last_player_video_logical_rect: egui::Rect::NOTHING,
-            fullscreen: false,
-            downloads_folder: jobs::downloads_dir()
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned()),
-            player_shortcuts: jobs::read_player_shortcuts(),
-            shortcut_capture: None,
-            thumbnail_requests: thumbnails.requests,
-            thumbnail_results: thumbnails.results,
-            thumbnail_textures: HashMap::new(),
-            thumbnail_pending: HashSet::new(),
-            thumbnail_unavailable: HashSet::new(),
-            license,
-            license_key_input,
-            license_checking: false,
-            license_checking_existing: false,
-            license_focus_requested: false,
-            license_result_sender,
-            license_result_receiver,
-            pip_armed: false,
-            pip_dismissed: false,
-            pip_position: None,
-            pip_width: MINI_PLAYER_WIDTH,
-            pip_move_until: None,
-            pip_move_offset: Vec2::ZERO,
-            pip_move_start: None,
-            pip_resize_drag: None,
+            player_session: PlayerSession::default(),
+            thumbnails: ThumbnailCoordinator::default(),
+            license: LicenseController::default(),
+            pip: PipSessionState::new(MINI_PLAYER_WIDTH),
         }
     }
 }
@@ -479,81 +240,22 @@ impl ManagerApp {
     }
 
     fn poll(&mut self, force: bool) {
-        if !force && self.last_poll.elapsed() < POLL_INTERVAL {
-            return;
+        if self
+            .poll_state
+            .refresh(force, self.library.folder.as_deref())
+            == PollResult::SelectedFolderMissing
+        {
+            self.library.folder = None;
+            let _ = self.poll_state.refresh(true, None);
         }
-        self.last_poll = Instant::now();
-        match jobs::read_jobs() {
-            Ok(jobs) => {
-                self.restartable = jobs::restartable_ids(
-                    &jobs
-                        .iter()
-                        .map(|job| job.job_id.clone())
-                        .collect::<Vec<_>>(),
-                );
-                self.jobs = jobs;
-                self.read_error = None;
-            }
-            Err(error) => self.read_error = Some(error.to_string()),
-        }
-        // The folder can change from the extension side too, so re-read it
-        // rather than trusting the value captured at startup.
-        self.downloads_folder = jobs::downloads_dir()
-            .ok()
-            .map(|path| path.to_string_lossy().into_owned());
-        // Read the folder every poll: a file can be deleted or moved outside the
-        // app, and the library must reflect the folder rather than job history.
-        self.library_folders = jobs::read_library_folders().unwrap_or_default();
-        // A folder can disappear outside the app; fall back to the root instead
-        // of showing an empty view for a path that no longer exists.
-        if let Some(current) = self.library_folder.clone() {
-            if !self
-                .library_folders
-                .iter()
-                .any(|folder| folder.name == current)
-            {
-                self.library_folder = None;
-            }
-        }
-        self.media_files =
-            jobs::read_media_files_in_folder(self.library_folder.as_deref()).unwrap_or_default();
     }
 
     fn sync_thumbnails(&mut self, context: &egui::Context) {
-        while let Ok(result) = self.thumbnail_results.try_recv() {
-            self.thumbnail_pending.remove(&result.key);
-            if let Some(image) = result.image {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(image.size, &image.rgba);
-                let texture = context.load_texture(
-                    format!("library:{}", result.key),
-                    color_image,
-                    egui::TextureOptions::LINEAR,
-                );
-                self.thumbnail_textures.insert(result.key, texture);
-            } else {
-                self.thumbnail_unavailable.insert(result.key);
-            }
-        }
-
-        let Ok(folder) = jobs::library_dir(self.library_folder.as_deref()) else {
-            return;
-        };
-        for file in &self.media_files {
-            let key = crate::thumbnails::key(file);
-            if self.thumbnail_textures.contains_key(&key)
-                || self.thumbnail_pending.contains(&key)
-                || self.thumbnail_unavailable.contains(&key)
-            {
-                continue;
-            }
-            let request = ThumbnailRequest {
-                key: key.clone(),
-                media_path: folder.join(&file.file_name),
-            };
-            if self.thumbnail_requests.send(request).is_ok() {
-                self.thumbnail_pending.insert(key);
-            }
-        }
+        self.thumbnails.sync(
+            context,
+            self.library.folder.as_deref(),
+            &self.poll_state.media_files,
+        );
     }
 
     fn notify(&mut self, text: impl Into<String>, tone: NoticeTone) {
@@ -565,60 +267,26 @@ impl ManagerApp {
     }
 
     fn verify_license(&mut self, key: String) {
-        if self.license_checking {
-            return;
+        if let Some(notice) = self.license.verify(key) {
+            self.show_license_notice(notice);
         }
-        let Some(key) = crate::license::normalize_key(&key) else {
-            self.notify("인증키 형식을 확인해 주세요.", NoticeTone::Error);
-            return;
-        };
-        self.license_checking_existing = self.license.pro && self.license.key == key;
-        self.license_checking = true;
-        let sender = self.license_result_sender.clone();
-        std::thread::spawn(move || {
-            let _ = sender.send(crate::license::verify(&key));
-        });
     }
 
     fn poll_license_result(&mut self) {
-        while let Ok(result) = self.license_result_receiver.try_recv() {
-            self.license_checking = false;
-            let checking_existing = std::mem::take(&mut self.license_checking_existing);
-            match result {
-                Ok(license) => match crate::license::save_approved(&license) {
-                    Ok(()) => {
-                        self.license = license;
-                        self.license_key_input.clear();
-                        self.notify("Segma Player Pro 인증이 완료됐습니다.", NoticeTone::Info);
-                    }
-                    Err(_) => self.notify(
-                        crate::license::LicenseError::SaveFailed.message(),
-                        NoticeTone::Error,
-                    ),
-                },
-                Err(error) => {
-                    if checking_existing && error.invalidates_existing_pro() {
-                        let _ = crate::license::remove();
-                        self.license = crate::license::AppLicense::default();
-                        self.license_key_input.clear();
-                    }
-                    self.notify(error.message(), NoticeTone::Error);
-                }
-            }
+        for notice in self.license.poll() {
+            self.show_license_notice(notice);
         }
     }
 
     fn remove_license(&mut self) {
-        match crate::license::remove() {
-            Ok(()) => {
-                self.license = crate::license::AppLicense::default();
-                self.license_key_input.clear();
-                self.notify("일반 플랜으로 전환했습니다.", NoticeTone::Info);
-            }
-            Err(error) => self.notify(
-                format!("인증 정보를 지우지 못했습니다: {error}"),
-                NoticeTone::Error,
-            ),
+        let notice = self.license.remove();
+        self.show_license_notice(notice);
+    }
+
+    fn show_license_notice(&mut self, notice: LicenseNotice) {
+        match notice {
+            LicenseNotice::Info(message) => self.notify(message, NoticeTone::Info),
+            LicenseNotice::Error(message) => self.notify(message, NoticeTone::Error),
         }
     }
 
@@ -677,6 +345,7 @@ impl ManagerApp {
     /// a job whose file is gone reports that instead of failing silently.
     fn play(&mut self, job_id: &str) {
         let file_name = self
+            .poll_state
             .jobs
             .iter()
             .find(|job| job.job_id == job_id)
@@ -690,16 +359,16 @@ impl ManagerApp {
 
     /// Opens a file in the built-in player.
     fn generate_library_subtitle(&mut self, file_name: &str) {
-        if !self.license.pro {
+        if !self.license.current.pro {
             self.view = View::Settings;
-            self.license_focus_requested = true;
+            self.license.focus_requested = true;
             self.notify(
                 "AI 자막 생성은 앱 Pro 기능입니다. 설정에서 인증키를 등록해 주세요.",
                 NoticeTone::Error,
             );
             return;
         }
-        match jobs::start_library_subtitle_job(self.library_folder.as_deref(), file_name) {
+        match jobs::start_library_subtitle_job(self.library.folder.as_deref(), file_name) {
             Ok(_) => {
                 self.notify(
                     format!("{file_name} 자막 생성을 시작했습니다."),
@@ -718,7 +387,7 @@ impl ManagerApp {
     }
 
     fn play_file(&mut self, file_name: &str) {
-        self.play_file_in(self.library_folder.clone(), file_name);
+        self.play_file_in(self.library.folder.clone(), file_name);
     }
 
     fn play_file_in(&mut self, folder: Option<String>, file_name: &str) {
@@ -728,31 +397,33 @@ impl ManagerApp {
                 let media = jobs::read_media_files_in_folder(folder.as_deref())
                     .ok()
                     .and_then(|files| files.into_iter().find(|file| file.file_name == file_name));
-                self.pending_resume_position = media.as_ref().and_then(|media| {
-                    let metadata = self.library_state.metadata_or_default(media);
+                let resume_position = media.as_ref().and_then(|media| {
+                    let metadata = self.library.state.metadata_or_default(media);
                     (metadata.watch_state() == WatchState::InProgress
                         && metadata.last_position.is_finite()
                         && metadata.last_position >= 5.0)
                         .then_some(metadata.last_position)
                 });
-                self.seek_preview.media_changed();
-                self.player_loaded_file = Some(file_name.to_string());
-                self.player_loaded_folder = folder;
-                self.player_media = media;
                 self.view = View::Player;
-                self.pip_armed = false;
-                self.pip_dismissed = false;
-                let _ = self.player.send(PlayerCommand::Load(path));
+                self.pip.armed = false;
+                self.pip.dismissed = false;
+                self.player_session.load(
+                    folder,
+                    file_name.to_string(),
+                    media,
+                    resume_position,
+                    path,
+                );
             }
             Err(error) => self.notify(format!("재생하지 못했습니다: {error}"), NoticeTone::Error),
         }
     }
 
     fn save_library_state(&mut self) {
-        if !self.library_state.is_dirty() {
+        if !self.library.state.is_dirty() {
             return;
         }
-        if let Err(error) = self.library_state.persist() {
+        if let Err(error) = self.library.state.persist() {
             self.notify(
                 format!("보관함 정보를 저장하지 못했습니다: {error}"),
                 NoticeTone::Error,
@@ -761,13 +432,13 @@ impl ManagerApp {
     }
 
     fn save_playback_state(&mut self, force: bool) {
-        if !force && self.last_resume_save.elapsed() < Duration::from_secs(2) {
+        if !force && self.player_session.last_resume_save.elapsed() < Duration::from_secs(2) {
             return;
         }
-        let Some(media) = self.player_media.as_ref() else {
+        let Some(media) = self.player_session.media.as_ref() else {
             return;
         };
-        let snapshot = self.player.snapshot();
+        let snapshot = self.player_session.controller.snapshot();
         if snapshot.loaded_path.is_none()
             || !snapshot.position.is_finite()
             || !snapshot.duration.is_finite()
@@ -775,19 +446,22 @@ impl ManagerApp {
         {
             return;
         }
-        self.last_resume_save = Instant::now();
+        self.player_session.last_resume_save = Instant::now();
         if snapshot.position >= 5.0
             && self
-                .library_state
+                .library
+                .state
                 .metadata_or_default(media)
                 .watched_override
                 == Some(false)
         {
-            self.library_state
+            self.library
+                .state
                 .set_watched_override(media, None, now_millis());
         }
         if self
-            .library_state
+            .library
+            .state
             .set_resume(media, snapshot.position, snapshot.duration, now_millis())
         {
             self.save_library_state();
@@ -795,7 +469,7 @@ impl ManagerApp {
     }
 
     fn start_gif_export(&mut self, snapshot: &crate::player_contract::PlayerSnapshot) {
-        if self.gif_export.is_busy() {
+        if self.player_session.gif_export.is_busy() {
             self.notify("GIF를 만드는 중입니다.", NoticeTone::Info);
             return;
         }
@@ -817,7 +491,7 @@ impl ManagerApp {
                 return;
             }
         };
-        let output = match jobs::library_dir(self.player_loaded_folder.as_deref()) {
+        let output = match jobs::library_dir(self.player_session.loaded_folder.as_deref()) {
             Ok(path) => path,
             Err(error) => {
                 self.notify(
@@ -828,7 +502,7 @@ impl ManagerApp {
             }
         };
         let request = GifExportRequest::new(source, ffmpeg, output, start, end, 640, 15);
-        match self.gif_export.submit(request) {
+        match self.player_session.gif_export.submit(request) {
             Ok(()) => self.notify("GIF를 만드는 중입니다.", NoticeTone::Info),
             Err(error) => self.notify(
                 format!("GIF를 만들지 못했습니다: {error}"),
@@ -838,7 +512,7 @@ impl ManagerApp {
     }
 
     fn poll_gif_export(&mut self) {
-        match self.gif_export.poll() {
+        match self.player_session.gif_export.poll() {
             GifExportStatus::Completed(path) => {
                 let name = path
                     .file_name()
@@ -870,7 +544,7 @@ impl ManagerApp {
         };
         match jobs::write_download_folder(&chosen) {
             Ok(path) => {
-                self.downloads_folder = Some(path.to_string_lossy().into_owned());
+                self.poll_state.downloads_folder = Some(path.to_string_lossy().into_owned());
                 self.notify(
                     "다운로드 폴더를 바꿨습니다. 확장에서도 이 폴더를 씁니다.",
                     NoticeTone::Info,
@@ -905,7 +579,7 @@ impl ManagerApp {
 
     /// Reveals one library file in Explorer with it selected.
     fn reveal_file(&mut self, file_name: &str) {
-        match jobs::reveal_file(self.library_folder.as_deref(), file_name) {
+        match jobs::reveal_file(self.library.folder.as_deref(), file_name) {
             Ok(_) => self.notify(
                 format!("{file_name} 파일을 폴더에서 선택했습니다."),
                 NoticeTone::Info,
@@ -922,107 +596,72 @@ impl ManagerApp {
     /// linger in the texture map.
     fn forget_thumbnail(&mut self, file_name: &str) {
         if let Some(file) = self
+            .poll_state
             .media_files
             .iter()
             .find(|file| file.file_name == file_name)
         {
-            let key = crate::thumbnails::key(file);
-            self.thumbnail_textures.remove(&key);
-            self.thumbnail_pending.remove(&key);
-            self.thumbnail_unavailable.remove(&key);
+            self.thumbnails.forget(file);
         }
     }
 
     fn clear_thumbnail_cache(&mut self) {
-        self.thumbnail_textures.clear();
-        self.thumbnail_pending.clear();
-        self.thumbnail_unavailable.clear();
-    }
-
-    fn current_library_ref(&self, file_name: impl Into<String>) -> jobs::LibraryFileRef {
-        jobs::LibraryFileRef::new(self.library_folder.clone(), file_name)
+        self.thumbnails.clear();
     }
 
     fn selection_contains(&self, file_name: &str) -> bool {
-        self.library_selection
-            .contains(&self.current_library_ref(file_name.to_string()))
+        self.library.selection_contains(file_name)
     }
 
     fn toggle_library_selection(&mut self, file_name: &str) {
-        let item = self.current_library_ref(file_name.to_string());
-        if !self.library_selection.remove(&item) {
-            self.library_selection.insert(item);
-        }
-        // Selection mode is explicit: deselecting the last item must not make
-        // the very next thumbnail click unexpectedly start playback.
-        self.library_selection_mode = true;
+        self.library.toggle_selection(file_name);
     }
 
     fn clear_library_selection(&mut self) {
-        self.library_selection.clear();
-        self.library_selection_mode = false;
-        self.pending_batch_delete = false;
+        self.library.clear_selection();
     }
 
     fn retain_current_folder_selection(&mut self) {
-        let folder = self.library_folder.clone();
-        self.library_selection.retain(|item| item.folder == folder);
-        self.library_selection_mode = !self.library_selection.is_empty();
-        self.pending_batch_delete = false;
+        self.library.retain_current_folder_selection();
     }
 
     fn select_visible_library_items<'a>(
         &mut self,
         entries: impl IntoIterator<Item = &'a model::LibraryEntry>,
     ) {
-        let folder = self.library_folder.clone();
-        self.library_selection.extend(
-            entries
-                .into_iter()
-                .map(|entry| jobs::LibraryFileRef::new(folder.clone(), entry.file_name.clone())),
-        );
-        self.library_selection_mode = !self.library_selection.is_empty();
+        self.library.select_visible(entries);
     }
 
     fn selected_library_size(&self) -> u64 {
-        self.library_selection
-            .iter()
-            .filter(|item| item.folder == self.library_folder)
-            .filter_map(|item| {
-                self.media_files
-                    .iter()
-                    .find(|media| media.file_name == item.file_name)
-                    .map(|media| media.size)
-            })
-            .sum()
+        self.library.selected_size(&self.poll_state.media_files)
     }
 
     fn execute_batch_delete(&mut self) {
-        let mut selected = self.library_selection.iter().cloned().collect::<Vec<_>>();
+        let mut selected = self.library.selection.iter().cloned().collect::<Vec<_>>();
         selected.sort_by(|left, right| {
             left.folder
                 .cmp(&right.folder)
                 .then_with(|| left.file_name.cmp(&right.file_name))
         });
         for item in &selected {
-            if self.player_loaded_folder == item.folder
-                && self.player_loaded_file.as_deref() == Some(item.file_name.as_str())
+            if self.player_session.loaded_folder == item.folder
+                && self.player_session.loaded_file.as_deref() == Some(item.file_name.as_str())
             {
                 self.stop_playback_session();
             }
-            if item.folder == self.library_folder {
+            if item.folder == self.library.folder {
                 self.forget_thumbnail(&item.file_name);
             }
         }
         match jobs::batch_recycle_media_files(&selected) {
             Ok(report) => {
-                self.library_selection = report
+                self.library.selection = report
                     .items
                     .iter()
                     .filter(|item| !item.outcome.is_success())
                     .map(|item| item.item.clone())
                     .collect();
-                self.library_selection_mode = !self.library_selection.is_empty();
+                self.library.selection_mode = !self.library.selection.is_empty();
                 self.notify(
                     if report.failed_count() == 0 {
                         format!(
@@ -1048,7 +687,7 @@ impl ManagerApp {
                 NoticeTone::Error,
             ),
         }
-        self.pending_batch_delete = false;
+        self.library.pending_batch_delete = false;
         self.poll(true);
     }
 
@@ -1057,7 +696,7 @@ impl ManagerApp {
             Ok(plan) if plan.is_empty() => {
                 self.notify("최상위에 자동 정리할 미디어가 없습니다.", NoticeTone::Info)
             }
-            Ok(plan) => self.pending_organization = Some(plan),
+            Ok(plan) => self.library.pending_organization = Some(plan),
             Err(error) => self.notify(
                 format!("정리 계획을 만들지 못했습니다: {error}"),
                 NoticeTone::Error,
@@ -1066,14 +705,14 @@ impl ManagerApp {
     }
 
     fn apply_library_organization(&mut self) {
-        let Some(plan) = self.pending_organization.take() else {
+        let Some(plan) = self.library.pending_organization.take() else {
             return;
         };
         let report = jobs::apply_library_organization(&plan);
         let succeeded = report.succeeded_count();
         let failed = report.failed_count();
         if !report.journal.is_empty() {
-            self.organization_journal = Some(report.journal);
+            self.library.organization_journal = Some(report.journal);
         }
         self.clear_thumbnail_cache();
         self.clear_library_selection();
@@ -1095,14 +734,14 @@ impl ManagerApp {
     }
 
     fn undo_library_organization(&mut self) {
-        let Some(journal) = self.organization_journal.take() else {
+        let Some(journal) = self.library.organization_journal.take() else {
             return;
         };
         let report = jobs::reverse_library_organization(&journal);
         let succeeded = report.succeeded_count();
         let failed = report.failed_count();
         if !report.remaining.is_empty() {
-            self.organization_journal = Some(report.remaining);
+            self.library.organization_journal = Some(report.remaining);
         }
         self.clear_thumbnail_cache();
         self.poll(true);
@@ -1123,12 +762,12 @@ impl ManagerApp {
     }
 
     fn library_batch_delete_modal(&mut self, ui: &mut egui::Ui) {
-        if !self.pending_batch_delete || self.pending_delete.is_some() {
+        if !self.library.pending_batch_delete || self.library.pending_delete.is_some() {
             return;
         }
-        let count = self.library_selection.len();
+        let count = self.library.selection.len();
         if count == 0 {
-            self.pending_batch_delete = false;
+            self.library.pending_batch_delete = false;
             return;
         }
         let size = model::media_usage_label(self.selected_library_size());
@@ -1170,12 +809,12 @@ impl ManagerApp {
         if confirmed {
             self.execute_batch_delete();
         } else if cancelled {
-            self.pending_batch_delete = false;
+            self.library.pending_batch_delete = false;
         }
     }
 
     fn library_organization_modal(&mut self, ui: &mut egui::Ui) {
-        let Some(plan) = self.pending_organization.as_ref() else {
+        let Some(plan) = self.library.pending_organization.as_ref() else {
             return;
         };
         let items = plan.items().to_vec();
@@ -1257,14 +896,14 @@ impl ManagerApp {
         if apply {
             self.apply_library_organization();
         } else if cancelled {
-            self.pending_organization = None;
+            self.library.pending_organization = None;
         }
     }
 
     /// Stops playback when the file being changed is the one currently loaded.
     fn release_if_playing(&mut self, file_name: &str) {
-        if self.player_loaded_file.as_deref() == Some(file_name)
-            && self.player_loaded_folder == self.library_folder
+        if self.player_session.loaded_file.as_deref() == Some(file_name)
+            && self.player_session.loaded_folder == self.library.folder
         {
             self.stop_playback_session();
         }
@@ -1275,17 +914,12 @@ impl ManagerApp {
     /// invisible mpv session running in the background.
     fn stop_playback_session(&mut self) {
         self.save_playback_state(true);
-        let _ = self.player.send(PlayerCommand::Stop);
-        self.seek_preview.media_changed();
-        self.player_loaded_file = None;
-        self.player_loaded_folder = None;
-        self.player_media = None;
-        self.pending_resume_position = None;
-        self.pip_armed = false;
-        self.pip_dismissed = true;
-        self.pip_move_until = None;
-        self.pip_move_start = None;
-        self.pip_resize_drag = None;
+        self.player_session.stop();
+        self.pip.armed = false;
+        self.pip.dismissed = true;
+        self.pip.move_until = None;
+        self.pip.move_start = None;
+        self.pip.resize_drag = None;
     }
 
     fn create_library_folder(&mut self, name: &str) {
@@ -1302,11 +936,11 @@ impl ManagerApp {
     fn rename_library_folder(&mut self, from: &str, to: &str) {
         match jobs::rename_library_folder(from, to) {
             Ok(_) => {
-                if self.library_folder.as_deref() == Some(from) {
-                    self.library_folder = Some(to.to_string());
+                if self.library.folder.as_deref() == Some(from) {
+                    self.library.folder = Some(to.to_string());
                 }
-                if self.player_loaded_folder.as_deref() == Some(from) {
-                    self.player_loaded_folder = Some(to.to_string());
+                if self.player_session.loaded_folder.as_deref() == Some(from) {
+                    self.player_session.loaded_folder = Some(to.to_string());
                 }
                 self.notify(format!("{to}(으)로 이름을 바꿨습니다."), NoticeTone::Info);
             }
@@ -1321,7 +955,7 @@ impl ManagerApp {
     fn move_library_file(&mut self, file_name: &str, destination: Option<&str>) {
         self.release_if_playing(file_name);
         self.forget_thumbnail(file_name);
-        let source = self.library_folder.clone();
+        let source = self.library.folder.clone();
         match jobs::move_media_file(file_name, source.as_deref(), destination) {
             Ok(_) => self.notify(
                 match destination {
@@ -1341,7 +975,7 @@ impl ManagerApp {
     fn delete_library_file(&mut self, file_name: &str) {
         self.release_if_playing(file_name);
         self.forget_thumbnail(file_name);
-        match jobs::delete_media_file(self.library_folder.as_deref(), file_name) {
+        match jobs::delete_media_file(self.library.folder.as_deref(), file_name) {
             Ok(_) => self.notify(
                 format!("{file_name} 파일을 휴지통으로 보냈습니다."),
                 NoticeTone::Info,
@@ -1355,7 +989,7 @@ impl ManagerApp {
     /// recoverable (Windows Recycle Bin), but the confirm still protects
     /// against a stray tap on the tile menu.
     fn library_delete_modal(&mut self, ui: &mut egui::Ui) {
-        let Some(file_name) = self.pending_delete.clone() else {
+        let Some(file_name) = self.library.pending_delete.clone() else {
             return;
         };
         let mut confirmed = false;
@@ -1396,22 +1030,22 @@ impl ManagerApp {
 
         if confirmed {
             self.delete_library_file(&file_name);
-            self.pending_delete = None;
+            self.library.pending_delete = None;
         } else if cancelled {
-            self.pending_delete = None;
+            self.library.pending_delete = None;
         }
     }
 
     /// Destination chooser for a pending move. Rows are the existing folders
     /// plus the root, excluding wherever the file already is.
     fn library_move_modal(&mut self, ui: &mut egui::Ui) {
-        let Some(file_name) = self.pending_move.clone() else {
+        let Some(file_name) = self.library.pending_move.clone() else {
             return;
         };
         let mut chosen: Option<Option<String>> = None;
         let mut cancelled = false;
-        let folders = self.library_folders.clone();
-        let current = self.library_folder.clone();
+        let folders = self.poll_state.library_folders.clone();
+        let current = self.library.folder.clone();
 
         let modal = egui::Modal::new(egui::Id::new("library-move-target")).show(ui.ctx(), |ui| {
             ui.set_width(320.0);
@@ -1447,16 +1081,16 @@ impl ManagerApp {
 
         if let Some(destination) = chosen {
             self.move_library_file(&file_name, destination.as_deref());
-            self.pending_move = None;
+            self.library.pending_move = None;
         } else if cancelled {
-            self.pending_move = None;
+            self.library.pending_move = None;
         }
     }
 
     /// New-folder prompt. The name is validated with the same rule the IO layer
     /// uses, so the confirm button cannot submit a name that would be rejected.
     fn library_folder_modal(&mut self, ui: &mut egui::Ui) {
-        let Some(mut draft) = self.pending_folder_name.clone() else {
+        let Some(mut draft) = self.library.pending_folder_name.clone() else {
             return;
         };
         let mut confirmed = false;
@@ -1499,16 +1133,16 @@ impl ManagerApp {
 
         if confirmed {
             self.create_library_folder(&draft);
-            self.pending_folder_name = None;
+            self.library.pending_folder_name = None;
         } else if cancelled {
-            self.pending_folder_name = None;
+            self.library.pending_folder_name = None;
         } else {
-            self.pending_folder_name = Some(draft);
+            self.library.pending_folder_name = Some(draft);
         }
     }
 
     fn library_folder_rename_modal(&mut self, ui: &mut egui::Ui) {
-        let Some((original, mut draft)) = self.pending_folder_rename.clone() else {
+        let Some((original, mut draft)) = self.library.pending_folder_rename.clone() else {
             return;
         };
         let mut confirmed = false;
@@ -1545,11 +1179,11 @@ impl ManagerApp {
         let valid = draft != original && jobs::valid_folder_name(&draft).is_some();
         if confirmed && valid {
             self.rename_library_folder(&original, &draft);
-            self.pending_folder_rename = None;
+            self.library.pending_folder_rename = None;
         } else if cancelled {
-            self.pending_folder_rename = None;
+            self.library.pending_folder_rename = None;
         } else {
-            self.pending_folder_rename = Some((original, draft));
+            self.library.pending_folder_rename = Some((original, draft));
         }
     }
 
@@ -1604,7 +1238,11 @@ impl ManagerApp {
                         text::LABEL_SM,
                         color::TEXT_SECONDARY,
                     );
-                    let badge = if self.license.pro { "PRO" } else { "일반" };
+                    let badge = if self.license.current.pro {
+                        "PRO"
+                    } else {
+                        "일반"
+                    };
                     // The badge shares PLAYER's baseline instead of its own ink
                     // top: Hangul rises above Latin caps, so ink-aligning it
                     // would visibly drop the badge.
@@ -1613,7 +1251,7 @@ impl ManagerApp {
                         egui::Pos2::new(player.ink.right() + space::X4, player.box_top),
                         badge,
                         text::LABEL_SM,
-                        if self.license.pro {
+                        if self.license.current.pro {
                             color::ACCENT
                         } else {
                             color::TEXT_MUTED
@@ -1631,7 +1269,7 @@ impl ManagerApp {
         for view in View::ALL {
             if nav_item(ui, view.label(), self.view == view).clicked() {
                 if view == View::Player {
-                    self.pip_dismissed = false;
+                    self.pip.dismissed = false;
                 }
                 self.view = view;
             }
@@ -1644,9 +1282,10 @@ impl ManagerApp {
             ui.add_space(remaining);
         }
 
-        let (title, detail, tone) = match &self.read_error {
+        let (title, detail, tone) = match &self.poll_state.read_error {
             None => {
                 let path = self
+                    .poll_state
                     .downloads_folder
                     .as_deref()
                     .map(|path| {
@@ -1740,41 +1379,11 @@ impl ManagerApp {
     }
 
     fn filters(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::new()
-            .fill(color::BG_SUBTLE)
-            .corner_radius(corner(radius::MD))
-            .inner_margin(margin(4.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = space::X4;
-                    for filter in QueueFilter::ALL {
-                        let selected = self.queue_filter == filter;
-                        let widget = egui::Button::new(
-                            RichText::new(filter.label())
-                                .size(text::LABEL_MD)
-                                .color(if selected {
-                                    color::TEXT_PRIMARY
-                                } else {
-                                    color::TEXT_SECONDARY
-                                }),
-                        )
-                        .fill(if selected {
-                            color::BG_SURFACE
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        })
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(corner(radius::MD));
-                        if ui.add(widget).clicked() {
-                            self.queue_filter = filter;
-                        }
-                    }
-                });
-            });
+        self.queue.show_filters(ui);
     }
 
     fn queue_view(&mut self, ui: &mut egui::Ui) {
-        let summary = queue_summary(&self.jobs);
+        let summary = queue_summary(&self.poll_state.jobs);
         let clicked = self.header(
             ui,
             summary,
@@ -1812,11 +1421,11 @@ impl ManagerApp {
             }
         }
 
-        let views: Vec<JobView> = queue_views(&self.jobs, &self.restartable, &self.media_files)
-            .into_iter()
-            .filter(|view| self.queue_filter.matches(view))
-            .collect();
-        let total = queue_views(&self.jobs, &self.restartable, &self.media_files).len();
+        let (views, total) = self.queue.rows(
+            &self.poll_state.jobs,
+            &self.poll_state.restartable,
+            &self.poll_state.media_files,
+        );
 
         if views.is_empty() {
             empty_state(
@@ -1842,53 +1451,7 @@ impl ManagerApp {
     }
 
     fn library_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(space::X4, space::X4);
-            for filter in LibraryFilter::ALL {
-                let style = if self.library_filter == filter {
-                    ButtonStyle::Inverse
-                } else {
-                    ButtonStyle::Quiet
-                };
-                if button(ui, filter.label(), style, true).clicked() {
-                    self.library_filter = filter;
-                }
-            }
-            ui.add_space(space::X8);
-            for rating in 1..=5 {
-                let selected = rating <= self.library_min_rating;
-                if icon_button(
-                    ui,
-                    Icon::Star,
-                    &format!("별점 {rating}점 이상"),
-                    if selected {
-                        ButtonStyle::Primary
-                    } else {
-                        ButtonStyle::Quiet
-                    },
-                    true,
-                )
-                .clicked()
-                {
-                    self.library_min_rating = if self.library_min_rating == rating {
-                        0
-                    } else {
-                        rating
-                    };
-                }
-            }
-            ui.add_space(space::X8);
-            for sort in LibrarySort::ALL {
-                let style = if self.library_sort == sort {
-                    ButtonStyle::Secondary
-                } else {
-                    ButtonStyle::Quiet
-                };
-                if button(ui, sort.label(), style, true).clicked() {
-                    self.library_sort = sort;
-                }
-            }
-        });
+        self.library.show_controls(ui);
     }
 
     /// Library is driven by the download folder, not by job history.
@@ -1897,9 +1460,9 @@ impl ManagerApp {
     /// dropped into the folder by hand shows up. Job state only supplies the
     /// title and media type when a record happens to match by file name.
     fn library_view(&mut self, ui: &mut egui::Ui) {
-        let entries = library_entries(&self.media_files, &self.jobs);
-        let missing = if self.library_folder.is_none() {
-            missing_output_count(&self.media_files, &self.jobs)
+        let entries = library_entries(&self.poll_state.media_files, &self.poll_state.jobs);
+        let missing = if self.library.folder.is_none() {
+            missing_output_count(&self.poll_state.media_files, &self.poll_state.jobs)
         } else {
             0
         };
@@ -1920,7 +1483,7 @@ impl ManagerApp {
                     ui.spacing_mut().item_spacing.y = space::X4;
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = space::X8;
-                        if let Some(folder) = self.library_folder.clone() {
+                        if let Some(folder) = self.library.folder.clone() {
                             if icon_button(
                                 ui,
                                 Icon::Back,
@@ -1968,7 +1531,7 @@ impl ManagerApp {
                     if player_ui::header_action(ui, Icon::Retry, "새로 고침").clicked() {
                         refresh = true;
                     }
-                    if self.library_folder.is_none()
+                    if self.library.folder.is_none()
                         && player_ui::header_action(ui, Icon::FolderPlus, "새 폴더").clicked()
                     {
                         new_folder = true;
@@ -1976,7 +1539,7 @@ impl ManagerApp {
                     if player_ui::header_action(
                         ui,
                         Icon::Trash,
-                        if self.library_selection_mode {
+                        if self.library.selection_mode {
                             "선택 종료"
                         } else {
                             "파일 선택"
@@ -1990,13 +1553,13 @@ impl ManagerApp {
             },
         );
 
-        search_field(ui, &mut self.search);
+        search_field(ui, &mut self.library.search);
         self.library_controls(ui);
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(space::X8, space::X4);
-            if self.library_selection_mode {
-                let selected = self.library_selection.len();
+            if self.library.selection_mode {
+                let selected = self.library.selection.len();
                 let size = model::media_usage_label(self.selected_library_size());
                 ui.label(
                     RichText::new(format!("{selected}개 선택 · {size}"))
@@ -2006,26 +1569,26 @@ impl ManagerApp {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.organization_journal.is_some()
+                if self.library.organization_journal.is_some()
                     && button(ui, "정리 실행 취소", ButtonStyle::Secondary, true).clicked()
                 {
                     undo_organization = true;
                 }
-                if self.library_folder.is_none()
+                if self.library.folder.is_none()
                     && button(ui, "자동 정리", ButtonStyle::Secondary, true).clicked()
                 {
                     organize = true;
                 }
-                if self.library_selection_mode {
+                if self.library.selection_mode {
                     if button(
                         ui,
                         "선택 삭제",
                         ButtonStyle::Danger,
-                        !self.library_selection.is_empty(),
+                        !self.library.selection.is_empty(),
                     )
                     .clicked()
                     {
-                        self.pending_batch_delete = true;
+                        self.library.pending_batch_delete = true;
                     }
                     if button(ui, "선택 해제", ButtonStyle::Quiet, true).clicked() {
                         self.clear_library_selection();
@@ -2050,18 +1613,18 @@ impl ManagerApp {
         let now = ui.input(|input| input.time);
         // A finished settle animation is dropped here, so the library keeps no
         // lingering "last dropped folder" highlight between frames.
-        if !expire_drop_settle(&mut self.library_drop_settle, now)
-            && self.library_drop_settle.is_some()
+        if !expire_drop_settle(&mut self.library.drop_settle, now)
+            && self.library.drop_settle.is_some()
         {
             ui.ctx().request_repaint();
         }
-        let dragging_file = self.dragged_library_file.is_some();
-        let settle = self.library_drop_settle.clone();
-        if !self.library_folders.is_empty() || self.library_folder.is_some() {
-            let folders = self.library_folders.clone();
+        let dragging_file = self.library.dragged_file.is_some();
+        let settle = self.library.drop_settle.clone();
+        if !self.poll_state.library_folders.is_empty() || self.library.folder.is_some() {
+            let folders = self.poll_state.library_folders.clone();
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(space::X8, space::X8);
-                if self.library_folder.is_some() {
+                if self.library.folder.is_some() {
                     let response = folder_chip(
                         ui,
                         "최상위",
@@ -2074,7 +1637,7 @@ impl ManagerApp {
                     if response.clicked() {
                         leave_folder = true;
                     }
-                    if self.dragged_library_file.is_some()
+                    if self.library.dragged_file.is_some()
                         && response.hovered()
                         && ui.input(|input| input.pointer.any_released())
                     {
@@ -2082,7 +1645,7 @@ impl ManagerApp {
                     }
                 }
                 for folder in &folders {
-                    if self.library_folder.as_deref() == Some(folder.name.as_str()) {
+                    if self.library.folder.as_deref() == Some(folder.name.as_str()) {
                         continue;
                     }
                     let response = folder_chip(
@@ -2101,7 +1664,7 @@ impl ManagerApp {
                     if response.clicked() {
                         enter_folder = Some(folder.name.clone());
                     }
-                    if self.dragged_library_file.is_some()
+                    if self.library.dragged_file.is_some()
                         && response.hovered()
                         && ui.input(|input| input.pointer.any_released())
                     {
@@ -2117,7 +1680,7 @@ impl ManagerApp {
             });
         }
 
-        let needle = self.search.trim().to_lowercase();
+        let needle = self.library.search.trim().to_lowercase();
         let mut filtered: Vec<&model::LibraryEntry> = entries
             .iter()
             .filter(|entry| {
@@ -2125,33 +1688,35 @@ impl ManagerApp {
                     || entry.title.to_lowercase().contains(&needle)
                     || entry.file_name.to_lowercase().contains(&needle);
                 let Some(media) = self
+                    .poll_state
                     .media_files
                     .iter()
                     .find(|media| media.file_name == entry.file_name)
                 else {
                     return false;
                 };
-                let metadata = self.library_state.metadata_or_default(media);
-                let watch_state = self.library_state.watch_state_for(media);
-                let state_matches = match self.library_filter {
+                let metadata = self.library.state.metadata_or_default(media);
+                let watch_state = self.library.state.watch_state_for(media);
+                let state_matches = match self.library.filter {
                     LibraryFilter::All => true,
                     LibraryFilter::Favorite => metadata.favorite,
                     LibraryFilter::Unwatched => watch_state == WatchState::Unwatched,
                     LibraryFilter::InProgress => watch_state == WatchState::InProgress,
                     LibraryFilter::Completed => watch_state == WatchState::Completed,
                 };
-                search_matches && state_matches && metadata.rating >= self.library_min_rating
+                search_matches && state_matches && metadata.rating >= self.library.min_rating
             })
             .collect();
-        filtered.sort_by(|left, right| match self.library_sort {
+        filtered.sort_by(|left, right| match self.library.sort {
             LibrarySort::Newest => right.modified_at.cmp(&left.modified_at),
             LibrarySort::Title => left.title.to_lowercase().cmp(&right.title.to_lowercase()),
             LibrarySort::Rating => {
                 let rating = |entry: &model::LibraryEntry| {
-                    self.media_files
+                    self.poll_state
+                        .media_files
                         .iter()
                         .find(|media| media.file_name == entry.file_name)
-                        .map(|media| self.library_state.metadata_or_default(media).rating)
+                        .map(|media| self.library.state.metadata_or_default(media).rating)
                         .unwrap_or_default()
                 };
                 rating(right)
@@ -2160,7 +1725,7 @@ impl ManagerApp {
             }
         });
 
-        let select_all_pressed = self.library_selection_mode
+        let select_all_pressed = self.library.selection_mode
             && !ui.ctx().text_edit_focused()
             && !egui::Popup::is_any_open(ui.ctx())
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::A));
@@ -2169,24 +1734,24 @@ impl ManagerApp {
         }
         let keyboard_actions_available = !ui.ctx().text_edit_focused()
             && !egui::Popup::is_any_open(ui.ctx())
-            && self.pending_delete.is_none()
-            && !self.pending_batch_delete
-            && self.pending_organization.is_none()
-            && self.pending_move.is_none()
-            && self.pending_folder_name.is_none()
-            && self.pending_folder_rename.is_none();
-        let escape_pressed = self.library_selection_mode
+            && self.library.pending_delete.is_none()
+            && !self.library.pending_batch_delete
+            && self.library.pending_organization.is_none()
+            && self.library.pending_move.is_none()
+            && self.library.pending_folder_name.is_none()
+            && self.library.pending_folder_rename.is_none();
+        let escape_pressed = self.library.selection_mode
             && keyboard_actions_available
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if escape_pressed {
             self.clear_library_selection();
         }
-        let delete_pressed = self.library_selection_mode
-            && !self.library_selection.is_empty()
+        let delete_pressed = self.library.selection_mode
+            && !self.library.selection.is_empty()
             && keyboard_actions_available
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
         if delete_pressed {
-            self.pending_batch_delete = true;
+            self.library.pending_batch_delete = true;
         }
 
         let mut play_target = None;
@@ -2220,16 +1785,17 @@ impl ManagerApp {
             let tile_width = ((available - gap * (columns.saturating_sub(1) as f32))
                 / columns as f32)
                 .max(220.0);
-            let has_folders = !self.library_folders.is_empty();
+            let has_folders = !self.poll_state.library_folders.is_empty();
             for row in filtered.chunks(columns) {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
                     for entry in row {
                         let metadata = self
+                            .poll_state
                             .media_files
                             .iter()
                             .find(|media| media.file_name == entry.file_name)
-                            .map(|media| self.library_state.metadata_or_default(media))
+                            .map(|media| self.library.state.metadata_or_default(media))
                             .unwrap_or_default();
                         ui.allocate_ui_with_layout(
                             Vec2::new(tile_width, tile_width * 9.0 / 16.0 + 104.0),
@@ -2239,12 +1805,12 @@ impl ManagerApp {
                                 ui.spacing_mut().item_spacing.y = space::X4;
                                 let response = media_thumbnail(
                                     ui,
-                                    self.thumbnail_textures.get(&entry.thumbnail_key),
+                                    self.thumbnails.texture(&entry.thumbnail_key),
                                     &entry.type_label,
                                     tile_width,
                                 )
                                 .on_hover_text(
-                                    if self.library_selection_mode {
+                                    if self.library.selection_mode {
                                         "선택 전환"
                                     } else {
                                         "재생"
@@ -2254,18 +1820,18 @@ impl ManagerApp {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
                                 if response.clicked() {
-                                    if self.library_selection_mode {
+                                    if self.library.selection_mode {
                                         self.toggle_library_selection(&entry.file_name);
                                     } else {
                                         play_target = Some(entry.file_name.clone());
                                     }
                                 }
-                                if !self.library_selection_mode && response.drag_started() {
-                                    self.dragged_library_file = Some(entry.file_name.clone());
+                                if !self.library.selection_mode && response.drag_started() {
+                                    self.library.dragged_file = Some(entry.file_name.clone());
                                 }
                                 // Motion only: painted over the existing rect so
                                 // the grid never reflows while dragging.
-                                let lifted = self.dragged_library_file.as_deref()
+                                let lifted = self.library.dragged_file.as_deref()
                                     == Some(entry.file_name.as_str());
                                 let lift = ui.ctx().animate_bool_with_time(
                                     response.id.with("library-drag-lift"),
@@ -2449,10 +2015,10 @@ impl ManagerApp {
             self.poll(true);
         }
         if toggle_selection_mode {
-            if self.library_selection_mode {
+            if self.library.selection_mode {
                 self.clear_library_selection();
             } else {
-                self.library_selection_mode = true;
+                self.library.selection_mode = true;
             }
         }
         if organize {
@@ -2465,29 +2031,29 @@ impl ManagerApp {
             self.choose_folder();
         }
         if new_folder {
-            self.pending_folder_name = Some(String::new());
+            self.library.pending_folder_name = Some(String::new());
         }
         if leave_folder {
-            self.library_folder = None;
+            self.library.folder = None;
             self.retain_current_folder_selection();
             self.poll(true);
         }
         if let Some(folder) = enter_folder {
-            self.library_folder = Some(folder);
+            self.library.folder = Some(folder);
             self.retain_current_folder_selection();
             self.poll(true);
         }
         if let Some(folder) = rename_folder {
-            self.pending_folder_rename = Some((folder.clone(), folder));
+            self.library.pending_folder_rename = Some((folder.clone(), folder));
         }
         if let Some(destination) = drop_destination {
-            if let Some(file_name) = self.dragged_library_file.take() {
-                self.library_drop_settle =
+            if let Some(file_name) = self.library.dragged_file.take() {
+                self.library.drop_settle =
                     Some((destination.clone(), now + crate::widgets::DROP_SETTLE_TIME));
                 self.move_library_file(&file_name, destination.as_deref());
             }
         } else if ui.input(|input| input.pointer.any_released()) {
-            self.dragged_library_file = None;
+            self.library.dragged_file = None;
         }
         if let Some(file_name) = play_target {
             self.play_file(&file_name);
@@ -2499,43 +2065,47 @@ impl ManagerApp {
             self.reveal_file(&file_name);
         }
         if let Some(file_name) = move_target {
-            self.pending_move = Some(file_name);
+            self.library.pending_move = Some(file_name);
         }
         if let Some(file_name) = delete_target {
-            if !self.pending_batch_delete {
-                self.pending_delete = Some(file_name);
+            if !self.library.pending_batch_delete {
+                self.library.pending_delete = Some(file_name);
             }
         }
         if let Some(file_name) = favorite_target {
             if let Some(media) = self
+                .poll_state
                 .media_files
                 .iter()
                 .find(|media| media.file_name == file_name)
                 .cloned()
             {
-                self.library_state.toggle_favorite(&media, now_millis());
+                self.library.state.toggle_favorite(&media, now_millis());
                 self.save_library_state();
             }
         }
         if let Some((file_name, rating)) = rating_target {
             if let Some(media) = self
+                .poll_state
                 .media_files
                 .iter()
                 .find(|media| media.file_name == file_name)
                 .cloned()
             {
-                self.library_state.set_rating(&media, rating, now_millis());
+                self.library.state.set_rating(&media, rating, now_millis());
                 self.save_library_state();
             }
         }
         if let Some((file_name, watched)) = watched_target {
             if let Some(media) = self
+                .poll_state
                 .media_files
                 .iter()
                 .find(|media| media.file_name == file_name)
                 .cloned()
             {
-                self.library_state
+                self.library
+                    .state
                     .set_watched_override(&media, Some(watched), now_millis());
                 self.save_library_state();
             }
@@ -2549,18 +2119,18 @@ impl ManagerApp {
     }
 
     fn pip_surface(&mut self, context: &egui::Context) -> PhysicalVideoRect {
-        let snapshot = self.player.snapshot();
-        if !pip_is_active(&snapshot) || self.pip_dismissed {
-            self.seek_preview.hide();
-            self.pip_move_until = None;
-            self.pip_move_start = None;
-            self.pip_resize_drag = None;
+        let snapshot = self.player_session.controller.snapshot();
+        if !pip_is_active(&snapshot) || self.pip.dismissed {
+            self.player_session.seek_preview.hide();
+            self.pip.move_until = None;
+            self.pip.move_start = None;
+            self.pip.resize_drag = None;
             return PhysicalVideoRect::default();
         }
 
         let mut overlay_output = player_ui::PlayerUiOutput::default();
         let mut physical_video_rect = PhysicalVideoRect::default();
-        let pip_width = self.pip_width;
+        let pip_width = self.pip.width;
         let video_size = Vec2::new(pip_width, pip_width * 9.0 / 16.0);
         let surface_size = Vec2::new(
             pip_width + MINI_PLAYER_RESIZE_GUTTER * 2.0,
@@ -2577,7 +2147,7 @@ impl ManagerApp {
             .order(egui::Order::Foreground)
             .movable(false)
             .constrain_to(context.content_rect());
-        area = if let Some(position) = self.pip_position {
+        area = if let Some(position) = self.pip.position {
             area.current_pos(position)
         } else {
             area.default_pos(
@@ -2615,21 +2185,21 @@ impl ManagerApp {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
             if drag_response.drag_started() {
-                self.pip_move_start = Some(surface.min);
-                self.pip_move_until = Some(Instant::now() + Duration::from_secs(20));
-                self.pip_move_offset = drag_response
+                self.pip.move_start = Some(surface.min);
+                self.pip.move_until = Some(Instant::now() + Duration::from_secs(20));
+                self.pip.move_offset = drag_response
                     .interact_pointer_pos()
                     .map_or(Vec2::ZERO, |pointer| pointer - surface.min);
             }
             if drag_response.dragged() {
                 dragged_position = Some(
-                    self.pip_move_start.unwrap_or(surface.min)
+                    self.pip.move_start.unwrap_or(surface.min)
                         + drag_response.total_drag_delta().unwrap_or_default(),
                 );
             }
             if drag_response.drag_stopped() {
-                self.pip_move_until = None;
-                self.pip_move_start = None;
+                self.pip.move_until = None;
+                self.pip.move_start = None;
             }
             let grip = egui::Rect::from_center_size(drag_strip.center(), Vec2::new(56.0, 4.0));
             ui.painter()
@@ -2695,14 +2265,14 @@ impl ManagerApp {
                     ui.ctx().set_cursor_icon(edge.cursor());
                 }
                 if response.drag_started() {
-                    self.pip_resize_drag = Some(PipResizeDrag {
+                    self.pip.resize_drag = Some(PipResizeDrag {
                         edge,
                         start_width: pip_width,
                         start_position: surface.min,
                     });
                 }
                 if response.dragged() {
-                    if let Some(drag) = self.pip_resize_drag.filter(|drag| drag.edge == edge) {
+                    if let Some(drag) = self.pip.resize_drag.filter(|drag| drag.edge == edge) {
                         let width = pip_resize_width(
                             edge,
                             drag.start_width,
@@ -2736,50 +2306,57 @@ impl ManagerApp {
             }
         });
         if resize_finished {
-            self.pip_resize_drag = None;
+            self.pip.resize_drag = None;
         }
         if self
-            .pip_move_until
+            .pip
+            .move_until
             .is_some_and(|deadline| deadline > Instant::now())
         {
             if native_primary_pointer_down() {
                 if let Some(pointer) = native_pointer_position(context) {
-                    dragged_position = Some(pointer - self.pip_move_offset);
+                    dragged_position = Some(pointer - self.pip.move_offset);
                     context.request_repaint();
                 }
             } else {
-                self.pip_move_until = None;
-                self.pip_move_start = None;
+                self.pip.move_until = None;
+                self.pip.move_start = None;
             }
         } else {
-            self.pip_move_until = None;
+            self.pip.move_until = None;
         }
-        self.pip_position = Some(
+        self.pip.position = Some(
             next_position
                 .or(dragged_position)
                 .unwrap_or(shown.response.rect.min),
         );
         if let Some(width) = next_width {
-            self.pip_width = width;
+            self.pip.width = width;
         }
 
         if let (Some(hover), Some(path)) =
             (overlay_output.hover_preview, snapshot.loaded_path.as_ref())
         {
             let media_key = self
-                .player_loaded_file
+                .player_session
+                .loaded_file
                 .as_deref()
-                .and_then(|name| self.media_files.iter().find(|file| file.file_name == name))
+                .and_then(|name| {
+                    self.poll_state
+                        .media_files
+                        .iter()
+                        .find(|file| file.file_name == name)
+                })
                 .map(crate::thumbnails::key)
                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
-            self.seek_preview.request(
+            self.player_session.seek_preview.request(
                 context,
                 media_key,
                 PathBuf::from(path),
                 hover.target,
                 snapshot.duration,
             );
-            let visual = self.seek_preview.visual();
+            let visual = self.player_session.seek_preview.visual();
             player_ui::show_seek_preview_overlay(
                 context,
                 hover.placement,
@@ -2788,21 +2365,21 @@ impl ManagerApp {
                 visual.map_or("00:00", |visual| visual.timecode),
             );
         } else {
-            self.seek_preview.hide();
+            self.player_session.seek_preview.hide();
         }
 
         if overlay_output.pip_close_requested {
             self.stop_playback_session();
         }
         if overlay_output.fullscreen_requested {
-            clear_video_window_region(self.player_video_hwnd);
+            clear_video_window_region(self.player_session.video_hwnd);
             self.view = View::Player;
-            self.pip_dismissed = false;
+            self.pip.dismissed = false;
         }
         if let Some(command) = overlay_output.command {
-            let _ = self.player.send(command);
+            let _ = self.player_session.controller.send(command);
         }
-        if self.pip_dismissed {
+        if self.pip.dismissed {
             PhysicalVideoRect::default()
         } else {
             physical_video_rect
@@ -2810,55 +2387,56 @@ impl ManagerApp {
     }
 
     fn player_view(&mut self, ui: &mut egui::Ui) {
-        clear_video_window_region(self.player_video_hwnd);
-        let snapshot = self.player.snapshot();
-        if snapshot.loaded_path.is_some() && snapshot.duration > 0.0 {
-            if let Some(position) = self.pending_resume_position.take() {
-                let _ = self.player.send(PlayerCommand::SeekAbsolute(
-                    position.min((snapshot.duration - 0.5).max(0.0)),
-                ));
-            }
-        }
-        let entries = library_entries(&self.media_files, &self.jobs);
+        clear_video_window_region(self.player_session.video_hwnd);
+        let snapshot = self.player_session.controller.snapshot();
+        self.player_session.apply_pending_resume(&snapshot);
+        let entries = library_entries(&self.poll_state.media_files, &self.poll_state.jobs);
         let up_next = entries
             .into_iter()
-            .filter(|entry| Some(entry.file_name.as_str()) != self.player_loaded_file.as_deref())
+            .filter(|entry| {
+                Some(entry.file_name.as_str()) != self.player_session.loaded_file.as_deref()
+            })
             .collect::<Vec<_>>();
         let pose_markers = self
-            .player_media
+            .player_session
+            .media
             .as_ref()
-            .map(|media| self.library_state.metadata_or_default(media).pose_markers)
+            .map(|media| self.library.state.metadata_or_default(media).pose_markers)
             .unwrap_or_default();
         let output = player_ui::player_view(
             ui,
             PlayerUiInput {
                 snapshot: &snapshot,
                 up_next: &up_next,
-                thumbnail_textures: &self.thumbnail_textures,
+                thumbnail_textures: self.thumbnails.textures(),
                 pose_markers: &pose_markers,
-                fullscreen: self.fullscreen,
-                shortcuts: self.player_shortcuts,
-                pro: self.license.pro,
+                fullscreen: self.player_session.fullscreen,
+                shortcuts: self.player_session.shortcuts,
+                pro: self.license.current.pro,
             },
         );
 
-        layout_video_window(self.player_video_hwnd, output.physical_video_rect, true);
+        layout_video_window(
+            self.player_session.video_hwnd,
+            output.physical_video_rect,
+            true,
+        );
         if let Some(clip_height) = output.video_clip_height {
             clip_video_window_height(
-                self.player_video_hwnd,
+                self.player_session.video_hwnd,
                 output.physical_video_rect.width,
                 clip_height,
             );
         }
         if output.physical_video_rect.visible() {
-            self.last_player_video_rect = output.physical_video_rect;
-            self.last_player_video_logical_rect = output.logical_video_rect;
+            self.player_session.last_video_rect = output.physical_video_rect;
+            self.player_session.last_video_logical_rect = output.logical_video_rect;
         }
         if let Some(command) = output.command {
             if matches!(&command, PlayerCommand::Stop) {
                 self.stop_playback_session();
             } else {
-                let _ = self.player.send(command);
+                let _ = self.player_session.controller.send(command);
             }
         }
 
@@ -2867,12 +2445,12 @@ impl ManagerApp {
         }
 
         if output.pose_marker_toggle_requested {
-            if let Some(media) = self.player_media.clone() {
+            if let Some(media) = self.player_session.media.clone() {
                 let removing = pose_markers.iter().any(|marker| {
                     (*marker - snapshot.position).abs()
                         <= player_ui::POSE_MARKER_ACTIVE_TOLERANCE_SECONDS
                 });
-                if self.library_state.toggle_pose_marker(
+                if self.library.state.toggle_pose_marker(
                     &media,
                     snapshot.position,
                     snapshot.duration,
@@ -2892,8 +2470,8 @@ impl ManagerApp {
         }
 
         if let Some(rating) = output.rating_requested {
-            if let Some(media) = self.player_media.clone() {
-                if self.library_state.set_rating(&media, rating, now_millis()) {
+            if let Some(media) = self.player_session.media.clone() {
+                if self.library.state.set_rating(&media, rating, now_millis()) {
                     self.save_library_state();
                     self.notify(
                         if rating == 0 {
@@ -2908,12 +2486,14 @@ impl ManagerApp {
         }
 
         if output.open_folder_requested {
-            self.open_library_folder(self.player_loaded_folder.clone());
+            self.open_library_folder(self.player_session.loaded_folder.clone());
         }
         if output.fullscreen_requested {
-            self.fullscreen = !self.fullscreen;
+            self.player_session.fullscreen = !self.player_session.fullscreen;
             ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                    self.player_session.fullscreen,
+                ));
         }
 
         if let Some(file_name) = output.selected_up_next_file {
@@ -2922,19 +2502,25 @@ impl ManagerApp {
 
         if let (Some(hover), Some(path)) = (output.hover_preview, snapshot.loaded_path.as_ref()) {
             let media_key = self
-                .player_loaded_file
+                .player_session
+                .loaded_file
                 .as_deref()
-                .and_then(|name| self.media_files.iter().find(|file| file.file_name == name))
+                .and_then(|name| {
+                    self.poll_state
+                        .media_files
+                        .iter()
+                        .find(|file| file.file_name == name)
+                })
                 .map(crate::thumbnails::key)
                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
-            self.seek_preview.request(
+            self.player_session.seek_preview.request(
                 ui.ctx(),
                 media_key,
                 PathBuf::from(path),
                 hover.target,
                 snapshot.duration,
             );
-            let visual = self.seek_preview.visual();
+            let visual = self.player_session.seek_preview.visual();
             player_ui::show_seek_preview_overlay(
                 ui.ctx(),
                 hover.placement,
@@ -2943,17 +2529,17 @@ impl ManagerApp {
                 visual.map_or("00:00", |visual| visual.timecode),
             );
         } else {
-            self.seek_preview.hide();
+            self.player_session.seek_preview.hide();
         }
     }
 
     fn subtitles_view(&mut self, ui: &mut egui::Ui) {
-        let summary = subtitle_summary(&self.jobs);
+        let summary = subtitle_summary(&self.poll_state.jobs);
         if self.header(ui, summary, &[(Icon::Retry, "새로 고침")]) == Some(0) {
             self.poll(true);
         }
 
-        let views = subtitle_views(&self.jobs, &self.restartable);
+        let views = subtitle_views(&self.poll_state.jobs, &self.poll_state.restartable);
         if views.is_empty() {
             empty_state(
                 ui,
@@ -2983,8 +2569,8 @@ impl ManagerApp {
         let mut activate_license = false;
         let mut refresh_license = false;
         let mut remove_license = false;
-        let license = self.license.clone();
-        let checking = self.license_checking;
+        let license = self.license.current.clone();
+        let checking = self.license.checking;
         Self::setting_group(ui, "이용 플랜", |ui| {
             egui::Frame::new()
                 .fill(if license.pro {
@@ -3073,14 +2659,14 @@ impl ManagerApp {
                         ui.horizontal(|ui| {
                             let response = ui.add_enabled(
                                 !checking,
-                                egui::TextEdit::singleline(&mut self.license_key_input)
+                                egui::TextEdit::singleline(&mut self.license.key_input)
                                     .password(true)
                                     .hint_text("AM-…")
                                     .desired_width(360.0),
                             );
-                            if self.license_focus_requested {
+                            if self.license.focus_requested {
                                 response.request_focus();
-                                self.license_focus_requested = false;
+                                self.license.focus_requested = false;
                             }
                             let enter = response.lost_focus()
                                 && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -3092,7 +2678,7 @@ impl ManagerApp {
                                     "Pro 인증"
                                 },
                                 ButtonStyle::Primary,
-                                !checking && !self.license_key_input.trim().is_empty(),
+                                !checking && !self.license.key_input.trim().is_empty(),
                             )
                             .clicked()
                                 || enter
@@ -3104,16 +2690,17 @@ impl ManagerApp {
                 });
         });
         if activate_license {
-            self.verify_license(self.license_key_input.clone());
+            self.verify_license(self.license.key_input.clone());
         }
         if refresh_license {
-            self.verify_license(self.license.key.clone());
+            self.verify_license(self.license.current.key.clone());
         }
         if remove_license {
             self.remove_license();
         }
 
         let folder = self
+            .poll_state
             .downloads_folder
             .clone()
             .unwrap_or_else(|| "경로 확인 불가".to_string());
@@ -3163,8 +2750,8 @@ impl ManagerApp {
             self.choose_folder();
         }
 
-        let shown_shortcuts = self.player_shortcuts;
-        let capturing = self.shortcut_capture;
+        let shown_shortcuts = self.player_session.shortcuts;
+        let capturing = self.player_session.shortcut_capture;
         let mut requested_capture = None;
         let mut reset_requested = false;
         for (id, title, actions) in [
@@ -3196,26 +2783,26 @@ impl ManagerApp {
             reset_requested = true;
         }
         if let Some(action) = requested_capture {
-            self.shortcut_capture = Some(action);
+            self.player_session.shortcut_capture = Some(action);
         }
         if reset_requested {
             self.replace_player_shortcuts(
                 PlayerShortcuts::default(),
                 "기본 단축키로 복원했습니다.",
             );
-            self.shortcut_capture = None;
+            self.player_session.shortcut_capture = None;
         }
     }
 
     fn handle_shortcut_capture(&mut self, context: &egui::Context) {
-        let Some(action) = self.shortcut_capture else {
+        let Some(action) = self.player_session.shortcut_capture else {
             return;
         };
         let captured = context.input(|input| shortcuts::capture_from_events(&input.events));
         match captured {
-            Some(CaptureResult::Cancel) => self.shortcut_capture = None,
+            Some(CaptureResult::Cancel) => self.player_session.shortcut_capture = None,
             Some(CaptureResult::Shortcut(shortcut)) => {
-                let mut updated = self.player_shortcuts;
+                let mut updated = self.player_session.shortcuts;
                 let displaced = updated.assign_and_swap(action, shortcut);
                 let message = displaced.map_or_else(
                     || format!("{} 단축키를 변경했습니다.", action.label()),
@@ -3228,7 +2815,7 @@ impl ManagerApp {
                     },
                 );
                 self.replace_player_shortcuts(updated, message);
-                self.shortcut_capture = None;
+                self.player_session.shortcut_capture = None;
             }
             None => {}
         }
@@ -3237,7 +2824,7 @@ impl ManagerApp {
     fn replace_player_shortcuts(&mut self, updated: PlayerShortcuts, message: impl Into<String>) {
         match jobs::write_player_shortcuts(updated) {
             Ok(()) => {
-                self.player_shortcuts = updated;
+                self.player_session.shortcuts = updated;
                 self.notify(message, NoticeTone::Info);
             }
             Err(error) => self.notify(
@@ -3292,16 +2879,19 @@ impl eframe::App for ManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         if let Some(hwnd) = frame_hwnd(frame) {
-            if !self.taskbar_icon_applied {
-                self.taskbar_icon_applied = apply_taskbar_icon(hwnd);
+            if !self.player_session.taskbar_icon_applied {
+                self.player_session.taskbar_icon_applied = apply_taskbar_icon(hwnd);
             }
-            if self.player_parent_hwnd == 0 {
-                self.player_parent_hwnd = hwnd;
-                self.player_video_hwnd = create_video_window(hwnd).unwrap_or(0);
-                if self.player_video_hwnd != 0 {
+            if self.player_session.parent_hwnd == 0 {
+                self.player_session.parent_hwnd = hwnd;
+                self.player_session.video_hwnd = create_video_window(hwnd).unwrap_or(0);
+                if self.player_session.video_hwnd != 0 {
                     let _ = self
-                        .player
-                        .send(PlayerCommand::SetVideoWindow(self.player_video_hwnd));
+                        .player_session
+                        .controller
+                        .send(PlayerCommand::SetVideoWindow(
+                            self.player_session.video_hwnd,
+                        ));
                 }
             }
         }
@@ -3310,13 +2900,13 @@ impl eframe::App for ManagerApp {
         self.poll_gif_export();
         self.save_playback_state(false);
         self.sync_thumbnails(&context);
-        self.seek_preview.poll(&context);
+        self.player_session.seek_preview.poll(&context);
         self.expire_notice();
         // Job state lives on disk and changes without user input, so the window
         // has to wake on its own rather than only on events.
         context.request_repaint_after(POLL_INTERVAL);
 
-        let fullscreen_player = self.fullscreen && self.view == View::Player;
+        let fullscreen_player = self.player_session.fullscreen && self.view == View::Player;
         if !fullscreen_player {
             egui::Panel::left("rail")
                 .exact_size(metric::RAIL_WIDTH)
@@ -3374,24 +2964,28 @@ impl eframe::App for ManagerApp {
                         });
                 }
             });
-        let snapshot = self.player.snapshot();
+        let snapshot = self.player_session.controller.snapshot();
         let session = next_pip_session(
             PipSession {
-                armed: self.pip_armed,
-                dismissed: self.pip_dismissed,
+                armed: self.pip.armed,
+                dismissed: self.pip.dismissed,
             },
             self.view,
             pip_is_active(&snapshot),
         );
-        self.pip_armed = session.armed;
-        self.pip_dismissed = session.dismissed;
+        self.pip.armed = session.armed;
+        self.pip.dismissed = session.dismissed;
         if pip_should_show(&snapshot, self.view, session.armed, session.dismissed) {
             let pip_rect = self.pip_surface(&context);
-            layout_video_window(self.player_video_hwnd, pip_rect, pip_rect.visible());
+            layout_video_window(self.player_session.video_hwnd, pip_rect, pip_rect.visible());
         } else if self.view != View::Player {
-            self.seek_preview.hide();
-            clear_video_window_region(self.player_video_hwnd);
-            layout_video_window(self.player_video_hwnd, PhysicalVideoRect::default(), false);
+            self.player_session.seek_preview.hide();
+            clear_video_window_region(self.player_session.video_hwnd);
+            layout_video_window(
+                self.player_session.video_hwnd,
+                PhysicalVideoRect::default(),
+                false,
+            );
         }
     }
 }
@@ -3399,11 +2993,10 @@ impl eframe::App for ManagerApp {
 impl Drop for ManagerApp {
     fn drop(&mut self) {
         self.save_playback_state(true);
-        let _ = self.library_state.persist();
-        self.seek_preview.shutdown();
-        self.player.shutdown();
-        destroy_video_window(self.player_video_hwnd);
-        self.player_video_hwnd = 0;
+        let _ = self.library.state.persist();
+        self.player_session.shutdown();
+        destroy_video_window(self.player_session.video_hwnd);
+        self.player_session.video_hwnd = 0;
     }
 }
 
@@ -3985,6 +3578,8 @@ fn install_style(context: &egui::Context) {
 mod tests {
     use super::*;
     use crate::jobs::JobState;
+    use crate::model::JobView;
+    use crate::queue_controller::QueueFilter;
 
     fn view_for(status: &str) -> JobView {
         model::to_view(
@@ -4201,12 +3796,12 @@ mod tests {
         assert!(source.contains("fn pip_surface"));
         assert!(pip.contains("segma-pip-surface"));
         assert!(source.contains("if self.view != View::Player"));
-        assert!(source.contains("layout_video_window(self.player_video_hwnd, pip_rect"));
+        assert!(source.contains("layout_video_window(self.player_session.video_hwnd, pip_rect"));
         assert!(pip.contains("pip_width"));
         assert!(pip.contains(".movable(false)"));
         assert!(pip.contains(".current_pos(position)"));
         assert!(pip.contains("pip-drag-strip"));
-        assert!(pip.contains("self.pip_move_start"));
+        assert!(pip.contains("self.pip.move_start"));
         assert!(pip.contains("pip-resize-handle"));
         assert!(
             source.contains("Self::TopLeft | Self::BottomRight => egui::CursorIcon::ResizeNwSe")
@@ -4246,9 +3841,9 @@ mod tests {
         assert!(pip.contains("player_ui::pip_controls("));
         assert!(pip.contains("MINI_PLAYER_PREVIEW_WIDTH"));
         assert!(pip.contains("overlay_output.hover_preview"));
-        assert!(pip.contains("self.seek_preview.request"));
+        assert!(pip.contains("self.player_session.seek_preview.request"));
         assert!(!pip.contains("SetWindowRgn"));
-        assert!(source.contains("clear_video_window_region(self.player_video_hwnd)"));
+        assert!(source.contains("clear_video_window_region(self.player_session.video_hwnd)"));
     }
 
     #[test]
@@ -4256,10 +3851,14 @@ mod tests {
         let source = include_str!("app.rs");
         let stop = &source[source.find("fn stop_playback_session").unwrap()
             ..source.find("fn create_library_folder").unwrap()];
-        assert!(stop.contains("PlayerCommand::Stop"));
-        assert!(stop.contains("self.player_loaded_file = None"));
-        assert!(stop.contains("self.player_media = None"));
-        assert!(stop.contains("self.pip_armed = false"));
+        assert!(stop.contains("self.player_session.stop()"));
+        assert!(stop.contains("self.pip.armed = false"));
+        let session = include_str!("player_session.rs");
+        let session_stop = &session[session.find("pub(crate) fn stop").unwrap()
+            ..session.find("pub(crate) fn apply_pending_resume").unwrap()];
+        assert!(session_stop.contains("PlayerCommand::Stop"));
+        assert!(session_stop.contains("self.loaded_file = None"));
+        assert!(session_stop.contains("self.media = None"));
         let pip =
             &source[source.find("fn pip_surface").unwrap()..source.find("fn player_view").unwrap()];
         assert!(pip.contains("if overlay_output.pip_close_requested"));
@@ -4310,7 +3909,7 @@ mod tests {
         assert!(!production.contains("apply_pip_control_holes"));
         let shared_ui =
             &app[app.find("fn ui(").unwrap()..app.find("impl Drop for ManagerApp").unwrap()];
-        assert!(shared_ui.contains("self.seek_preview.poll(&context)"));
+        assert!(shared_ui.contains("self.player_session.seek_preview.poll(&context)"));
         let overlay_start = player_ui_source.find("fn overlay_icon_button").unwrap();
         let overlay = &player_ui_source[overlay_start
             ..player_ui_source[overlay_start..]
@@ -4377,7 +3976,7 @@ mod tests {
         assert!(!fullscreen.contains("show_viewport_immediate"));
         assert!(app.contains("clip_video_window_height("));
         assert!(app.contains("SetWindowRgn"));
-        assert!(app.contains("clear_video_window_region(self.player_video_hwnd)"));
+        assert!(app.contains("clear_video_window_region(self.player_session.video_hwnd)"));
     }
 
     #[test]
@@ -4390,7 +3989,7 @@ mod tests {
         assert!(library.contains("egui::Modifiers::NONE, egui::Key::Delete"));
         assert!(library.contains("!ui.ctx().text_edit_focused()"));
         assert!(library.contains("!egui::Popup::is_any_open(ui.ctx())"));
-        assert!(library.contains("self.pending_batch_delete = true"));
+        assert!(library.contains("self.library.pending_batch_delete = true"));
         assert!(library.contains("self.clear_library_selection()"));
         assert!(library.contains("자동 정리"));
         assert!(library.contains("정리 실행 취소"));

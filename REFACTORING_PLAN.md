@@ -2,8 +2,8 @@
 
 ## Status
 
-**IN PROGRESS — the Companion GUI/PiP work is complete and committed. Phase 6
-is unblocked; the remaining phases proceed in dependency order.**
+**IN PROGRESS — phases 0 through 6 are complete. Phase 7 integrated validation
+and handoff is the remaining phase.**
 
 This is the current refactoring roadmap for the Companion-first product. It
 supersedes `MEDIA_MODULE_REFACTOR.md` as a roadmap; that file remains a
@@ -37,7 +37,7 @@ each phase. A phase is not complete until its checks and known gaps are recorded
 | 3. Shared host/GUI disk contract | Complete | `a20b46c`; shared crate and both Cargo suites |
 | 4. Shipped extension split | Complete | `0.4.58`; module boundaries and validation below |
 | 5. Packaging and retired runtime | Complete | `0.4.59`; shared graph and closure validation below |
-| 6. Native manager split | Pending, unblocked | PiP baseline complete; start after Phase 5 |
+| 6. Native manager split | Complete | `0.4.60`; controller boundaries and validation below |
 | 7. Integrated validation and handoff | Pending | Pending |
 
 ## Goal
@@ -496,6 +496,42 @@ phase while the current PiP/player work is still being changed elsewhere.
 Exit gate: manager behavior and disk ABI are unchanged, GUI tests pass, and
 real installed-window interactions required by the changed surface are recorded
 as live evidence rather than inferred from unit tests or screenshots.
+
+#### Phase 6 result — 2026-08-31
+
+Completed at development version `0.4.60`:
+
+- `ManagerApp` now holds eight explicit top-level owners instead of the former
+  flat state bag: disk polling snapshot, queue state, library state, player
+  session, thumbnail coordinator, license controller, PiP session geometry,
+  and transient notice state.
+- `manager_poll.rs` owns the polling deadline and coherent jobs, restartability,
+  folder, and media snapshot while preserving the previous rule that a failed
+  job read does not erase the last successful list.
+- `queue_controller.rs` owns queue filters and derived rows;
+  `library_controller.rs` owns search/filter/sort, metadata, selection, folder,
+  organization, and modal state. Their focused tests cover paused/terminal
+  filtering, unfiltered totals, explicit selection mode, and folder-scoped
+  selected size.
+- `license_controller.rs` owns the async verify result channel, existing-Pro
+  invalidation rule, key draft, focus, persistence, and removal workflow.
+  `ThumbnailCoordinator` owns the worker channels, pending/unavailable keys,
+  and GPU texture map as one lifecycle.
+- `player_session.rs` groups the existing player backend, GIF export, seek
+  preview, shortcut, loaded-media, native HWND, and fullscreen lifetime. PiP
+  state is grouped separately while Win32 layout, mpv command flow, geometry,
+  and the existing PiP/player UI routines remain unchanged in `app.rs`.
+- No protocol, disk-ABI, extension runtime, package graph, or site behavior was
+  changed. The source movement intentionally does not update `INCIDENTS.md` or
+  `SITE_QA_LOG.md`.
+
+Validation at this checkpoint: focused controller tests and the full Companion
+GUI suite 198 passed; media-site suite 48 passed; full Node suite 528 passed
+and 22 explicitly skipped; shared contract 2 passed; native host 53 passed;
+both Rust format checks and `git diff --check` passed. The development staging
+artifact was rebuilt from the `0.4.60` source manifest without creating a ZIP.
+No live installed-window, Chrome, or Whale interaction is claimed for this
+behavior-neutral responsibility move; live validation is `NOT_RUN`.
 
 ### Phase 7 — integrated validation and handoff
 

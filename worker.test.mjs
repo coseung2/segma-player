@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { verifyToken } from "./youtube-token.js";
+import { verifyPaddleWebhookSignature } from "./paddle-payment.js";
 
 const SECRET = "worker-test-secret-0123456789";
 const ADMIN_TOKEN = "admin-token";
@@ -654,6 +655,28 @@ function payVerify(orderId, txHash) {
   });
 }
 
+function paddleOrder(period = "month") {
+  return new Request("https://aura.mdownloader.workers.dev/api/pay/paddle/order", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ period }),
+  });
+}
+
+async function paddleSignature(rawBody, secret, timestamp = Math.floor(Date.now() / 1000)) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = await crypto.subtle.sign("HMAC", key, encoder.encode(`${timestamp}:${rawBody}`));
+  const signature = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `ts=${timestamp};h1=${signature}`;
+}
+
 const PAY_WALLET = "TGwSFr1JQhMz9bn2RfqQs4zJfRwv7rcWK5";
 const PAY_WALLET_HEX = "0x4c731cfcd08b7729df01b11fab04d44126aabd8f";
 const USDT_CONTRACT_HEX = "0xa614f803b6fd780986a42c78ec9c7f77e6ded13c";
@@ -777,4 +800,96 @@ test("a confirmed order cannot be redeemed twice", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Paddle webhook signatures verify the untouched raw request body", async () => {
+  const secret = "pdl_ntfset_test_secret";
+  const rawBody = JSON.stringify({ event_type: "transaction.completed", data: { id: "txn_123" } });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const header = await paddleSignature(rawBody, secret, timestamp);
+  assert.equal(await verifyPaddleWebhookSignature({ rawBody, signatureHeader: header, secret }), true);
+  assert.equal(await verifyPaddleWebhookSignature({ rawBody: `${rawBody} `, signatureHeader: header, secret }), false);
+});
+
+test("Paddle checkout order and completed webhook approve the same Pro license", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const secret = "pdl_ntfset_test_secret";
+  const env = environment(kv, {
+    PADDLE_CLIENT_TOKEN: "test_012345678901234567890123456",
+    PADDLE_PRICE_MONTH: "pri_012345678901234567890123",
+    PADDLE_PRICE_YEAR: "pri_987654321098765432109876",
+    PADDLE_WEBHOOK_SECRET: secret,
+  });
+  const created = await worker.fetch(paddleOrder("month"), env);
+  assert.equal(created.status, 201);
+  const order = await created.json();
+  assert.equal(order.environment, "sandbox");
+  assert.equal(order.priceId, env.PADDLE_PRICE_MONTH);
+
+  const event = JSON.stringify({
+    event_type: "transaction.completed",
+    data: {
+      id: "txn_012345678901234567890123",
+      custom_data: { segma_order_id: order.orderId },
+      items: [{ price: { id: env.PADDLE_PRICE_MONTH }, quantity: 1 }],
+    },
+  });
+  const webhook = await worker.fetch(new Request(
+    "https://aura.mdownloader.workers.dev/api/pay/paddle/webhook",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "paddle-signature": await paddleSignature(event, secret),
+      },
+      body: event,
+    },
+  ), env);
+  assert.equal(webhook.status, 200);
+  assert.equal((await webhook.json()).ok, true);
+
+  const status = await worker.fetch(new Request(
+    `https://aura.mdownloader.workers.dev/api/pay/paddle/status?orderId=${order.orderId}`,
+  ), env);
+  const body = await status.json();
+  assert.equal(body.status, "confirmed");
+  assert.equal(body.key, order.licenseKey);
+  assert.ok(body.expiresAt > Date.now());
+
+  const license = await kv.get(order.licenseKey, "json");
+  assert.equal(license.status, "approved");
+  assert.equal(license.paymentProvider, "paddle");
+});
+
+test("Paddle webhook rejects an unexpected price for a pending order", async () => {
+  const worker = await loadWorker();
+  const kv = memoryKv();
+  const secret = "pdl_ntfset_test_secret";
+  const env = environment(kv, {
+    PADDLE_CLIENT_TOKEN: "test_012345678901234567890123456",
+    PADDLE_PRICE_MONTH: "pri_012345678901234567890123",
+    PADDLE_PRICE_YEAR: "pri_987654321098765432109876",
+    PADDLE_WEBHOOK_SECRET: secret,
+  });
+  const order = await (await worker.fetch(paddleOrder("month"), env)).json();
+  const event = JSON.stringify({
+    event_type: "transaction.completed",
+    data: {
+      id: "txn_012345678901234567890123",
+      custom_data: { segma_order_id: order.orderId },
+      items: [{ price: { id: env.PADDLE_PRICE_YEAR }, quantity: 1 }],
+    },
+  });
+  const response = await worker.fetch(new Request(
+    "https://aura.mdownloader.workers.dev/api/pay/paddle/webhook",
+    {
+      method: "POST",
+      headers: { "paddle-signature": await paddleSignature(event, secret) },
+      body: event,
+    },
+  ), env);
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "unexpected-price");
+  assert.equal((await kv.get(order.licenseKey, "json")).status, "pending");
 });

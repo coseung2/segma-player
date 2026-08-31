@@ -1,5 +1,10 @@
 import { signToken, isValidDeviceId, TOKEN_TTL_MS } from "./youtube-token.js";
 import { coversExpectedAmount, sameTronAddress } from "./tron-address.js";
+import {
+  paddleCheckoutConfig,
+  paddleTransactionMatchesPrice,
+  verifyPaddleWebhookSignature,
+} from "./paddle-payment.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -45,6 +50,26 @@ function issueLicenseKey() {
   let hex = "";
   for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
   return `AM-${hex.toUpperCase()}`;
+}
+
+async function approveLicenseForPeriod(env, key, period, metadata = {}) {
+  const plan = PLAN_PERIODS[period] || PLAN_PERIODS.month;
+  const record = await readRecord(env, key);
+  if (!record) return null;
+  const now = Date.now();
+  const currentExpiry = typeof record.expiresAt === "number" && record.expiresAt > now
+    ? record.expiresAt
+    : now;
+  const expiresAt = currentExpiry + plan.durationMs;
+  const next = {
+    ...record,
+    ...metadata,
+    status: "approved",
+    approvedAt: typeof record.approvedAt === "string" ? record.approvedAt : new Date().toISOString(),
+    expiresAt,
+  };
+  await writeRecord(env, key, next);
+  return { record: next, expiresAt };
 }
 
 // Per-IP token issuance throttle. The Map is per-isolate, which is enough to
@@ -490,6 +515,91 @@ export default {
       }, 201);
     }
 
+    if (path === "/api/pay/paddle/order" && request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      const period = body?.period === "year" ? "year" : "month";
+      const paddle = paddleCheckoutConfig(env, period);
+      if (!paddle) return json({ ok: false, error: "paddle-not-configured" }, 503);
+      const orderId = crypto.randomUUID();
+      const key = issueLicenseKey();
+      await writeRecord(env, key, {
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        orderId,
+        period,
+        paymentProvider: "paddle",
+      });
+      await writeRecord(env, `paddle-order:${orderId}`, {
+        key,
+        period,
+        priceId: paddle.priceId,
+        status: "pending",
+        createdAt: Date.now(),
+      });
+      return json({
+        ok: true,
+        orderId,
+        licenseKey: key,
+        clientToken: paddle.clientToken,
+        environment: paddle.environment,
+        priceId: paddle.priceId,
+      }, 201);
+    }
+
+    if (path === "/api/pay/paddle/status" && request.method === "GET") {
+      const orderId = (url.searchParams.get("orderId") || "").trim();
+      if (!orderId) return json({ ok: false, error: "invalid-request" }, 400);
+      const order = await readRecord(env, `paddle-order:${orderId}`);
+      if (!order) return json({ ok: false, error: "order-not-found" }, 404);
+      if (order.status !== "confirmed") return json({ ok: true, status: "pending" });
+      return json({
+        ok: true,
+        status: "confirmed",
+        key: order.key,
+        period: order.period,
+        expiresAt: order.expiresAt,
+      });
+    }
+
+    if (path === "/api/pay/paddle/webhook" && request.method === "POST") {
+      if (!env.PADDLE_WEBHOOK_SECRET) return json({ ok: false, error: "paddle-not-configured" }, 503);
+      const rawBody = await request.text();
+      const verified = await verifyPaddleWebhookSignature({
+        rawBody,
+        signatureHeader: request.headers.get("paddle-signature") || "",
+        secret: env.PADDLE_WEBHOOK_SECRET,
+      });
+      if (!verified) return json({ ok: false, error: "invalid-signature" }, 401);
+      const event = (() => {
+        try { return JSON.parse(rawBody); } catch { return null; }
+      })();
+      if (!event || event.event_type !== "transaction.completed") {
+        return json({ ok: true, ignored: true });
+      }
+      const transaction = event.data;
+      const orderId = String(transaction?.custom_data?.segma_order_id || "").trim();
+      if (!orderId) return json({ ok: false, error: "missing-order-id" }, 400);
+      const order = await readRecord(env, `paddle-order:${orderId}`);
+      if (!order) return json({ ok: false, error: "order-not-found" }, 404);
+      if (order.status === "confirmed") return json({ ok: true, duplicate: true });
+      if (!paddleTransactionMatchesPrice(transaction, order.priceId)) {
+        return json({ ok: false, error: "unexpected-price" }, 400);
+      }
+      const approved = await approveLicenseForPeriod(env, order.key, order.period, {
+        paymentProvider: "paddle",
+        paddleTransactionId: transaction?.id || null,
+      });
+      if (!approved) return json({ ok: false, error: "license-not-found" }, 404);
+      await writeRecord(env, `paddle-order:${orderId}`, {
+        ...order,
+        status: "confirmed",
+        transactionId: transaction?.id || null,
+        confirmedAt: Date.now(),
+        expiresAt: approved.expiresAt,
+      });
+      return json({ ok: true });
+    }
+
     if (path === "/api/pay/verify" && request.method === "POST") {
       const wallet = (env.USDT_TRC20_ADDRESS || "").trim();
       if (!wallet) return json({ ok: false, error: "payment-not-configured" }, 503);
@@ -503,16 +613,9 @@ export default {
       const plan = PLAN_PERIODS[order.period] || PLAN_PERIODS.month;
       const result = await verifyTrc20(txHash, wallet, plan.amountUsdt, env.TRONGRID_API_KEY || "");
       if (!result.verified) return json({ ok: false, error: result.error || "verification-failed" }, 400);
-      const expiresAt = Date.now() + plan.durationMs;
-      const record = await readRecord(env, order.key);
-      if (record) {
-        await writeRecord(env, order.key, {
-          ...record,
-          status: "approved",
-          approvedAt: new Date().toISOString(),
-          expiresAt,
-        });
-      }
+      const approved = await approveLicenseForPeriod(env, order.key, order.period, { paymentProvider: "usdt-trc20" });
+      if (!approved) return json({ ok: false, error: "license-not-found" }, 404);
+      const expiresAt = approved.expiresAt;
       await writeRecord(env, `order:${orderId}`, {
         ...order,
         status: "confirmed",

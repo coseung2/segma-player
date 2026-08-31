@@ -89,6 +89,36 @@ download worker, browser player, subtitle, license, and file-writer modules
 cannot enter the package indirectly. Private page-key code, tests, native
 source, build scripts, and fixed extension keys are likewise excluded.
 
+## Paddle + USDT Pro payments
+
+The public purchase modal keeps the existing USDT-TRC20 flow and adds Paddle
+Checkout as a second payment method. Both providers converge on the same
+license records in the `LICENSES` KV namespace; the desktop/extension license
+validation contract does not change.
+
+Configure Paddle with two one-time prices matching the existing license
+periods, then provide these Worker bindings:
+
+- `PADDLE_CLIENT_TOKEN`: Paddle.js client-side token (`test_...` or `live_...`)
+- `PADDLE_PRICE_MONTH`: one-time price ID for the 1-month license
+- `PADDLE_PRICE_YEAR`: one-time price ID for the 1-year license
+- `PADDLE_WEBHOOK_SECRET`: endpoint secret for webhook signature verification
+
+Create a Paddle notification destination for:
+
+`https://<worker-host>/api/pay/paddle/webhook`
+
+and subscribe it to `transaction.completed`. The Worker verifies the raw
+`Paddle-Signature`, matches the transaction to the exact pending order and
+expected price, then approves the same Pro license record used by the USDT
+path. Browser-side `checkout.completed` is only a UI signal; it never grants
+the entitlement by itself.
+
+For sandbox checkout, use a `test_...` client token and sandbox price IDs. For
+production, use a `live_...` token, production price IDs, an approved checkout
+domain, and the production webhook endpoint secret. Do not commit the webhook
+secret to this repository.
+
 ## Development
 
 Bug fixes and regression history are tracked in [INCIDENTS.md](INCIDENTS.md).

@@ -147,7 +147,9 @@ img { max-width: 100%; }
 .pay-desc { margin: 0; color: #6b7687; font-size: 13px; line-height: 1.5; }
 .pay-label { margin: 6px 0 0; color: #3d4757; font-size: 13px; font-weight: 700; }
 .pay-modal select, .pay-modal input { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid #dfe4ec; border-radius: 10px; background: #fff; color: var(--ink); font-size: 14px; }
+.pay-methods { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .pay-button { width: 100%; min-height: 44px; border: 0; border-radius: 12px; background: var(--ink); color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
+.pay-button-secondary { border: 1px solid #dfe4ec; background: #fff; color: var(--ink); }
 .pay-button:disabled { opacity: .6; cursor: wait; }
 .pay-info { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--panel); color: #3d4757; font-size: 13px; word-break: break-all; line-height: 1.5; }
 .pay-status { margin: 0; min-height: 16px; color: #6b7687; font-size: 13px; line-height: 1.5; }

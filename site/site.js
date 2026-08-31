@@ -55,7 +55,8 @@ const payOverlay = document.getElementById("pay-overlay");
 const payClose = document.getElementById("pay-close");
 const openPay = document.getElementById("open-pay");
 const payPeriod = document.getElementById("pay-period");
-const payCreate = document.getElementById("pay-create");
+const payPaddle = document.getElementById("pay-paddle");
+const payUsdt = document.getElementById("pay-usdt");
 const payOrder = document.getElementById("pay-order");
 const payAddress = document.getElementById("pay-address");
 const payAmount = document.getElementById("pay-amount");
@@ -65,6 +66,8 @@ const payResult = document.getElementById("pay-result");
 const payKey = document.getElementById("pay-key");
 const payStatus = document.getElementById("pay-status");
 let payOrderId = null;
+let paddleInitializedToken = null;
+let paddleEnvironment = null;
 
 function openPayModal() {
   payOverlay.hidden = false;
@@ -72,6 +75,7 @@ function openPayModal() {
   payOrder.hidden = true;
   payResult.hidden = true;
   payTx.value = "";
+  payKey.textContent = "";
   payOrderId = null;
 }
 
@@ -88,9 +92,99 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !payOverlay?.hidden) closePayModal();
 });
 
-payCreate?.addEventListener("click", async () => {
-  payCreate.disabled = true;
+function setPaymentButtonsDisabled(disabled) {
+  if (payPaddle) payPaddle.disabled = disabled;
+  if (payUsdt) payUsdt.disabled = disabled;
+}
+
+function showLicenseResult(data) {
+  payKey.textContent = data.key;
+  payOrder.hidden = true;
+  payResult.hidden = false;
+  payStatus.textContent = "결제가 확인되었습니다. 라이선스 키를 안전하게 보관하세요.";
+}
+
+async function pollPaddleOrder(orderId, attempts = 12) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const response = await fetch(`/api/pay/paddle/status?orderId=${encodeURIComponent(orderId)}`);
+    const data = await response.json().catch(() => ({}));
+    if (response.ok && data.status === "confirmed") return data;
+    if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return null;
+}
+
+async function handlePaddleCompleted(orderId) {
+  payStatus.textContent = "Paddle 결제를 확인하는 중…";
+  const result = await pollPaddleOrder(orderId);
+  if (result) {
+    showLicenseResult(result);
+    return;
+  }
+  payStatus.textContent = "결제는 완료되었지만 서버 확인이 지연되고 있습니다. 잠시 후 페이지를 새로고침해 주세요.";
+}
+
+payPaddle?.addEventListener("click", async () => {
+  setPaymentButtonsDisabled(true);
+  payOrder.hidden = true;
+  payResult.hidden = true;
+  payStatus.textContent = "Paddle 결제를 준비하는 중…";
+  try {
+    const response = await fetch("/api/pay/paddle/order", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ period: payPeriod.value }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      payStatus.textContent = data?.error === "paddle-not-configured"
+        ? "Paddle 결제가 아직 설정되지 않았습니다. USDT 결제를 이용해 주세요."
+        : "Paddle 결제를 준비하지 못했습니다.";
+      return;
+    }
+    if (!window.Paddle) {
+      payStatus.textContent = "Paddle 결제 모듈을 불러오지 못했습니다.";
+      return;
+    }
+    if (paddleEnvironment && paddleEnvironment !== data.environment) {
+      payStatus.textContent = "Paddle 환경이 변경되었습니다. 페이지를 새로고침해 주세요.";
+      return;
+    }
+    if (!paddleInitializedToken) {
+      if (data.environment === "sandbox") window.Paddle.Environment.set("sandbox");
+      window.Paddle.Initialize({
+        token: data.clientToken,
+        eventCallback(event) {
+          if (event?.name !== "checkout.completed") return;
+          const completedOrderId = event?.data?.custom_data?.segma_order_id || payOrderId;
+          if (completedOrderId) handlePaddleCompleted(completedOrderId);
+        },
+      });
+      paddleInitializedToken = data.clientToken;
+      paddleEnvironment = data.environment;
+    } else if (paddleInitializedToken !== data.clientToken) {
+      payStatus.textContent = "Paddle 설정이 변경되었습니다. 페이지를 새로고침해 주세요.";
+      return;
+    }
+    payOrderId = data.orderId;
+    window.Paddle.Checkout.open({
+      items: [{ priceId: data.priceId, quantity: 1 }],
+      customData: { segma_order_id: data.orderId },
+      settings: { displayMode: "overlay", theme: "light", locale: "ko" },
+    });
+    payStatus.textContent = "Paddle 결제창에서 결제를 완료해 주세요.";
+  } catch {
+    payStatus.textContent = "Paddle 결제를 준비하지 못했습니다.";
+  } finally {
+    setPaymentButtonsDisabled(false);
+  }
+});
+
+payUsdt?.addEventListener("click", async () => {
+  setPaymentButtonsDisabled(true);
   payStatus.textContent = "주문 생성 중…";
+  payOrder.hidden = true;
+  payResult.hidden = true;
   try {
     const response = await fetch("/api/pay/order", {
       method: "POST",
@@ -112,7 +206,7 @@ payCreate?.addEventListener("click", async () => {
   } catch {
     payStatus.textContent = "주문을 생성하지 못했습니다.";
   } finally {
-    payCreate.disabled = false;
+    setPaymentButtonsDisabled(false);
   }
 });
 
@@ -137,10 +231,7 @@ payVerify?.addEventListener("click", async () => {
         : (data?.error || "결제 확인에 실패했습니다.");
       return;
     }
-    payKey.textContent = data.key;
-    payOrder.hidden = true;
-    payResult.hidden = false;
-    payStatus.textContent = "결제가 확인되었습니다.";
+    showLicenseResult(data);
   } catch {
     payStatus.textContent = "결제 확인에 실패했습니다.";
   } finally {

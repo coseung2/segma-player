@@ -2096,13 +2096,8 @@ impl ManagerApp {
         }
         if output.fullscreen_requested {
             let target_fullscreen = !self.player_session.fullscreen;
-            if let Some(viewport) = self
-                .player_surface
-                .prepare_root_fullscreen(target_fullscreen)
-            {
+            if self.player_surface.set_fullscreen(target_fullscreen) {
                 self.player_session.fullscreen = target_fullscreen;
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Maximized(viewport.maximized));
             } else {
                 self.notify("전체 화면으로 전환하지 못했습니다.", NoticeTone::Error);
             }

@@ -493,7 +493,7 @@
 
 ### INC-2026-08-25-031 Fullscreen expanded the window but retained the page layout
 
-- Status: `CODE-FIXED / LIVE-UNVERIFIED`
+- Status: `INVESTIGATING / LIVE-FAILED`
 - Reproduction: click the Player fullscreen control. The viewport expands, but the rail, header, next-play row, and ordinary page spacing remain, so the video itself does not become the dominant fullscreen surface.
 - Affected surface: native Rust/egui Companion Player fullscreen mode.
 - Confirmed cause: fullscreen only toggled the eframe viewport flag; `PlayerUiInput` and the app shell continued rendering the normal Player page composition.
@@ -513,6 +513,9 @@
 - User follow-up after `0.4.17`: fullscreen hover must expose only a compact seek bar, without the ordinary playback/volume/advanced control rows or their reserved visual height.
 - Corrective action in `0.4.18`: replace fullscreen reuse of `control_bar` with a dedicated 42-point seek-only overlay. Keep the video rectangle invariant, bottom-hover animation, click-to-pause, `F`, and Escape behavior. Preview coordinate correction is recorded with INC-2026-08-25-030.
 - `0.4.18` corrective verification: manager suite passes 118/118, release and installed hashes match, Add/Remove Programs reports `0.4.18`, and the responsive installed app is running. Visible lower-edge hover remains a user-window check.
+- Installed-app failure confirmed through `0.4.55`: start playback, then click fullscreen. The manager becomes non-responsive and Windows records Application Hang 1002 / `AppHangB1`, while the mpv child remains alive. This supersedes the earlier `CODE-FIXED / LIVE-UNVERIFIED` status.
+- Failed investigations before the `0.4.64` handoff: eframe/winit `ViewportCommand::Fullscreen` hangs; hiding the mpv child before that command still hangs; direct `SetWindowLongPtrW` plus `SetWindowPos` reaches 1920×1080 and then hangs; and deferred decorations/position/size commands also hang.
+- `0.4.64` WIP handoff: preserve the latest maximize-only viewport experiment in `companion-gui/src/{app,player_surface}.rs`. Its focused deterministic test and compilation pass, but real playback becomes `Responding=False` within about 250 ms of the fullscreen click while mpv stays alive. This experiment is not a fix and is committed only so the next investigation retains the exact failed branch and evidence.
 
 ### INC-2026-08-26-032 YouTube playback opened in a constrained page and the filename title showed missing glyphs
 

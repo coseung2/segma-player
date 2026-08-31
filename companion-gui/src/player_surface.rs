@@ -46,6 +46,14 @@ pub(crate) struct PlayerSurface {
     parent_hwnd: isize,
     taskbar_icon_applied: bool,
     video_hwnd: isize,
+    #[cfg(target_os = "windows")]
+    windowed_placement: Option<WindowedPlacement>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct WindowedPlacement {
+    was_maximized: bool,
 }
 
 impl PlayerSurface {
@@ -84,6 +92,30 @@ impl PlayerSurface {
         clear_video_window_region(self.video_hwnd);
     }
 
+    /// Prepare a fullscreen resize without calling User32 from inside the root
+    /// window callback. The actual geometry change is emitted as ordinary
+    /// viewport commands after this UI pass returns.
+    pub(crate) fn prepare_root_fullscreen(
+        &mut self,
+        fullscreen: bool,
+    ) -> Option<RootViewportState> {
+        #[cfg(target_os = "windows")]
+        {
+            return prepare_root_window_fullscreen(
+                self.parent_hwnd,
+                self.video_hwnd,
+                fullscreen,
+                &mut self.windowed_placement,
+            );
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = fullscreen;
+            None
+        }
+    }
+
     /// Hiding always clears the last region first, matching the old inline
     /// teardown and preventing a fullscreen clip from leaking into a later PiP.
     pub(crate) fn hide(&self) {
@@ -91,10 +123,20 @@ impl PlayerSurface {
     }
 
     pub(crate) fn shutdown(&mut self) {
+        #[cfg(target_os = "windows")]
+        if self.windowed_placement.is_some() {
+            self.windowed_placement = None;
+        }
         destroy_video_window(self.video_hwnd);
         self.video_hwnd = 0;
         self.parent_hwnd = 0;
     }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RootViewportState {
+    pub(crate) maximized: bool,
 }
 
 impl Drop for PlayerSurface {
@@ -278,6 +320,64 @@ fn layout_video_window(window: isize, rect: PhysicalVideoRect, visible: bool) {
 fn layout_video_window(_window: isize, _rect: PhysicalVideoRect, _visible: bool) {}
 
 #[cfg(target_os = "windows")]
+fn hide_video_window(window: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    if window != 0 {
+        let _ = unsafe { ShowWindow(HWND(window as *mut core::ffi::c_void), SW_HIDE) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_video_window(_window: isize) {}
+
+/// Snapshot the root maximize state and derive a normal viewport command. The
+/// reporting machine deadlocks on both winit fullscreen and direct User32
+/// borderless resizing while an embedded mpv child is active. Maximized mode
+/// uses winit's already-supported `ShowWindow` path without entering its
+/// fullscreen/taskbar state machine and still gives the Player the monitor work
+/// area as one dedicated surface.
+#[cfg(target_os = "windows")]
+fn prepare_root_window_fullscreen(
+    window: isize,
+    video_window: isize,
+    fullscreen: bool,
+    windowed_placement: &mut Option<WindowedPlacement>,
+) -> Option<RootViewportState> {
+    if window == 0 {
+        return None;
+    }
+    if fullscreen == windowed_placement.is_some() {
+        return None;
+    }
+
+    if fullscreen {
+        hide_video_window(video_window);
+        *windowed_placement = Some(WindowedPlacement {
+            was_maximized: window_is_maximized(window),
+        });
+        Some(RootViewportState { maximized: true })
+    } else {
+        let Some(saved) = windowed_placement.take() else {
+            return None;
+        };
+        hide_video_window(video_window);
+        Some(RootViewportState {
+            maximized: saved.was_maximized,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn window_is_maximized(window: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsZoomed;
+
+    unsafe { IsZoomed(HWND(window as *mut core::ffi::c_void)) }.as_bool()
+}
+
+#[cfg(target_os = "windows")]
 fn clear_video_window_region(window: isize) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::SetWindowRgn;
@@ -380,6 +480,38 @@ mod tests {
             assert!(!app.contains(api), "ManagerApp must not own {api}");
             assert!(source.contains(api), "native surface must own {api}");
         }
+    }
+
+    #[test]
+    fn fullscreen_transition_bypasses_winit_and_updates_state_only_after_native_success() {
+        let app = include_str!("app.rs");
+        let source = include_str!("player_surface.rs");
+        let toggle = &app[app.find("if output.fullscreen_requested").unwrap()
+            ..app
+                .find("if let Some(file_name) = output.selected_up_next_file")
+                .unwrap()];
+
+        let transition = toggle
+            .find("prepare_root_fullscreen(target_fullscreen)")
+            .expect("fullscreen toggle must route through PlayerSurface");
+        let state_update = toggle
+            .find("self.player_session.fullscreen = target_fullscreen")
+            .expect("successful native transition must update UI state");
+        assert!(
+            transition < state_update,
+            "UI state must not lead the native window transition"
+        );
+        assert!(!toggle.contains("ViewportCommand::Fullscreen"));
+        assert!(source.contains("fn hide_video_window"));
+        assert!(source.contains("fn prepare_root_window_fullscreen"));
+        assert!(!toggle.contains("ViewportCommand::Fullscreen"));
+        assert!(toggle.contains("ViewportCommand::Maximized"));
+        assert!(!toggle.contains("ViewportCommand::Decorations"));
+        assert!(!toggle.contains("ViewportCommand::OuterPosition"));
+        assert!(!toggle.contains("ViewportCommand::InnerSize"));
+        let transition_impl = &source[source.find("fn prepare_root_window_fullscreen").unwrap()
+            ..source.find("fn clear_video_window_region").unwrap()];
+        assert!(!transition_impl.contains("SetWindowPos("));
     }
 
     #[test]

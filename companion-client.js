@@ -392,8 +392,8 @@ function postRequest(port, type, payload = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
 }
 
 export async function ensureCompanion({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  if (activePort) return activePort;
   if (connectPromise) return connectPromise;
+  if (activePort) return activePort;
   connectPromise = (async () => {
     let port;
     try {
@@ -421,7 +421,7 @@ export async function ensureCompanion({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   try {
     return await connectPromise;
   } finally {
-    if (!activePort) connectPromise = null;
+    connectPromise = null;
   }
 }
 

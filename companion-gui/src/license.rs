@@ -6,9 +6,8 @@
 
 use reqwest::blocking::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::hash_map::RandomState;
-use std::fs;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::io;
 use std::path::Path;
@@ -17,8 +16,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::jobs;
 
 const LICENSE_API_URL: &str = "https://aura.mdownloader.workers.dev/api/license";
-const MAX_SETTINGS_BYTES: usize = 16 * 1024;
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppLicense {
     pub key: String,
@@ -119,23 +116,18 @@ pub fn normalize_key(value: &str) -> Option<String> {
 }
 
 fn read_document(root: &Path) -> Value {
-    match fs::read(jobs::settings_path(root)) {
-        Ok(bytes) if bytes.len() <= MAX_SETTINGS_BYTES => {
-            serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}))
-        }
-        _ => json!({}),
-    }
+    aura_companion_contract::read_settings_document(root)
 }
 
-fn write_document(root: &Path, document: &Value) -> io::Result<()> {
-    fs::create_dir_all(root)?;
-    let file = jobs::settings_path(root);
-    let temporary = file.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(document).map_err(io::Error::other)?,
-    )?;
-    fs::rename(temporary, file)
+fn update_document<F>(root: &Path, update: F) -> io::Result<()>
+where
+    F: FnOnce(&mut Value),
+{
+    aura_companion_contract::update_settings_document(root, |document| {
+        update(document);
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn generated_device_id() -> String {
@@ -146,7 +138,7 @@ fn generated_device_id() -> String {
 }
 
 fn ensure_device_id(root: &Path) -> io::Result<String> {
-    let mut document = read_document(root);
+    let document = read_document(root);
     if let Some(value) = document
         .get("licenseDeviceId")
         .and_then(Value::as_str)
@@ -160,11 +152,9 @@ fn ensure_device_id(root: &Path) -> io::Result<String> {
         return Ok(value.to_string());
     }
     let device_id = generated_device_id();
-    if !document.is_object() {
-        document = json!({});
-    }
-    document["licenseDeviceId"] = Value::String(device_id.clone());
-    write_document(root, &document)?;
+    update_document(root, |document| {
+        document["licenseDeviceId"] = Value::String(device_id.clone());
+    })?;
     Ok(device_id)
 }
 
@@ -258,17 +248,14 @@ pub fn save_approved_in(root: &Path, license: &AppLicense) -> io::Result<()> {
     let key = normalize_key(&license.key)
         .filter(|_| license.pro)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid Pro license"))?;
-    let mut document = read_document(root);
-    if !document.is_object() {
-        document = json!({});
-    }
-    document["licenseKey"] = Value::String(key);
-    document["licenseEdition"] = Value::String("pro".into());
-    document["licenseStatus"] = Value::String("approved".into());
-    document["licenseExpiresAt"] = license.expires_at.map_or(Value::Null, Value::from);
-    document["licenseDevices"] = license.devices.map_or(Value::Null, Value::from);
-    document["licenseLimit"] = license.limit.map_or(Value::Null, Value::from);
-    write_document(root, &document)
+    update_document(root, |document| {
+        document["licenseKey"] = Value::String(key);
+        document["licenseEdition"] = Value::String("pro".into());
+        document["licenseStatus"] = Value::String("approved".into());
+        document["licenseExpiresAt"] = license.expires_at.map_or(Value::Null, Value::from);
+        document["licenseDevices"] = license.devices.map_or(Value::Null, Value::from);
+        document["licenseLimit"] = license.limit.map_or(Value::Null, Value::from);
+    })
 }
 
 pub fn save_approved(license: &AppLicense) -> io::Result<()> {
@@ -276,20 +263,20 @@ pub fn save_approved(license: &AppLicense) -> io::Result<()> {
 }
 
 pub fn remove_in(root: &Path) -> io::Result<()> {
-    let mut document = read_document(root);
-    if let Some(object) = document.as_object_mut() {
-        for key in [
-            "licenseKey",
-            "licenseEdition",
-            "licenseStatus",
-            "licenseExpiresAt",
-            "licenseDevices",
-            "licenseLimit",
-        ] {
-            object.remove(key);
+    update_document(root, |document| {
+        if let Some(object) = document.as_object_mut() {
+            for key in [
+                "licenseKey",
+                "licenseEdition",
+                "licenseStatus",
+                "licenseExpiresAt",
+                "licenseDevices",
+                "licenseLimit",
+            ] {
+                object.remove(key);
+            }
         }
-    }
-    write_document(root, &document)
+    })
 }
 
 pub fn remove() -> io::Result<()> {
@@ -299,6 +286,7 @@ pub fn remove() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn test_root() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("segma-license-test-{}", now_millis()))

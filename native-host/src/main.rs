@@ -295,16 +295,8 @@ fn safe_id(value: &str) -> Option<String> {
     job_store::safe_id(value)
 }
 
-fn job_request_path(job_id: &str) -> io::Result<PathBuf> {
-    job_store::request_path_in(&jobs_dir()?, job_id)
-}
-
 fn job_state_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
     job_store::state_path_in(directory, job_id)
-}
-
-fn job_state_path(job_id: &str) -> io::Result<PathBuf> {
-    job_state_path_in(&jobs_dir()?, job_id)
 }
 
 fn job_cancel_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
@@ -334,7 +326,9 @@ fn job_pause_path(job_id: &str) -> io::Result<PathBuf> {
 /// allowed in, not the mechanism. The `.request.json` written at submit time is
 /// the record, so no caller has to resupply the URL or quality.
 fn restart_job(job_id: &str) -> io::Result<()> {
-    let request_path = job_request_path(job_id)?;
+    let directory = jobs_dir()?;
+    let request_path = job_store::request_path_in(&directory, job_id)?;
+    let claim = job_store::reserve_runner_claim_in(&directory, job_id)?;
     let bytes = fs::read(&request_path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             io::Error::new(io::ErrorKind::NotFound, "job-request-missing")
@@ -343,28 +337,42 @@ fn restart_job(job_id: &str) -> io::Result<()> {
         }
     })?;
     let request: Request = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if request.job_id != job_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "job-request-id-mismatch",
+        ));
+    }
 
     // Clear both markers first. A leftover marker would make the fresh runner
     // stop again on its first loop iteration.
-    if let Ok(path) = job_pause_path(job_id) {
+    if let Ok(path) = job_store::pause_path_in(&directory, job_id) {
         let _ = fs::remove_file(path);
     }
-    if let Ok(path) = job_cancel_path(job_id) {
+    if let Ok(path) = job_store::cancel_path_in(&directory, job_id) {
         let _ = fs::remove_file(path);
     }
 
-    let mut state = read_job_state(&job_state_path(job_id)?).unwrap_or_else(|| {
-        let mut fresh = initial_job_state(&request);
-        fresh.job_id = job_id.to_string();
-        fresh
-    });
+    let mut state =
+        read_job_state(&job_store::state_path_in(&directory, job_id)?).unwrap_or_else(|| {
+            let mut fresh = initial_job_state(&request);
+            fresh.job_id = job_id.to_string();
+            fresh
+        });
     state.status = "queued".into();
     state.status_text = "이어받기를 준비하는 중…".into();
     state.error = None;
-    persist_job_state(&mut state)?;
-
-    let request_path_text = request_path.to_string_lossy().into_owned();
-    process::spawn_detached(&["--run-job", &request_path_text])
+    job_store::persist_job_state_in(&directory, &mut state, now_millis())?;
+    match spawn_reserved_runner_with(&request_path, claim, process::spawn_detached) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            state.status = "failed".into();
+            state.status_text = "작업 실행기를 시작하지 못했습니다.".into();
+            state.error = Some("job-start-failed".into());
+            let _ = job_store::persist_job_state_in(&directory, &mut state, now_millis());
+            Err(error)
+        }
+    }
 }
 
 /// Writes the shared download folder into `settings.json`.
@@ -379,29 +387,18 @@ fn write_download_folder(root: &Path, folder: &str) -> io::Result<PathBuf> {
         fs::create_dir_all(&path)?;
     }
 
-    let settings_file = settings_path(root);
-    let mut document = match fs::read(&settings_file) {
-        Ok(bytes) if bytes.len() <= MAX_COMPANION_SETTINGS_BYTES => {
-            serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({}))
-        }
-        _ => json!({}),
-    };
-    if !document.is_object() {
-        document = json!({});
-    }
-    document["downloadFolder"] = Value::String(path.to_string_lossy().into_owned());
-
-    fs::create_dir_all(root)?;
-    write_json_atomic(&settings_file, &document)?;
+    aura_companion_contract::update_settings_document(root, |document| {
+        document["downloadFolder"] = Value::String(path.to_string_lossy().into_owned());
+        Ok(())
+    })?;
     Ok(path)
 }
 
-/// Opens a completed file in whatever the user has associated with it.
+/// Compatibility-only command for older extension callers.
 ///
-/// This is playback stage one. A libmpv surface inside the manager window is the
-/// intended end state, but the engine is not shipped yet, and handing the file
-/// to the system player is honest about what exists today rather than showing a
-/// dead video area.
+/// Current Library playback is owned by the manager's embedded mpv surface.
+/// Keep this frozen protocol command until all installed pre-manager clients
+/// have aged out; new code must not route playback through the system default.
 #[cfg(target_os = "windows")]
 fn open_media_file(file_name: &str) -> io::Result<PathBuf> {
     let name = Path::new(file_name)
@@ -460,10 +457,6 @@ fn persist_job_state_in(directory: &Path, state: &mut JobState, updated_at: u64)
     job_store::persist_job_state_in(directory, state, updated_at)
 }
 
-fn persist_job_state(state: &mut JobState) -> io::Result<()> {
-    persist_job_state_in(&jobs_dir()?, state, now_millis())
-}
-
 fn command_tools() -> io::Result<(PathBuf, PathBuf, PathBuf)> {
     youtube::command_tools(&tools_dir()?)
 }
@@ -509,7 +502,7 @@ fn initial_job_state(request: &Request) -> JobState {
     }
 }
 
-fn execute_download<F>(request: Request, notify: F)
+fn execute_download<F>(request: Request, jobs_directory: &Path, notify: F) -> io::Result<()>
 where
     F: Fn(&JobState),
 {
@@ -520,8 +513,9 @@ where
             tools_directory: || tools_dir().map_err(|error| error.to_string()),
             cancel_path: job_cancel_path(&request.job_id).ok(),
             pause_path: job_pause_path(&request.job_id).ok(),
+            jobs_directory: jobs_directory.to_path_buf(),
         };
-        media_download::execute(command, context, notify);
+        media_download::execute(command, context, notify)
     } else {
         let job_id = request.job_id.clone();
         let cancel_job_id = job_id.clone();
@@ -530,22 +524,60 @@ where
             downloads: || aura_downloads_dir().map_err(|error| error.to_string()),
             cancel_path: move || job_cancel_path(&cancel_job_id).ok(),
             pause_path: move || job_pause_path(&job_id).ok(),
+            jobs_directory: jobs_directory.to_path_buf(),
         };
-        youtube::execute(request, context, notify);
+        youtube::execute(request, context, notify)
     }
 }
 
-fn spawn_job_runner(request: &Request) -> io::Result<()> {
-    let request_path = job_request_path(&request.job_id)?;
-    write_json_atomic(&request_path, request)?;
+fn spawn_reserved_runner_with<F>(
+    request_path: &Path,
+    claim: job_store::RunnerClaim,
+    spawn: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&[&str]) -> io::Result<()>,
+{
+    let request_path_text = request_path.to_string_lossy().into_owned();
+    let token = claim.token().to_string();
+    spawn(&["--run-job", &request_path_text, "--claim-token", &token])?;
+    claim.handoff();
+    Ok(())
+}
+
+fn spawn_job_runner_in_with<F>(directory: &Path, request: &Request, spawn: F) -> io::Result<()>
+where
+    F: FnOnce(&[&str]) -> io::Result<()>,
+{
+    let claim = job_store::reserve_runner_claim_in(directory, &request.job_id)?;
+    let request_path = job_store::request_path_in(directory, &request.job_id)?;
+    job_store::write_json_atomic(&request_path, request)?;
     let mut state = initial_job_state(request);
-    persist_job_state(&mut state)?;
-    if let Ok(cancel_path) = job_cancel_path(&request.job_id) {
+    job_store::persist_job_state_in(directory, &mut state, now_millis())?;
+    if let Ok(cancel_path) = job_store::cancel_path_in(directory, &request.job_id) {
         let _ = fs::remove_file(cancel_path);
     }
-    let request_path_text = request_path.to_string_lossy().into_owned();
-    process::spawn_detached(&["--run-job", &request_path_text])?;
-    Ok(())
+    match spawn_reserved_runner_with(&request_path, claim, spawn) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            state.status = "failed".into();
+            state.status_text = "작업 실행기를 시작하지 못했습니다.".into();
+            state.error = Some("job-start-failed".into());
+            let _ = job_store::persist_job_state_in(directory, &mut state, now_millis());
+            Err(error)
+        }
+    }
+}
+
+fn spawn_job_runner_with<F>(request: &Request, spawn: F) -> io::Result<()>
+where
+    F: FnOnce(&[&str]) -> io::Result<()>,
+{
+    spawn_job_runner_in_with(&jobs_dir()?, request, spawn)
+}
+
+fn spawn_job_runner(request: &Request) -> io::Result<()> {
+    spawn_job_runner_with(request, process::spawn_detached)
 }
 
 /// Name of the GUI binary that owns the manager window.
@@ -732,6 +764,19 @@ fn run_native_host() {
                     json!({ "ok": false, "errorCode": "job-list-failed", "error": error.to_string() }),
                 ),
             },
+            "clear-terminal-history" => match jobs_dir()
+                .and_then(|directory| job_store::clear_terminal_history_in(&directory))
+            {
+                Ok(count) => reply(&request, json!({ "ok": true, "cleared": count })),
+                Err(error) => reply(
+                    &request,
+                    json!({
+                        "ok": false,
+                        "errorCode": "history-clear-failed",
+                        "error": error.to_string()
+                    }),
+                ),
+            },
             "cancel-job" => match job_cancel_path(&request.job_id) {
                 Ok(path) => match fs::write(path, b"cancel") {
                     Ok(()) => reply(&request, json!({ "ok": true, "jobId": request.job_id })),
@@ -844,10 +889,107 @@ fn run_native_host() {
     legacy_writer::disconnect(&mut legacy_writer);
 }
 
-fn run_job_from_path(path: &Path) -> io::Result<()> {
-    let request: Request = serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
-    execute_download(request, |_| {});
-    Ok(())
+fn run_job_from_path(path: &Path, claim_token: Option<&str>) -> io::Result<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jobs directory is unavailable"))?;
+    let path_job_id = request_job_id_from_path(path)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid request path"))?;
+    let mut claim = match claim_token {
+        Some(token) => Some(job_store::adopt_runner_claim_in(
+            directory,
+            &path_job_id,
+            token,
+        )?),
+        None => None,
+    };
+    let request: Request = match fs::read(path)
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(io::Error::other))
+    {
+        Ok(request) => request,
+        Err(error) => {
+            mark_bootstrap_failure(path, "job-request-invalid")?;
+            return Err(error);
+        }
+    };
+    if request.job_id != path_job_id {
+        mark_bootstrap_failure(path, "job-request-id-mismatch")?;
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "job-request-id-mismatch",
+        ));
+    }
+    if claim.is_none() {
+        claim = match job_store::acquire_runner_claim_in(directory, &request.job_id) {
+            Ok(claim) => Some(claim),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => {
+                mark_job_failed_in(directory, &request, "job-claim-failed")?;
+                return Err(error);
+            }
+        }
+    }
+    let _claim = claim.expect("runner claim is present");
+    execute_download(request, directory, |_| {})
+}
+
+fn request_job_id_from_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".request.json"))
+        .and_then(safe_id)
+}
+
+fn mark_bootstrap_failure(path: &Path, code: &str) -> io::Result<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jobs directory is unavailable"))?;
+    let Some(job_id) = request_job_id_from_path(path) else {
+        return Ok(());
+    };
+    let mut state = read_job_state(&job_state_path_in(directory, &job_id)?).unwrap_or_default();
+    state.job_id = job_id;
+    state.status = "failed".into();
+    state.status_text = "저장된 작업 요청을 시작하지 못했습니다.".into();
+    state.error = Some(code.into());
+    job_store::persist_job_state_in(directory, &mut state, now_millis())
+}
+
+fn mark_job_failed_in(directory: &Path, request: &Request, code: &str) -> io::Result<()> {
+    let mut state = read_job_state(&job_state_path_in(directory, &request.job_id)?)
+        .unwrap_or_else(|| initial_job_state(request));
+    state.status = "failed".into();
+    state.status_text = "작업 상태를 준비하지 못했습니다.".into();
+    state.error = Some(code.into());
+    job_store::persist_job_state_in(directory, &mut state, now_millis())
+}
+
+fn record_runner_failure(path: &Path, claim_token: Option<&str>, error: &io::Error) {
+    let Some(directory) = path.parent() else {
+        return;
+    };
+    let Some(job_id) = request_job_id_from_path(path) else {
+        return;
+    };
+    // Token-launched children must still own the reservation. A mismatch means
+    // another runner owns the job and its state must remain untouched.
+    if let Some(token) = claim_token {
+        let Ok(claim) = job_store::adopt_runner_claim_in(directory, &job_id, token) else {
+            return;
+        };
+        drop(claim);
+    } else if job_store::runner_claim_path_in(directory, &job_id).is_ok_and(|path| path.exists()) {
+        return;
+    }
+    let Ok(state_path) = job_state_path_in(directory, &job_id) else {
+        return;
+    };
+    let mut state = read_job_state(&state_path).unwrap_or_default();
+    state.job_id = job_id;
+    state.status = "failed".into();
+    state.status_text = "작업 상태를 저장하지 못해 실행을 중단했습니다.".into();
+    state.error = Some(format!("job-state-persist-failed: {error}"));
+    let _ = job_store::persist_job_state_in(directory, &mut state, now_millis());
 }
 
 fn run_subtitle_job_from_path(path: &Path) -> io::Result<()> {
@@ -878,7 +1020,14 @@ fn main() {
     let args = env::args_os().collect::<Vec<_>>();
     if args.get(1).and_then(|value| value.to_str()) == Some("--run-job") {
         if let Some(path) = args.get(2) {
-            let _ = run_job_from_path(Path::new(path));
+            let claim_token = (args.get(3).and_then(|value| value.to_str())
+                == Some("--claim-token"))
+            .then(|| args.get(4).and_then(|value| value.to_str()))
+            .flatten();
+            let path = Path::new(path);
+            if let Err(error) = run_job_from_path(path, claim_token) {
+                record_runner_failure(path, claim_token, &error);
+            }
         }
         return;
     }
@@ -1905,6 +2054,168 @@ mod tests {
         // only asserts the id guard, which runs before any file access.
         assert!(restart_job("../escape").is_err());
         assert!(restart_job("").is_err());
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn spawn_failure_marks_the_job_failed_and_releases_the_reservation() {
+        let directory = test_directory();
+        let request = sample_download_request("job-spawn-failure");
+        let error = spawn_job_runner_in_with(&directory, &request, |_| {
+            Err(io::Error::new(io::ErrorKind::NotFound, "runner missing"))
+        })
+        .expect_err("spawn fails");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+
+        let state = read_job_state(&job_state_path_in(&directory, &request.job_id).unwrap())
+            .expect("failed state persists");
+        assert_eq!(state.status, "failed");
+        assert_eq!(state.error.as_deref(), Some("job-start-failed"));
+        assert!(
+            !job_store::runner_claim_path_in(&directory, &request.job_id)
+                .unwrap()
+                .exists()
+        );
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn parent_reservation_blocks_a_second_submit_before_the_child_starts() {
+        let directory = test_directory();
+        let request = sample_download_request("job-single-flight");
+        let request_path = job_store::request_path_in(&directory, &request.job_id).unwrap();
+        job_store::write_json_atomic(&request_path, &request).expect("request writes");
+        let reservation = job_store::reserve_runner_claim_in(&directory, &request.job_id)
+            .expect("parent reserves");
+        let original = fs::read(&request_path).expect("request reads");
+
+        let mut replacement = request.clone();
+        replacement.url = "https://example.invalid/replacement".into();
+        let error = spawn_job_runner_in_with(&directory, &replacement, |_| Ok(()))
+            .expect_err("second submit rejects");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&request_path).expect("request rereads"), original);
+        assert!(!job_state_path_in(&directory, &request.job_id)
+            .unwrap()
+            .exists());
+        drop(reservation);
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn malformed_persisted_request_becomes_a_failed_bootstrap_state() {
+        let directory = test_directory();
+        let path = directory.join("job-malformed.request.json");
+        fs::write(&path, b"{ not json").expect("malformed request writes");
+
+        assert!(run_job_from_path(&path, None).is_err());
+        let state = read_job_state(&job_state_path_in(&directory, "job-malformed").unwrap())
+            .expect("bootstrap state persists");
+        assert_eq!(state.status, "failed");
+        assert_eq!(state.error.as_deref(), Some("job-request-invalid"));
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn malformed_reserved_request_releases_the_parent_claim_and_marks_failure() {
+        let directory = test_directory();
+        let path = directory.join("job-reserved-malformed.request.json");
+        fs::write(&path, b"{ not json").expect("malformed request writes");
+        let claim = job_store::reserve_runner_claim_in(&directory, "job-reserved-malformed")
+            .expect("claim reserves");
+        let token = claim.token().to_string();
+        claim.handoff();
+
+        assert!(run_job_from_path(&path, Some(&token)).is_err());
+        assert!(
+            !job_store::runner_claim_path_in(&directory, "job-reserved-malformed")
+                .unwrap()
+                .exists()
+        );
+        let state =
+            read_job_state(&job_state_path_in(&directory, "job-reserved-malformed").unwrap())
+                .expect("bootstrap state persists");
+        assert_eq!(state.status, "failed");
+        assert_eq!(state.error.as_deref(), Some("job-request-invalid"));
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn mismatched_child_token_never_overwrites_the_reserved_job_state() {
+        let directory = test_directory();
+        let request = sample_download_request("job-token-mismatch");
+        let request_path = job_store::request_path_in(&directory, &request.job_id).unwrap();
+        job_store::write_json_atomic(&request_path, &request).expect("request writes");
+        let original_state = br#"{"jobId":"job-token-mismatch","status":"running","statusText":"owned","updatedAt":9}"#;
+        fs::write(
+            job_state_path_in(&directory, &request.job_id).unwrap(),
+            original_state,
+        )
+        .expect("state writes");
+        let claim = job_store::reserve_runner_claim_in(&directory, &request.job_id)
+            .expect("claim reserves");
+        let token = claim.token().to_string();
+        claim.handoff();
+
+        let error = run_job_from_path(&request_path, Some("wrong-token"))
+            .expect_err("mismatched child rejects");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::read(job_state_path_in(&directory, &request.job_id).unwrap())
+                .expect("state rereads"),
+            original_state
+        );
+        let adopted = job_store::adopt_runner_claim_in(&directory, &request.job_id, &token)
+            .expect("real child can still adopt");
+        drop(adopted);
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn runner_failure_fallback_does_not_overwrite_an_unowned_reservation() {
+        let directory = test_directory();
+        let request = sample_download_request("job-fallback-token");
+        let request_path = job_store::request_path_in(&directory, &request.job_id).unwrap();
+        job_store::write_json_atomic(&request_path, &request).expect("request writes");
+        let original_state = br#"{"jobId":"job-fallback-token","status":"running","statusText":"owned","updatedAt":9}"#;
+        fs::write(
+            job_state_path_in(&directory, &request.job_id).unwrap(),
+            original_state,
+        )
+        .expect("state writes");
+        let claim = job_store::reserve_runner_claim_in(&directory, &request.job_id)
+            .expect("claim reserves");
+        let token = claim.token().to_string();
+        claim.handoff();
+
+        record_runner_failure(
+            &request_path,
+            Some("wrong-token"),
+            &io::Error::other("persist failed"),
+        );
+        assert_eq!(
+            fs::read(job_state_path_in(&directory, &request.job_id).unwrap())
+                .expect("state rereads"),
+            original_state
+        );
+
+        record_runner_failure(
+            &request_path,
+            Some(&token),
+            &io::Error::other("persist failed"),
+        );
+        let state = read_job_state(&job_state_path_in(&directory, &request.job_id).unwrap())
+            .expect("fallback state persists");
+        assert_eq!(state.status, "failed");
+        assert!(state
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("job-state-persist-failed:")));
+        assert!(
+            !job_store::runner_claim_path_in(&directory, &request.job_id)
+                .unwrap()
+                .exists()
+        );
         fs::remove_dir_all(directory).expect("test directory removes");
     }
 

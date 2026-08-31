@@ -40,10 +40,11 @@ one download folder both entry points use.
 
 | Capability | Where it runs |
 | --- | --- |
-| Cancel, pause, resume, retry | Marker files and the host's `--run-job` |
+| Cancel, pause | Marker files consumed by the host runner |
+| Resume, retry, history deletion | Manager commands delegated to the native host |
 | Library | Media files listed from the download folder |
-| Download folder | `settings.json`, written by the app |
-| Playback | System default player; an embedded engine is not built yet |
+| Download folder | Locked, atomically replaced `settings.json`, shared by host and app |
+| Playback | Embedded mpv surface owned by `aura-media-manager.exe` |
 | General/Pro authentication | App settings; verified against `/api/license` |
 
 [companion-ui](companion-ui/README.md) is an earlier HTML prototype of the same

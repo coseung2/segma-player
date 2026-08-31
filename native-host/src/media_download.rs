@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -298,6 +298,7 @@ pub struct ExecutionContext {
     pub tools_directory: fn() -> Result<PathBuf, String>,
     pub cancel_path: Option<PathBuf>,
     pub pause_path: Option<PathBuf>,
+    pub jobs_directory: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,14 +348,17 @@ fn initial_job_state(command: &Command) -> job_store::JobState {
     }
 }
 
-fn update_state<F>(state: &mut job_store::JobState, notify: &F)
+fn update_state<F>(
+    jobs_directory: &Path,
+    state: &mut job_store::JobState,
+    notify: &F,
+) -> io::Result<()>
 where
     F: Fn(&job_store::JobState),
 {
-    if let Ok(directory) = job_store::jobs_dir() {
-        let _ = job_store::persist_job_state_in(&directory, state, now_millis());
-    }
+    job_store::persist_job_state_in(jobs_directory, state, now_millis())?;
     notify(state);
+    Ok(())
 }
 
 fn parse_progress(value: &str) -> Option<u8> {
@@ -721,12 +725,14 @@ fn fetch_range(
 }
 
 fn update_transfer_state<F>(
+    jobs_directory: &Path,
     state: &mut job_store::JobState,
     notify: &F,
     written: u64,
     total: Option<u64>,
     started_at: Instant,
-) where
+) -> io::Result<()>
+where
     F: Fn(&job_store::JobState),
 {
     state.completed = Some(written);
@@ -742,7 +748,7 @@ fn update_transfer_state<F>(
         Some(total) => format!("다운로드 중 · {written} / {total} bytes · {speed_mib:.2} MB/s"),
         None => format!("다운로드 중 · {written} bytes · {speed_mib:.2} MB/s"),
     };
-    update_state(state, notify);
+    update_state(jobs_directory, state, notify)
 }
 
 fn execute_progressive<F>(
@@ -750,6 +756,7 @@ fn execute_progressive<F>(
     downloads: &Path,
     state: &mut job_store::JobState,
     notify: &F,
+    jobs_directory: &Path,
     cancel_path: Option<&Path>,
     pause_path: Option<&Path>,
 ) -> DownloadAttemptResult
@@ -812,7 +819,9 @@ where
     state.completed = Some(offset);
     state.total = total;
     state.status_text = "미디어를 직접 저장하는 중…".into();
-    update_state(state, notify);
+    if let Err(error) = update_state(jobs_directory, state, notify) {
+        return DownloadAttemptResult::StatusError(error.to_string());
+    }
 
     let started_at = Instant::now();
     let mut written = offset;
@@ -826,7 +835,16 @@ where
             return DownloadAttemptResult::Failed(error.to_string());
         }
         written = written.saturating_add(1);
-        update_transfer_state(state, notify, written, Some(range_total), started_at);
+        if let Err(error) = update_transfer_state(
+            jobs_directory,
+            state,
+            notify,
+            written,
+            Some(range_total),
+            started_at,
+        ) {
+            return DownloadAttemptResult::StatusError(error.to_string());
+        }
 
         let concurrency_limit = range_concurrency_limit();
         let mut concurrency = RANGE_INITIAL_CONCURRENCY.min(concurrency_limit);
@@ -892,7 +910,16 @@ where
                     return DownloadAttemptResult::Failed(error.to_string());
                 }
                 written = written.saturating_add(bytes.len() as u64);
-                update_transfer_state(state, notify, written, Some(range_total), started_at);
+                if let Err(error) = update_transfer_state(
+                    jobs_directory,
+                    state,
+                    notify,
+                    written,
+                    Some(range_total),
+                    started_at,
+                ) {
+                    return DownloadAttemptResult::StatusError(error.to_string());
+                }
             }
             let batch_seconds = batch_started_at.elapsed().as_secs_f64().max(0.001);
             let batch_speed = batch_bytes as f64 / batch_seconds;
@@ -928,7 +955,11 @@ where
             written = written.saturating_add(count as u64);
             if written.saturating_sub(last_reported) >= 1024 * 1024 {
                 last_reported = written;
-                update_transfer_state(state, notify, written, total, started_at);
+                if let Err(error) =
+                    update_transfer_state(jobs_directory, state, notify, written, total, started_at)
+                {
+                    return DownloadAttemptResult::StatusError(error.to_string());
+                }
             }
         }
     }
@@ -1025,20 +1056,20 @@ fn execute_attempt<F>(
     context: &ExecutionContext,
     notify: &F,
     impersonate_browser: bool,
-) where
+) -> io::Result<()>
+where
     F: Fn(&job_store::JobState),
 {
     let mut state = initial_job_state(&command);
     state.status = "running".into();
     state.status_text = "미디어 다운로드를 준비하는 중…".into();
-    update_state(&mut state, notify);
+    update_state(&context.jobs_directory, &mut state, notify)?;
 
     if let Err(error) = validate_fields(&command) {
         state.status = "failed".into();
         state.status_text = "올바른 미디어 다운로드 요청이 아닙니다.".into();
         state.error = Some(error.code.into());
-        update_state(&mut state, notify);
-        return;
+        return update_state(&context.jobs_directory, &mut state, notify);
     }
     let downloads = match (context.downloads)() {
         Ok(path) => path,
@@ -1046,8 +1077,7 @@ fn execute_attempt<F>(
             state.status = "failed".into();
             state.status_text = "Companion 다운로드 폴더를 준비하지 못했습니다.".into();
             state.error = Some(error);
-            update_state(&mut state, notify);
-            return;
+            return update_state(&context.jobs_directory, &mut state, notify);
         }
     };
     if command.input_kind == "PROGRESSIVE" {
@@ -1056,6 +1086,7 @@ fn execute_attempt<F>(
             &downloads,
             &mut state,
             notify,
+            &context.jobs_directory,
             context.cancel_path.as_deref(),
             context.pause_path.as_deref(),
         );
@@ -1063,8 +1094,7 @@ fn execute_attempt<F>(
             let _ = fs::remove_file(path);
         }
         apply_download_outcome(&mut state, outcome);
-        update_state(&mut state, notify);
-        return;
+        return update_state(&context.jobs_directory, &mut state, notify);
     }
     let tools_directory = match (context.tools_directory)() {
         Ok(path) => path,
@@ -1072,8 +1102,7 @@ fn execute_attempt<F>(
             state.status = "failed".into();
             state.status_text = "미디어 도구가 설치되지 않았습니다.".into();
             state.error = Some(error);
-            update_state(&mut state, notify);
-            return;
+            return update_state(&context.jobs_directory, &mut state, notify);
         }
     };
     let (yt_dlp, node, ffmpeg) = match youtube::command_tools(&tools_directory) {
@@ -1082,8 +1111,7 @@ fn execute_attempt<F>(
             state.status = "failed".into();
             state.status_text = "미디어 도구가 설치되지 않았습니다.".into();
             state.error = Some(error.to_string());
-            update_state(&mut state, notify);
-            return;
+            return update_state(&context.jobs_directory, &mut state, notify);
         }
     };
     let mut process = ProcessCommand::new(yt_dlp);
@@ -1117,7 +1145,11 @@ fn execute_attempt<F>(
             }
             drop(tx);
             state.status_text = "미디어를 저장하는 중…".into();
-            update_state(&mut state, notify);
+            if let Err(error) = update_state(&context.jobs_directory, &mut state, notify) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
             let mut last_error = String::new();
             let mut cancelled = false;
             let mut paused = false;
@@ -1145,7 +1177,13 @@ fn execute_attempt<F>(
                         if let Some(progress) = line.strip_prefix("AURA_PROGRESS:") {
                             state.progress = parse_progress(progress);
                             state.status_text = format!("다운로드 중 · {}", progress.trim());
-                            update_state(&mut state, notify);
+                            if let Err(error) =
+                                update_state(&context.jobs_directory, &mut state, notify)
+                            {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return Err(error);
+                            }
                         } else if let Some(path) = line.strip_prefix("AURA_FILE:") {
                             state.file_name = Path::new(path.trim())
                                 .file_name()
@@ -1182,28 +1220,40 @@ fn execute_attempt<F>(
     };
     if !impersonate_browser && should_retry_with_impersonation(&command, &outcome) {
         state.status_text = "Cloudflare 요청 검증을 다시 시도하는 중…".into();
-        update_state(&mut state, notify);
-        execute_attempt(command, context, notify, true);
-        return;
+        update_state(&context.jobs_directory, &mut state, notify)?;
+        return execute_attempt(command, context, notify, true);
     }
     if let Some(path) = &context.cancel_path {
         let _ = fs::remove_file(path);
     }
     apply_download_outcome(&mut state, outcome);
-    update_state(&mut state, notify);
+    update_state(&context.jobs_directory, &mut state, notify)
 }
 
-pub fn execute<F>(command: Command, context: ExecutionContext, notify: F)
+pub fn execute<F>(command: Command, context: ExecutionContext, notify: F) -> io::Result<()>
 where
     F: Fn(&job_store::JobState),
 {
-    execute_attempt(command, &context, &notify, false);
+    execute_attempt(command, &context, &notify, false)
 }
 
 #[cfg(test)]
 mod execution_tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    fn test_directory(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "segma-media-download-{tag}-{}-{}",
+            std::process::id(),
+            NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).expect("test directory creates");
+        path
+    }
 
     fn command() -> Command {
         serde_json::from_value(json!({
@@ -1291,5 +1341,22 @@ mod execution_tests {
             "ERROR: [generic] HTTP Error 403 caused by Cloudflare anti-bot challenge".into(),
         );
         assert!(should_retry_with_impersonation(&command, &outcome));
+    }
+
+    #[test]
+    fn initial_persistence_failure_stops_before_media_setup_or_network() {
+        let root = test_directory("state-failure");
+        let blocked = root.join("not-a-directory");
+        fs::write(&blocked, b"blocked").expect("blocking file writes");
+        let context = ExecutionContext {
+            downloads: || panic!("downloads must not resolve after state failure"),
+            tools_directory: || panic!("tools must not resolve after state failure"),
+            cancel_path: None,
+            pause_path: None,
+            jobs_directory: blocked,
+        };
+
+        assert!(execute(command(), context, |_| {}).is_err());
+        fs::remove_dir_all(root).expect("test directory removes");
     }
 }

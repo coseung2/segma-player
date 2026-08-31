@@ -133,6 +133,7 @@ pub struct ExecutionContext<T, D, C, P> {
     pub downloads: D,
     pub cancel_path: C,
     pub pause_path: P,
+    pub jobs_directory: PathBuf,
 }
 
 enum DownloadAttemptResult {
@@ -144,17 +145,20 @@ enum DownloadAttemptResult {
     Paused,
 }
 
-fn update_state<F>(state: &mut JobState, notify: &F)
+fn update_state<F>(jobs_directory: &Path, state: &mut JobState, notify: &F) -> io::Result<()>
 where
     F: Fn(&JobState),
 {
-    if let Ok(directory) = job_store::jobs_dir() {
-        let _ = job_store::persist_job_state_in(directory.as_path(), state, crate::now_millis());
-    }
+    job_store::persist_job_state_in(jobs_directory, state, crate::now_millis())?;
     notify(state);
+    Ok(())
 }
 
-pub fn execute<F, T, D, C, P>(request: Request, context: ExecutionContext<T, D, C, P>, notify: F)
+pub fn execute<F, T, D, C, P>(
+    request: Request,
+    context: ExecutionContext<T, D, C, P>,
+    notify: F,
+) -> io::Result<()>
 where
     F: Fn(&JobState),
     T: FnOnce() -> Result<(PathBuf, PathBuf, PathBuf), String>,
@@ -165,7 +169,7 @@ where
     let mut state = crate::initial_job_state(&request);
     state.status = "running".into();
     state.status_text = "YouTube 정보를 확인하는 중…".into();
-    update_state(&mut state, &notify);
+    update_state(&context.jobs_directory, &mut state, &notify)?;
 
     if request.kind != "youtube-download"
         || job_store::safe_id(&request.job_id).is_none()
@@ -175,8 +179,7 @@ where
         state.status = "failed".into();
         state.status_text = "올바른 YouTube 요청이 아닙니다.".into();
         state.error = Some("invalid-request".into());
-        update_state(&mut state, &notify);
-        return;
+        return update_state(&context.jobs_directory, &mut state, &notify);
     }
 
     let (yt_dlp, node, ffmpeg) = match (context.tools)() {
@@ -185,8 +188,7 @@ where
             state.status = "failed".into();
             state.status_text = "미디어 도구가 설치되지 않았습니다.".into();
             state.error = Some(error);
-            update_state(&mut state, &notify);
-            return;
+            return update_state(&context.jobs_directory, &mut state, &notify);
         }
     };
     let downloads = match (context.downloads)() {
@@ -195,8 +197,7 @@ where
             state.status = "failed".into();
             state.status_text = "Downloads\\Aura Media 폴더를 준비하지 못했습니다.".into();
             state.error = Some(error);
-            update_state(&mut state, &notify);
-            return;
+            return update_state(&context.jobs_directory, &mut state, &notify);
         }
     };
     let cancel_path = (context.cancel_path)();
@@ -256,11 +257,23 @@ where
                     if let Some(title) = line.strip_prefix("AURA_TITLE:") {
                         state.title = Some(title.trim().to_string());
                         state.status_text = "영상 다운로드를 시작합니다…".into();
-                        update_state(&mut state, &notify);
+                        if let Err(error) =
+                            update_state(&context.jobs_directory, &mut state, &notify)
+                        {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(error);
+                        }
                     } else if let Some(progress) = line.strip_prefix("AURA_PROGRESS:") {
                         state.progress = parse_progress(progress);
                         state.status_text = format!("다운로드 중 · {}", progress.trim());
-                        update_state(&mut state, &notify);
+                        if let Err(error) =
+                            update_state(&context.jobs_directory, &mut state, &notify)
+                        {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(error);
+                        }
                     } else if let Some(path) = line.strip_prefix("AURA_FILE:") {
                         state.file_name = Path::new(path.trim())
                             .file_name()
@@ -296,7 +309,7 @@ where
                     state.progress = None;
                     state.status_text = "일시적인 403 오류입니다. 링크를 새로 확인하는 중…".into();
                     state.error = None;
-                    update_state(&mut state, &notify);
+                    update_state(&context.jobs_directory, &mut state, &notify)?;
                     thread::sleep(Duration::from_secs(1));
                     continue;
                 }
@@ -342,7 +355,7 @@ where
             state.error = None;
         }
     }
-    update_state(&mut state, &notify);
+    update_state(&context.jobs_directory, &mut state, &notify)
 }
 
 pub fn configure_download_command(
@@ -379,4 +392,51 @@ pub fn configure_download_command(
     apply_runtime(command, node, ffmpeg);
     command.arg(url);
     apply_hidden_process(command);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Request;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    fn test_directory(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "segma-youtube-{tag}-{}-{}",
+            std::process::id(),
+            NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).expect("test directory creates");
+        path
+    }
+
+    fn request() -> Request {
+        serde_json::from_value(json!({
+            "type": "youtube-download",
+            "requestId": "request-1",
+            "jobId": "youtube-job-1",
+            "url": "https://www.youtube.com/watch?v=example",
+            "quality": "best"
+        }))
+        .expect("request parses")
+    }
+
+    #[test]
+    fn initial_persistence_failure_stops_before_tool_or_download_setup() {
+        let root = test_directory("state-failure");
+        let blocked = root.join("not-a-directory");
+        fs::write(&blocked, b"blocked").expect("blocking file writes");
+        let context = ExecutionContext {
+            tools: || panic!("tools must not resolve after state failure"),
+            downloads: || panic!("downloads must not resolve after state failure"),
+            cancel_path: || None,
+            pause_path: || None,
+            jobs_directory: blocked,
+        };
+
+        assert!(execute(request(), context, |_| {}).is_err());
+        fs::remove_dir_all(root).expect("test directory removes");
+    }
 }

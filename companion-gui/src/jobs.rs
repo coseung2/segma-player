@@ -34,7 +34,7 @@ pub fn settings_path(root: &Path) -> PathBuf {
 }
 
 /// Largest settings file the manager will parse, matching the host's own cap.
-const MAX_SETTINGS_BYTES: usize = 16 * 1024;
+const MAX_SETTINGS_BYTES: usize = contract::MAX_SETTINGS_BYTES;
 
 pub fn default_downloads_dir() -> io::Result<PathBuf> {
     let home = env::var_os("USERPROFILE")
@@ -100,25 +100,10 @@ pub fn write_download_folder_in(root: &Path, folder: &Path) -> io::Result<PathBu
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid download folder"))?;
     fs::create_dir_all(&path)?;
 
-    let file = settings_path(root);
-    let mut document = match fs::read(&file) {
-        Ok(bytes) if bytes.len() <= MAX_SETTINGS_BYTES => {
-            serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({}))
-        }
-        _ => json!({}),
-    };
-    if !document.is_object() {
-        document = json!({});
-    }
-    document["downloadFolder"] = Value::String(path.to_string_lossy().into_owned());
-
-    fs::create_dir_all(root)?;
-    let temporary = file.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(&document).map_err(io::Error::other)?,
-    )?;
-    fs::rename(&temporary, &file)?;
+    contract::update_settings_document(root, |document| {
+        document["downloadFolder"] = Value::String(path.to_string_lossy().into_owned());
+        Ok(())
+    })?;
     Ok(path)
 }
 
@@ -143,21 +128,11 @@ pub fn read_player_shortcuts() -> PlayerShortcuts {
 
 /// Preserve host-owned settings while atomically updating player shortcuts.
 pub fn write_player_shortcuts_in(root: &Path, shortcuts: PlayerShortcuts) -> io::Result<()> {
-    let file = settings_path(root);
-    let mut document = match fs::read(&file) {
-        Ok(bytes) if bytes.len() <= MAX_SETTINGS_BYTES => {
-            serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({}))
-        }
-        _ => json!({}),
-    };
-    shortcuts.write_to_settings_document(&mut document);
-    fs::create_dir_all(root)?;
-    let temporary = file.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(&document).map_err(io::Error::other)?,
-    )?;
-    fs::rename(temporary, file)
+    contract::update_settings_document(root, |document| {
+        shortcuts.write_to_settings_document(document);
+        Ok(())
+    })?;
+    Ok(())
 }
 
 pub fn write_player_shortcuts(shortcuts: PlayerShortcuts) -> io::Result<()> {
@@ -207,42 +182,6 @@ pub fn request_cancel(job_id: &str) -> io::Result<()> {
     request_cancel_in(&jobs_dir()?, job_id)
 }
 
-pub fn clear_terminal_history_in(directory: &Path) -> io::Result<usize> {
-    if !directory.is_dir() {
-        return Ok(0);
-    }
-    let terminal = read_jobs_in(directory)?
-        .into_iter()
-        .filter(|job| {
-            matches!(
-                job.status.to_ascii_lowercase().as_str(),
-                "completed" | "failed" | "cancelled"
-            )
-        })
-        .map(|job| job.job_id)
-        .collect::<Vec<_>>();
-
-    for job_id in &terminal {
-        for path in [
-            state_path_in(directory, job_id)?,
-            request_path_in(directory, job_id)?,
-            cancel_path_in(directory, job_id)?,
-            pause_path_in(directory, job_id)?,
-        ] {
-            match fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    Ok(terminal.len())
-}
-
-pub fn clear_terminal_history() -> io::Result<usize> {
-    clear_terminal_history_in(&jobs_dir()?)
-}
-
 /// Pause stops the runner but leaves yt-dlp's `.part` file, so a later resume
 /// continues from the same byte. The host leaves this marker on disk while the
 /// job is paused; `resume` removes it.
@@ -254,24 +193,6 @@ pub fn request_pause_in(directory: &Path, job_id: &str) -> io::Result<()> {
 
 pub fn request_pause(job_id: &str) -> io::Result<()> {
     request_pause_in(&jobs_dir()?, job_id)
-}
-
-/// Prepares a stopped job to run again, which is what both resume and retry do.
-///
-/// Markers are cleared first: a leftover marker would make the fresh runner stop
-/// again on its first loop iteration. Returns the request path so the caller can
-/// hand it to the runner.
-pub fn prepare_restart_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
-    let request = request_path_in(directory, job_id)?;
-    if !request.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "이 작업의 원본 요청 기록이 없어 다시 시작할 수 없습니다.",
-        ));
-    }
-    let _ = fs::remove_file(pause_path_in(directory, job_id)?);
-    let _ = fs::remove_file(cancel_path_in(directory, job_id)?);
-    Ok(request)
 }
 
 /// Name of the native host binary, which owns the download runner.
@@ -316,39 +237,8 @@ fn host_executable() -> io::Result<PathBuf> {
     ))
 }
 
-/// Runs the host's own job runner in a detached process.
-///
-/// This is the same entry point the host uses when the extension submits a
-/// download, so resume and retry go through one code path rather than a second
-/// implementation of the transfer.
-#[cfg(target_os = "windows")]
-pub fn spawn_job_runner(request_path: &Path) -> io::Result<()> {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-
-    Command::new(host_executable()?)
-        .arg("--run-job")
-        .arg(request_path)
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn spawn_job_runner(_request_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "restarting a job is Windows only",
-    ))
-}
-
-pub fn state_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
+#[cfg(test)]
+fn state_path_in(directory: &Path, job_id: &str) -> io::Result<PathBuf> {
     contract::state_path_in(directory, job_id)
 }
 
@@ -1267,11 +1157,69 @@ pub fn reverse_library_organization(
     }
 }
 
-/// Resume or retry a job through the host-owned runner.
-pub fn restart_job(job_id: &str) -> io::Result<()> {
-    let directory = jobs_dir()?;
-    let request = prepare_restart_in(&directory, job_id)?;
-    spawn_job_runner(&request)
+fn host_command(command: &Value) -> io::Result<Value> {
+    submit_host_command(command)
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn restart_job_command(job_id: &str, action: &str, now: u64) -> io::Result<Value> {
+    contract::safe_id(job_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
+    let request_type = match action {
+        "resume" => "resume-job",
+        "retry" => "retry-job",
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid restart action",
+            ))
+        }
+    };
+    Ok(json!({
+        "type": request_type,
+        "requestId": format!("manager-{request_type}-{now}"),
+        "jobId": job_id,
+    }))
+}
+
+fn clear_terminal_history_command(now: u64) -> Value {
+    json!({
+        "type": "clear-terminal-history",
+        "requestId": format!("manager-clear-history-{now}"),
+    })
+}
+
+pub fn restart_job(job_id: &str, action: &str) -> io::Result<()> {
+    let response = host_command(&restart_job_command(job_id, action, now_millis())?)?;
+    if response["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            response["error"]
+                .as_str()
+                .unwrap_or("작업을 다시 시작하지 못했습니다."),
+        ))
+    }
+}
+
+pub fn clear_terminal_history() -> io::Result<usize> {
+    let response = host_command(&clear_terminal_history_command(now_millis()))?;
+    if response["ok"].as_bool() == Some(true) {
+        Ok(response["cleared"].as_u64().unwrap_or_default() as usize)
+    } else {
+        Err(io::Error::other(
+            response["error"]
+                .as_str()
+                .unwrap_or("다운로드 이력을 삭제하지 못했습니다."),
+        ))
+    }
 }
 
 fn safe_job_id(now: u64) -> String {
@@ -1317,7 +1265,7 @@ fn library_subtitle_command(media: &Path, file_name: &str, request_id: &str) -> 
 /// the command, creates the request record and initial JobState, and launches
 /// its subtitle runner; the manager never writes durable job state.
 #[cfg(target_os = "windows")]
-fn submit_subtitle_command(command: &Value) -> io::Result<Value> {
+fn submit_host_command(command: &Value) -> io::Result<Value> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -1356,7 +1304,7 @@ fn submit_subtitle_command(command: &Value) -> io::Result<Value> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn submit_subtitle_command(_command: &Value) -> io::Result<Value> {
+fn submit_host_command(_command: &Value) -> io::Result<Value> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "starting a subtitle job is Windows only",
@@ -1371,8 +1319,7 @@ pub fn start_library_subtitle_job(folder: Option<&str>, file_name: &str) -> io::
         .unwrap_or_default()
         .as_millis() as u64;
     let request_id = format!("library-{}", safe_job_id(now));
-    let response =
-        submit_subtitle_command(&library_subtitle_command(&media, file_name, &request_id))?;
+    let response = submit_host_command(&library_subtitle_command(&media, file_name, &request_id))?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(io::Error::other(
             response
@@ -1877,33 +1824,30 @@ mod tests {
     }
 
     #[test]
-    fn clearing_history_preserves_active_jobs_and_removes_only_terminal_records() {
-        let directory = temp_dir("clear-history");
-        for (id, status) in [
-            ("done", "completed"),
-            ("failed", "failed"),
-            ("cancelled", "cancelled"),
-            ("active", "running"),
-        ] {
-            write_state(
-                &directory,
-                id,
-                &format!(r#"{{"jobId":"{id}","status":"{status}","updatedAt":1}}"#),
-            );
-            fs::write(directory.join(format!("{id}.request.json")), b"{}").expect("request writes");
-        }
+    fn manager_restart_commands_delegate_resume_and_retry_to_the_host() {
+        let resume = restart_job_command("job-abc", "resume", 41).expect("resume command");
+        assert_eq!(resume["type"], "resume-job");
+        assert_eq!(resume["requestId"], "manager-resume-job-41");
+        assert_eq!(resume["jobId"], "job-abc");
 
+        let retry = restart_job_command("job-abc", "retry", 42).expect("retry command");
+        assert_eq!(retry["type"], "retry-job");
+        assert_eq!(retry["requestId"], "manager-retry-job-42");
+        assert_eq!(retry["jobId"], "job-abc");
+
+        assert!(restart_job_command("job-abc", "unknown", 43).is_err());
+        assert!(restart_job_command("../escape", "resume", 44).is_err());
+    }
+
+    #[test]
+    fn manager_history_command_delegates_deletion_to_the_host() {
         assert_eq!(
-            clear_terminal_history_in(&directory).expect("history clears"),
-            3
+            clear_terminal_history_command(77),
+            json!({
+                "type": "clear-terminal-history",
+                "requestId": "manager-clear-history-77",
+            })
         );
-        assert!(directory.join("active.state.json").is_file());
-        assert!(directory.join("active.request.json").is_file());
-        for id in ["done", "failed", "cancelled"] {
-            assert!(!directory.join(format!("{id}.state.json")).exists());
-            assert!(!directory.join(format!("{id}.request.json")).exists());
-        }
-        fs::remove_dir_all(directory).expect("temp directory removes");
     }
 
     #[test]
@@ -1968,37 +1912,6 @@ mod tests {
                 "job id {bad:?} must be rejected"
             );
         }
-        fs::remove_dir_all(directory).expect("temp directory removes");
-    }
-
-    #[test]
-    fn restart_requires_the_persisted_request_and_clears_both_markers() {
-        let directory = temp_dir("restart");
-        // Without the record there is nothing to replay.
-        assert!(prepare_restart_in(&directory, "job-abc").is_err());
-
-        fs::write(
-            directory.join("job-abc.request.json"),
-            br#"{"type":"youtube-download","jobId":"job-abc","url":"https://youtu.be/x"}"#,
-        )
-        .expect("request writes");
-        let original_state =
-            br#"{ "jobId":"job-abc", "status":"failed", "error":"host failure", "updatedAt":99 }"#;
-        fs::write(directory.join("job-abc.state.json"), original_state).expect("state writes");
-        request_pause_in(&directory, "job-abc").expect("pause writes");
-        request_cancel_in(&directory, "job-abc").expect("cancel writes");
-
-        let request = prepare_restart_in(&directory, "job-abc").expect("restart prepares");
-        assert!(request.is_file());
-        // A leftover marker would stop the fresh runner on its first loop.
-        assert!(!directory.join("job-abc.pause").exists());
-        assert!(!directory.join("job-abc.cancel").exists());
-        assert_eq!(
-            fs::read(directory.join("job-abc.state.json")).expect("state reads"),
-            original_state,
-            "restart preparation must leave state for --run-job to replace"
-        );
-
         fs::remove_dir_all(directory).expect("temp directory removes");
     }
 

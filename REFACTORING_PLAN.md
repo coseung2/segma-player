@@ -695,6 +695,44 @@ mpv rendering, or live-site surface was exercised during the refactor handoff.
 Those surfaces remain `NOT_RUN`; deterministic tests are not presented as live
 evidence, and neither `INCIDENTS.md` nor `SITE_QA_LOG.md` was changed.
 
+#### Post-completion correctness audit — 2026-08-31
+
+The implementation phases remain structurally complete, but a focused
+correctness pass found four lifecycle defects in the first `0.4.62` result and
+prepared development handoff `0.4.63`:
+
+- concurrent extension requests now await one in-flight Native Messaging
+  `hello` instead of opening competing ports;
+- every `settings.json` writer now shares a cross-process lock and atomic
+  read-modify-write helper, preserving folder, shortcut, device, and license
+  fields under concurrent updates;
+- submit/restart reserves a unique runner token before writing request/state or
+  spawning, and the child adopts that exact reservation, closing the previous
+  parent-spawn/child-claim race;
+- host execution now treats every durable state write as fallible: initial
+  persistence failure prevents transfer startup, progress persistence failure
+  terminates the child/transfer path, and final persistence failure reaches the
+  runner result instead of being silently ignored.
+
+Resume, retry, and terminal-history deletion are now host commands rather than
+manager-side state/process mutations. Terminal cleanup skips claimed jobs and
+removes the complete host-owned record set. README playback ownership was also
+corrected to the shipped embedded mpv manager; the frozen `play-file` command
+is documented as compatibility-only.
+
+Deterministic evidence for this corrective handoff is recorded with the final
+`0.4.63` validation: Companion client 18 passed; media sites 46 passed; shipped
+Node category 359 total / 342 passed / 17 skipped; legacy category 203 total /
+198 passed / 5 skipped; full Node suite 562 total / 540 passed / 22 skipped;
+shared contract 3 passed; native host 69 passed; manager 202 passed; all Cargo
+format/check passes and `git diff --check` passed. Installed Chrome, Whale,
+Companion-window, mpv/PiP, and live-site checks remain `NOT_RUN`, so the
+affected incidents remain `CODE-FIXED / LIVE-UNVERIFIED`.
+
+The Pro development staging directory was rebuilt from this source state at
+`0.4.63`; its validated packaged closure remains exactly 58 files. No
+development ZIP was requested or created.
+
 ## Stop conditions
 
 Pause the refactor when any of the following is true:

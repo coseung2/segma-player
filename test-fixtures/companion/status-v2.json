@@ -2,7 +2,7 @@
   "ok": true,
   "requestId": "fixture-status-request-123",
   "protocol": 2,
-  "version": "0.4.62",
+  "version": "0.4.64",
   "toolsReady": true,
   "downloadsFolder": "C:\\Users\\fixture\\Downloads\\Aura Media",
   "entitlementOwner": "companion",

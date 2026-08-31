@@ -78,7 +78,7 @@ class FakePort {
   }
 }
 
-function installFakeChrome(onPost = null, { capabilities = [] } = {}) {
+function installFakeChrome(onPost = null, { capabilities = [], helloDelayMs = 0 } = {}) {
   const ports = [];
   let connectCount = 0;
   globalThis.chrome = {
@@ -89,12 +89,17 @@ function installFakeChrome(onPost = null, { capabilities = [] } = {}) {
         assert.equal(host, MEDIA_COMPANION_NATIVE_HOST);
         const port = new FakePort((current, message) => {
           if (message.type === "hello") {
-            current.respond({
+            const response = {
               ok: true,
               requestId: message.requestId,
               protocol: MEDIA_COMPANION_PROTOCOL,
               capabilities,
-            });
+            };
+            if (helloDelayMs > 0) {
+              setTimeout(() => current.onMessage.emit(structuredClone(response)), helloDelayMs);
+            } else {
+              current.respond(response);
+            }
             return;
           }
           onPost?.(current, message);
@@ -173,6 +178,41 @@ test("media-download v1 sends only the allowlisted canonical handoff payload", a
     ["acceptLanguage", "candidateId", "inputKind", "jobId", "protocolVersion", "referrer", "requestId", "title", "type", "url", "userAgent"].sort(),
   );
   assert.equal(JSON.stringify(download).match(/cookie|authorization|header|license|bytes|path/gi), null);
+});
+
+test("concurrent media downloads await one delayed hello handshake", async () => {
+  const accepted = [];
+  const fake = installFakeChrome((port, message) => {
+    accepted.push(message.jobId);
+    port.respond({
+      ok: true,
+      requestId: message.requestId,
+      accepted: true,
+      jobId: message.jobId,
+    });
+  }, {
+    capabilities: [MEDIA_DOWNLOAD_CAPABILITY],
+    helloDelayMs: 25,
+  });
+
+  const [first, second] = await Promise.all([
+    startCompanionMediaDownload(sampleMediaDownloadInput()),
+    startCompanionMediaDownload({
+      ...sampleMediaDownloadInput(),
+      jobId: "job-456",
+      candidateId: "candidate-456",
+    }),
+  ]);
+
+  assert.equal(first.accepted, true);
+  assert.equal(second.accepted, true);
+  assert.equal(fake.connectCount, 1);
+  assert.deepEqual(fake.ports[0].messages.map((message) => message.type), [
+    "hello",
+    "media-download",
+    "media-download",
+  ]);
+  assert.deepEqual(accepted.sort(), ["job-123", "job-456"]);
 });
 
 test("hello constants match the shared native-host contract fixture", () => {

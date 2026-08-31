@@ -200,12 +200,12 @@ impl ManagerApp {
                 "일시정지하지 못했습니다",
             ),
             RowEvent::Resume(job_id) => self.show_row_action_result(
-                jobs::restart_job(&job_id),
+                jobs::restart_job(&job_id, "resume"),
                 "이어받기를 시작했습니다.",
                 "이어받기를 시작하지 못했습니다",
             ),
             RowEvent::Retry(job_id) => self.show_row_action_result(
-                jobs::restart_job(&job_id),
+                jobs::restart_job(&job_id, "retry"),
                 "다시 시도합니다.",
                 "다시 시도하지 못했습니다",
             ),

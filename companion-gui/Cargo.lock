@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "aura-companion-contract"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "fs2",
  "serde",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "aura-media-manager"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "aura-companion-contract",
  "eframe",

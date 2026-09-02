@@ -332,7 +332,7 @@ fn set_video_fullscreen(
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, GetClientRect, GetParent, SetParent, SetWindowPos, ShowWindow,
-        HWND_TOPMOST, MONITOR_DEFAULTTONEAREST, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_SHOWWINDOW,
+        HWND_TOP, MONITOR_DEFAULTTONEAREST, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_SHOWWINDOW,
         SW_HIDE, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
         WS_EX_TOOLWINDOW, WS_POPUP,
     };
@@ -355,7 +355,7 @@ fn set_video_fullscreen(
                     0,
                     1,
                     1,
-                    None,
+                    Some(root),
                     None,
                     None,
                     None,
@@ -383,7 +383,7 @@ fn set_video_fullscreen(
         let positioned = unsafe {
             SetWindowPos(
                 host,
-                Some(HWND_TOPMOST),
+                Some(HWND_TOP),
                 bounds.left,
                 bounds.top,
                 bounds.right - bounds.left,
@@ -587,7 +587,9 @@ mod tests {
             ..source.find("fn clear_video_window_region").unwrap()];
         assert!(transition_impl.contains("CreateWindowExW"));
         assert!(transition_impl.contains("WS_POPUP"));
-        assert!(transition_impl.contains("HWND_TOPMOST"));
+        assert!(transition_impl.contains("Some(root)"));
+        assert!(transition_impl.contains("HWND_TOP"));
+        assert!(!transition_impl.contains("HWND_TOPMOST"));
     }
 
     #[test]

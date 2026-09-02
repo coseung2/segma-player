@@ -2098,6 +2098,10 @@ impl ManagerApp {
             let target_fullscreen = !self.player_session.fullscreen;
             if self.player_surface.set_fullscreen(target_fullscreen) {
                 self.player_session.fullscreen = target_fullscreen;
+                let _ = self
+                    .player_session
+                    .controller
+                    .send(PlayerCommand::SetFullscreenControls(target_fullscreen));
             } else {
                 self.notify("전체 화면으로 전환하지 못했습니다.", NoticeTone::Error);
             }

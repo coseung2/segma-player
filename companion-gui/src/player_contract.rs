@@ -170,6 +170,7 @@ impl Default for PlayerSnapshot {
 #[derive(Debug, Clone)]
 pub enum PlayerCommand {
     SetVideoWindow(isize),
+    SetFullscreenControls(bool),
     Load(PathBuf),
     TogglePause,
     SeekAbsolute(f64),

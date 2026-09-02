@@ -66,14 +66,15 @@ const OBSERVED_PROPERTIES: [&str; 16] = [
 /// after the Win32 child HWND returns to the full Player surface. Window mode
 /// binds presentation to that child HWND, so `SetWindowPos` remains the one
 /// authoritative size transition for Player, PiP, and every resize edge.
-const MPV_EMBEDDED_ARGS: [&str; 14] = [
+const MPV_EMBEDDED_ARGS: [&str; 15] = [
     "--no-config",
     "--idle=yes",
     "--keep-open=yes",
     "--terminal=no",
     "--input-terminal=no",
     "--input-default-bindings=no",
-    "--osc=no",
+    "--osc=yes",
+    "--script-opts=osc-visibility=never",
     "--really-quiet",
     "--vo=gpu-next",
     "--gpu-api=d3d11",
@@ -221,6 +222,11 @@ impl BackendRuntime {
     fn handle(&mut self, command: PlayerCommand) {
         match command {
             PlayerCommand::SetVideoWindow(window) => self.set_video_window(window),
+            PlayerCommand::SetFullscreenControls(visible) => {
+                if self.ensure_engine() {
+                    self.send_command(&PlayerCommand::SetFullscreenControls(visible));
+                }
+            }
             PlayerCommand::Load(path) => {
                 self.pending_load = Some(path.clone());
                 if self.ipc.is_some() {
@@ -619,6 +625,14 @@ fn command_json(command: &PlayerCommand) -> Option<Value> {
         PlayerCommand::StepFrameForward => Some(json!({ "command": ["frame-step"] })),
         PlayerCommand::StepFrameBackward => Some(json!({ "command": ["frame-back-step"] })),
         PlayerCommand::Stop => Some(json!({ "command": ["stop"] })),
+        PlayerCommand::SetFullscreenControls(visible) => Some(json!({
+            "command": [
+                "script-message",
+                "osc-visibility",
+                if *visible { "auto" } else { "never" },
+                "no-osd"
+            ]
+        })),
         PlayerCommand::SetVideoWindow(_)
         | PlayerCommand::Shutdown
         | PlayerCommand::SetSubtitleDelay(_)
@@ -1143,6 +1157,14 @@ mod tests {
             command_json(&PlayerCommand::SetColorRange(ColorRangeMode::Full)),
             Some(json!({"command":["vf","add","@aura-range:format=colorlevels=full"]}))
         );
+        assert_eq!(
+            command_json(&PlayerCommand::SetFullscreenControls(true)),
+            Some(json!({"command":["script-message","osc-visibility","auto","no-osd"]}))
+        );
+        assert_eq!(
+            command_json(&PlayerCommand::SetFullscreenControls(false)),
+            Some(json!({"command":["script-message","osc-visibility","never","no-osd"]}))
+        );
         assert!(command_json(&PlayerCommand::SeekAbsolute(f64::NAN)).is_none());
     }
 
@@ -1197,6 +1219,8 @@ mod tests {
         assert!(MPV_EMBEDDED_ARGS.contains(&"--vo=gpu-next"));
         assert!(MPV_EMBEDDED_ARGS.contains(&"--gpu-api=d3d11"));
         assert!(MPV_EMBEDDED_ARGS.contains(&"--d3d11-output-mode=window"));
+        assert!(MPV_EMBEDDED_ARGS.contains(&"--osc=yes"));
+        assert!(MPV_EMBEDDED_ARGS.contains(&"--script-opts=osc-visibility=never"));
         assert!(!MPV_EMBEDDED_ARGS
             .iter()
             .any(|argument| *argument == "--d3d11-output-mode=composition"));

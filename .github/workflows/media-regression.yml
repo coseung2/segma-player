@@ -17,8 +17,24 @@ permissions:
   contents: read
 
 jobs:
-  deterministic-regression:
+  deterministic-regression-pr:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:media-sites
+      - run: npm test
+      - run: npm run build:dev-staging
+
+  deterministic-regression-self-hosted:
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Linux, ARM64, segma-player]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

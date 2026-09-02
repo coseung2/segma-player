@@ -36,6 +36,8 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Linux, ARM64, segma-player]
     timeout-minutes: 15
+    env:
+      NPM_CONFIG_CACHE: /var/lib/devspace/npm-cache-segma-player
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

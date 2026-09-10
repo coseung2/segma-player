@@ -6,14 +6,16 @@ use std::path::{Path, PathBuf};
 pub const CLOUD_JOB_SCHEMA_VERSION: u32 = 1;
 pub const CLOUD_JOB_CAPABILITY: &str = "cloud-job-v1";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]\#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CloudProvider {
     #[default]
     Mock,
     Telegram,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]\#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CloudOperation {
     #[default]
     Upload,
@@ -21,7 +23,8 @@ pub enum CloudOperation {
     Delete,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]\#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct CloudJobRequest {
     #[serde(rename = "schemaVersion")]
     pub schema_version: u32,
@@ -41,7 +44,8 @@ pub struct CloudJobRequest {
     pub created_at: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]\#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct CloudJobState {
     #[serde(rename = "schemaVersion")]
     pub schema_version: u32,
@@ -186,12 +190,14 @@ pub fn validate_cloud_job_request(request: &CloudJobRequest) -> io::Result<()> {
         ));
     }
 
-    let path_required = matches!(request.operation, CloudOperation::Upload | CloudOperation::Download);
+    let path_required = matches!(
+        request.operation,
+        CloudOperation::Upload | CloudOperation::Download
+    );
     if path_required {
-        let value = request
-            .local_path
-            .as_deref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cloud job requires localPath"))?;
+        let value = request.local_path.as_deref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "cloud job requires localPath")
+        })?;
         if super::valid_download_folder(value).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -217,7 +223,7 @@ mod tests {
             item_id: "item-1".into(),
             folder_id: Some("folder-1".into()),
             local_path: Some(if cfg!(windows) {
-                r"C:\\Media\\clip.mp4".into()
+                r"C:\Media\clip.mp4".into()
             } else {
                 "/tmp/clip.mp4".into()
             }),
@@ -231,7 +237,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
             .as_nanos();
-        env::temp_dir().join(format!("segma-cloud-contract-{}-{nonce}", std::process::id()))
+        env::temp_dir().join(format!(
+            "segma-cloud-contract-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -239,8 +248,14 @@ mod tests {
         let directory = temp_dir();
         let request = request(CloudOperation::Upload);
         let path = write_cloud_request_in(&directory, &request).expect("request writes");
-        assert_eq!(path.file_name().and_then(|value| value.to_str()), Some("job-1.request.json"));
-        assert_eq!(read_cloud_request_in(&directory, "job-1").unwrap(), request);
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("job-1.request.json")
+        );
+        assert_eq!(
+            read_cloud_request_in(&directory, "job-1").unwrap(),
+            request
+        );
         assert_eq!(
             cloud_state_path_in(&directory, "job-1")
                 .unwrap()
@@ -259,7 +274,7 @@ mod tests {
 
         let mut traversal = request(CloudOperation::Upload);
         traversal.local_path = Some(if cfg!(windows) {
-            r"C:\\Media\\..\\secret.mp4".into()
+            r"C:\Media\..\secret.mp4".into()
         } else {
             "/tmp/../secret.mp4".into()
         });
@@ -274,14 +289,17 @@ mod tests {
     }
 
     #[test]
-    fn state_write_and_listing_ignore_no_valid_entries() {
+    fn state_write_and_listing_keep_valid_entries() {
         let directory = temp_dir();
         let request = request(CloudOperation::Upload);
         let mut state = CloudJobState::queued(&request, 20);
         state.status = "running".into();
         state.updated_at = 21;
         write_cloud_state_in(&directory, &state).expect("state writes");
-        assert_eq!(list_cloud_job_states_in(&directory).unwrap(), vec![state]);
+        assert_eq!(
+            list_cloud_job_states_in(&directory).unwrap(),
+            vec![state]
+        );
         fs::remove_dir_all(directory).expect("test directory removes");
     }
 }

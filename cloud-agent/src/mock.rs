@@ -241,7 +241,6 @@ where
         let path = directory.join(&part.file_name);
         let metadata = fs::metadata(&path)?;
         if !metadata.is_file() || metadata.len() != part.size {
-            let _ = fs::remove_file(&temporary);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("cloud part {} is incomplete", part.index),
@@ -250,7 +249,6 @@ where
         let mut input = File::open(&path)?;
         let copied = copy_buffered(&mut input, &mut output)?;
         if copied != part.size {
-            let _ = fs::remove_file(&temporary);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("cloud part {} changed while downloading", part.index),
@@ -263,7 +261,6 @@ where
     }
 
     if completed != manifest.size {
-        let _ = fs::remove_file(&temporary);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "cloud manifest byte count does not match its parts",
@@ -387,7 +384,7 @@ mod tests {
         let root = temp_root();
         fs::create_dir_all(&root).expect("root creates");
         let source = root.join("source.bin");
-        let expected: Vec<u8> = (0..=200).cycle().take(350).collect();
+        let expected: Vec<u8> = (0u8..=200).cycle().take(350).collect();
         fs::write(&source, &expected).expect("source writes");
 
         let upload = request(CloudOperation::Upload, "item-a", Some(&source));
@@ -397,7 +394,6 @@ mod tests {
         assert_eq!(upload_state.completed, Some(expected.len() as u64));
         assert!(item_dir(&root, "item-a").join("part-00005.bin").is_file());
 
-        // A second pass reuses already-complete parts instead of requiring a clean object directory.
         execute_with_chunk_size(&root, &upload, &mut upload_state, 64, &mut |_| Ok(()))
             .expect("resumed upload succeeds");
 

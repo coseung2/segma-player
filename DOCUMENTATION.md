@@ -14,6 +14,8 @@ product-direction source of truth.
 
 - `REFACTORING_PLAN.md` — current Companion-first refactoring order, frozen
   compatibility contracts, phase gates, progress, and validation requirements.
+- `CLOUD_STORAGE_ARCHITECTURE.md` — Companion-owned cloud job/provider boundary,
+  current mock foundation, and the gated Telegram/TDLib target contract.
 - `SITE_DOWNLOAD_MODES.md` — browser connector site/provider diagnostic layers
   and the Companion execution boundary.
 - `MODAL_SUBTITLE_INTEGRATION.md` — target Companion/Worker/Modal subtitle job

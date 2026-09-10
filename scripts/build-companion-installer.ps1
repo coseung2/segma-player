@@ -94,9 +94,19 @@ if ($LASTEXITCODE -ne 0) { throw 'Native companion release build failed.' }
 & cargo build --release --manifest-path (Join-Path $ProjectRoot 'companion-gui\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'Companion manager release build failed.' }
 
+# Cloud providers execute outside both the browser-facing host and the GUI. The
+# foundation binary currently exposes only the deterministic mock provider;
+# Telegram/TDLib remains gated behind a later provider implementation.
+& cargo build --release --manifest-path (Join-Path $ProjectRoot 'cloud-agent\Cargo.toml')
+if ($LASTEXITCODE -ne 0) { throw 'Companion cloud agent release build failed.' }
+
 $managerBinary = Join-Path $ProjectRoot 'companion-gui\target\release\aura-media-manager.exe'
 if (-not (Test-Path -LiteralPath $managerBinary -PathType Leaf)) {
   throw "Companion manager binary is missing: $managerBinary"
+}
+$cloudBinary = Join-Path $ProjectRoot 'cloud-agent\target\release\aura-media-cloud.exe'
+if (-not (Test-Path -LiteralPath $cloudBinary -PathType Leaf)) {
+  throw "Companion cloud agent binary is missing: $cloudBinary"
 }
 
 $compilerCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue

@@ -40,6 +40,7 @@ SignedUninstaller=yes
 [Files]
 Source: "..\native-host\target\release\aura-media-companion.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\companion-gui\target\release\aura-media-manager.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\cloud-agent\target\release\aura-media-cloud.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ToolsDirectory}\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\assets\microsoft-store\source\segma-player.ico"; DestDir: "{app}"; DestName: "segma-player.ico"; Flags: ignoreversion
 

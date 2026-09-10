@@ -19,7 +19,8 @@ as current product documentation.
 - **Companion:** execution engine for downloads and playback, plus persistent
   jobs, subtitle generation/translation/storage, media and subtitle folders,
   local tools, settings, diagnostics, application lifecycle, General/Pro
-  entitlement, and all plan limits.
+  entitlement, and all plan limits. An experimental cloud-agent foundation is
+  also Companion-owned; it currently exposes only a deterministic mock backend.
 - **Website/services:** installation, policy, support, and explicitly declared
   remote capabilities.
 
@@ -31,12 +32,15 @@ The Companion's own window now lives in this repository as
 system in [design-system](design-system/README.md).
 
 It is a separate crate from `native-host` so the native messaging host stays a
-small stdio process with no GUI dependencies. The installer ships both, and the
-host's `--manager` argument launches the window.
+small stdio process with no GUI dependencies. The installer ships the host,
+manager, and the separate `aura-media-cloud.exe` cloud execution foundation;
+the host's `--manager` argument launches the window.
 
-The two processes share `%LOCALAPPDATA%\Aura Media\Companion`; there is no IPC
+The host and manager share `%LOCALAPPDATA%\Aura Media\Companion`; there is no IPC
 between them. Job state files are the interface, and `settings.json` holds the
-one download folder both entry points use.
+one download folder both entry points use. The cloud agent uses the same
+Companion root with an isolated `cloud-jobs` namespace, but it is not connected
+to manager UI yet.
 
 | Capability | Where it runs |
 | --- | --- |
@@ -45,6 +49,7 @@ one download folder both entry points use.
 | Library | Media files listed from the download folder |
 | Download folder | Locked, atomically replaced `settings.json`, shared by host and app |
 | Playback | Embedded mpv surface owned by `aura-media-manager.exe` |
+| Experimental cloud jobs | `aura-media-cloud.exe`; mock provider only |
 | General/Pro authentication | App settings; verified against `/api/license` |
 
 [companion-ui](companion-ui/README.md) is an earlier HTML prototype of the same
@@ -81,6 +86,10 @@ enforcement are implemented and verified.
 - The Companion owns jobs, execution, playback, subtitles, folders, settings,
   and General/Pro entitlement. Its player stores pose-start bookmarks and owns
   seek preview, fullscreen, and PiP behavior.
+- `cloud-agent` defines the separate `cloud-job-v1` execution boundary and a
+  local mock blob provider for deterministic upload/download/delete semantics.
+  Telegram/TDLib, cloud catalog sync, and cloud-library UI are not implemented.
+  See [CLOUD_STORAGE_ARCHITECTURE.md](CLOUD_STORAGE_ARCHITECTURE.md).
 
 The package graph is declared once in `scripts/store-runtime-files.json` and is
 consumed by both development staging and the PowerShell store packager. Each
@@ -105,6 +114,8 @@ are historical snapshots. Current site/provider/downloader boundaries are in
 rtk npm test
 rtk npm run test:media-sites
 rtk npm run build:dev-staging
+rtk cargo test --manifest-path companion-contract/Cargo.toml
+rtk cargo test --manifest-path cloud-agent/Cargo.toml
 rtk cargo test --manifest-path native-host/Cargo.toml
 rtk cargo fmt --check --manifest-path native-host/Cargo.toml
 ```
@@ -183,6 +194,12 @@ are detached into Companion job-runner processes so downloads can continue if
 the browser or native bridge restarts. Each local YouTube job gets a small
 Windows progress window, and `--manager` opens the persistent download manager
 view. Job state is stored under the user's local Aura Media Companion directory.
+
+The installer also builds and ships `aura-media-cloud.exe`. In the current
+foundation it supports `cloud-job-v1` with a deterministic local mock provider,
+512 MiB chunking, resumable completed parts, cancel markers, serialized runners,
+and non-overwriting materialization. The Telegram provider deliberately reports
+unavailable and fails closed until the TDLib/auth/catalog phases are implemented.
 
 ```powershell
 rtk pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-companion-installer.ps1 `

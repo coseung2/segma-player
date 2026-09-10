@@ -1,5 +1,7 @@
 //! Stable disk ABI shared by the native host and manager.
 
+pub mod cloud;
+
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::env;
 use std::fs::{self, File, OpenOptions};

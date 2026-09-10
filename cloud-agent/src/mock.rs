@@ -1,4 +1,4 @@
-use aura_companion_contract::cloud::{CloudJobRequest, CloudJobState, CloudOperation};
+use aura_companion_contract::cloud::{self, CloudJobRequest, CloudJobState, CloudOperation};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -80,6 +80,18 @@ fn part_name(index: u32) -> String {
     format!("part-{index:05}.bin")
 }
 
+fn check_cancelled(root: &Path, request: &CloudJobRequest) -> io::Result<()> {
+    let jobs = root.join("cloud-jobs");
+    let marker = cloud::cloud_cancel_path_in(&jobs, &request.job_id)?;
+    if marker.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "cloud job cancelled",
+        ));
+    }
+    Ok(())
+}
+
 fn upload<F>(
     root: &Path,
     request: &CloudJobRequest,
@@ -120,6 +132,7 @@ where
     state.progress = Some(if size == 0 { 100 } else { 0 });
     state.file_name = Some(file_name.clone());
     persist(state)?;
+    check_cancelled(root, request)?;
 
     let directory = item_dir(root, &request.item_id);
     fs::create_dir_all(&directory)?;
@@ -133,6 +146,7 @@ where
     let mut completed = 0_u64;
 
     for part_index in 0..part_count {
+        check_cancelled(root, request)?;
         let offset = part_index * chunk_bytes;
         let expected = (size - offset).min(chunk_bytes);
         let name = part_name(part_index as u32);
@@ -157,6 +171,7 @@ where
         });
     }
 
+    check_cancelled(root, request)?;
     let manifest = MockManifest {
         schema_version: 1,
         item_id: request.item_id.clone(),
@@ -227,6 +242,7 @@ where
     state.progress = Some(if manifest.size == 0 { 100 } else { 0 });
     state.file_name = Some(manifest.file_name.clone());
     persist(state)?;
+    check_cancelled(root, request)?;
 
     let temporary = PathBuf::from(format!("{}.segma.part", destination.display()));
     let _ = fs::remove_file(&temporary);
@@ -238,6 +254,7 @@ where
     let mut completed = 0_u64;
 
     for part in &manifest.parts {
+        check_cancelled(root, request)?;
         let path = directory.join(&part.file_name);
         let metadata = fs::metadata(&path)?;
         if !metadata.is_file() || metadata.len() != part.size {
@@ -260,6 +277,7 @@ where
         persist(state)?;
     }
 
+    check_cancelled(root, request)?;
     if completed != manifest.size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -285,6 +303,7 @@ where
 {
     state.phase = Some("deleting".into());
     persist(state)?;
+    check_cancelled(root, request)?;
     let directory = item_dir(root, &request.item_id);
     match fs::remove_dir_all(directory) {
         Ok(()) => {}
@@ -432,6 +451,24 @@ mod tests {
             .expect_err("existing destination is rejected");
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&destination).unwrap(), b"keep-me");
+        fs::remove_dir_all(root).expect("root removes");
+    }
+
+    #[test]
+    fn cancel_marker_interrupts_before_committing_manifest() {
+        let root = temp_root();
+        let jobs = root.join("cloud-jobs");
+        fs::create_dir_all(&jobs).expect("jobs create");
+        let source = root.join("source.bin");
+        fs::write(&source, b"cancel-me").expect("source writes");
+        let upload = request(CloudOperation::Upload, "item-c", Some(&source));
+        let marker = cloud::cloud_cancel_path_in(&jobs, &upload.job_id).expect("cancel path");
+        fs::write(marker, b"cancel").expect("cancel marker writes");
+        let mut state = CloudJobState::queued(&upload, 1);
+        let error = execute_with_chunk_size(&root, &upload, &mut state, 4, &mut |_| Ok(()))
+            .expect_err("cancelled upload is interrupted");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!manifest_path(&root, "item-c").exists());
         fs::remove_dir_all(root).expect("root removes");
     }
 }

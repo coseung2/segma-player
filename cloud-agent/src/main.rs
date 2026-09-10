@@ -89,6 +89,7 @@ fn run_job(job_id: &str) -> io::Result<()> {
     run_job_in(&contract::companion_root()?, job_id)
 }
 
+#[derive(Debug)]
 struct RunnerClaim {
     path: PathBuf,
 }

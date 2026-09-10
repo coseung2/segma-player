@@ -26,6 +26,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --manifest-path companion-contract/Cargo.toml
+      - run: cargo test --locked --manifest-path cloud-agent/Cargo.toml
       - run: npm ci
       - run: npm run test:media-sites
       - run: npm test

@@ -7,9 +7,9 @@ use contract::cloud::{
 };
 use serde_json::json;
 use std::env;
-use std::fs;
-use std::io;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_millis() -> u64 {
@@ -72,6 +72,13 @@ fn submit_request(path: &Path) -> io::Result<()> {
     let request: CloudJobRequest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     cloud::validate_cloud_job_request(&request)?;
     let directory = cloud::cloud_jobs_dir()?;
+    let persisted = cloud::cloud_request_path_in(&directory, &request.job_id)?;
+    if persisted.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "cloud job id already exists",
+        ));
+    }
     cloud::write_cloud_request_in(&directory, &request)?;
     let state = CloudJobState::queued(&request, now_millis());
     cloud::write_cloud_state_in(&directory, &state)?;
@@ -82,8 +89,38 @@ fn run_job(job_id: &str) -> io::Result<()> {
     run_job_in(&contract::companion_root()?, job_id)
 }
 
+struct RunnerClaim {
+    path: PathBuf,
+}
+
+impl Drop for RunnerClaim {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn claim_runner(directory: &Path, job_id: &str) -> io::Result<RunnerClaim> {
+    fs::create_dir_all(directory)?;
+    let path = cloud::cloud_runner_claim_path_in(directory, job_id)?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                io::Error::new(io::ErrorKind::AlreadyExists, "cloud job already has a runner")
+            } else {
+                error
+            }
+        })?;
+    write!(file, "{}", std::process::id())?;
+    file.sync_all()?;
+    Ok(RunnerClaim { path })
+}
+
 fn run_job_in(root: &Path, job_id: &str) -> io::Result<()> {
     let directory = root.join("cloud-jobs");
+    let _claim = claim_runner(&directory, job_id)?;
     let request = cloud::read_cloud_request_in(&directory, job_id)?;
     let now = now_millis();
     let mut state = CloudJobState::queued(&request, now);
@@ -102,11 +139,23 @@ fn run_job_in(root: &Path, job_id: &str) -> io::Result<()> {
         )),
     };
 
+    if let Ok(cancel_path) = cloud::cloud_cancel_path_in(&directory, job_id) {
+        let _ = fs::remove_file(cancel_path);
+    }
+
     match execution {
         Ok(()) => {
             state.status = "completed".into();
             state.phase = Some("completed".into());
             state.progress = Some(100);
+            state.error = None;
+            state.updated_at = now_millis();
+            cloud::write_cloud_state_in(&directory, &state)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            state.status = "cancelled".into();
+            state.phase = Some("cancelled".into());
             state.error = None;
             state.updated_at = now_millis();
             cloud::write_cloud_state_in(&directory, &state)?;
@@ -127,7 +176,6 @@ fn run_job_in(root: &Path, job_id: &str) -> io::Result<()> {
 mod tests {
     use super::*;
     use contract::cloud::{CloudOperation, CloudProvider};
-    use std::path::PathBuf;
 
     fn temp_root(label: &str) -> PathBuf {
         env::temp_dir().join(format!(
@@ -137,23 +185,26 @@ mod tests {
         ))
     }
 
+    fn local_test_path() -> String {
+        if cfg!(windows) {
+            r"C:\Temp\clip.mp4".to_string()
+        } else {
+            "/tmp/clip.mp4".to_string()
+        }
+    }
+
     #[test]
     fn unsupported_telegram_provider_fails_closed_and_persists_failure() {
         let root = temp_root("telegram");
         let directory = root.join("cloud-jobs");
         fs::create_dir_all(&directory).expect("cloud jobs directory creates");
-        let local_path = if cfg!(windows) {
-            r"C:\\Temp\\clip.mp4".to_string()
-        } else {
-            "/tmp/clip.mp4".to_string()
-        };
         let request = CloudJobRequest {
             schema_version: CLOUD_JOB_SCHEMA_VERSION,
             job_id: "telegram-job".into(),
             provider: CloudProvider::Telegram,
             operation: CloudOperation::Upload,
             item_id: "item-1".into(),
-            local_path: Some(local_path),
+            local_path: Some(local_test_path()),
             ..CloudJobRequest::default()
         };
         cloud::write_cloud_request_in(&directory, &request).expect("request writes");
@@ -165,6 +216,21 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|value| value.contains("not wired")));
+        assert!(!cloud::cloud_runner_claim_path_in(&directory, &request.job_id)
+            .unwrap()
+            .exists());
+        fs::remove_dir_all(root).expect("test root removes");
+    }
+
+    #[test]
+    fn runner_claim_rejects_concurrent_execution() {
+        let root = temp_root("claim");
+        let directory = root.join("cloud-jobs");
+        let first = claim_runner(&directory, "job-1").expect("first claim succeeds");
+        let second = claim_runner(&directory, "job-1").expect_err("second claim is rejected");
+        assert_eq!(second.kind(), io::ErrorKind::AlreadyExists);
+        drop(first);
+        assert!(claim_runner(&directory, "job-1").is_ok());
         fs::remove_dir_all(root).expect("test root removes");
     }
 }

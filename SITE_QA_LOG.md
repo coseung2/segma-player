@@ -817,3 +817,17 @@ The av19 result is a confirmed current live detection regression and remains the
 - Deterministic coverage: `PASS` - Zoro/AniWatch/HiAnime host aliases, title selectors, player/API policy, and HLS/progressive/DASH module selection remain registered and media-site tests pass `48/48`
 - Evidence: `artifacts/live-media-0.4.53-zoro.json`
 - Incident: `INC-2026-08-30-046`; do not classify the navigation timeout as an extension failure
+
+## 2026-09-05 Beeg detection with installed Tauri Companion (0.4.71)
+
+- Browser/channel: temporary Playwright-cache Chrome with unpacked Pro staging `0.4.71`; installed Companion `0.4.71`; headless.
+- Site URL / ID: Beeg live fixture / `beeg-0211503327065170-live`.
+- AdBlock/VPN mode: Aura AdBlock loaded but explicitly off; VPN not reported.
+- Companion readiness: `PASS` - protocol 2, version `0.4.71`, `toolsReady=true`, and `media-download-v1` were returned by the installed native host.
+- Native-page playback: `PASS` - one video reached readyState 4, 854x480, remained unpaused, and advanced beyond 15 seconds.
+- Detect/rescan: `PARTIAL` - explicit rescan completed and returned 12 HLS candidates, but every candidate was classified as an advertisement.
+- Primary selection: `FAIL` - no non-advertisement primary candidate was available; failure reason `no-non-ad-primary`.
+- Progressive-probe: `NOT_RUN` - candidates were HLS.
+- Extension-download, subtitle, overlay, tab switching: `NOT_RUN`.
+- Evidence: `output/live-media-0.4.71-installed-companion.json`.
+- Boundary: this proves isolated Chrome staging-to-installed-Companion readiness, not the user's current Chrome profile. The connected Whale profile still points its Segma unpacked extension ID at a missing legacy `aura-mdownloader` staging path, so Whale handoff remains `NOT_RUN` until that extension is manually reloaded from the current staging directory.

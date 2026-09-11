@@ -39,19 +39,19 @@ SignedUninstaller=yes
 
 [Files]
 Source: "..\native-host\target\release\aura-media-companion.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\companion-gui\target\release\aura-media-manager.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#ToolsDirectory}\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\companion-tauri\src-tauri\target\release\aura-media-manager.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ToolsDirectory}\*"; DestDir: "{app}\tools"; Excludes: "mpv\*"; Flags: ignoreversion recursesubdirs
 Source: "..\assets\microsoft-store\source\segma-player.ico"; DestDir: "{app}"; DestName: "segma-player.ico"; Flags: ignoreversion
 
 [Icons]
-; Points straight at the GUI binary. The host still accepts `--manager` and
-; relaunches this executable, so an old shortcut keeps working.
+; Points straight at the Tauri manager binary installed beside the host.
 Name: "{autoprograms}\Segma Player"; Filename: "{app}\aura-media-manager.exe"; WorkingDir: "{app}"; IconFilename: "{app}\segma-player.ico"
 Name: "{autodesktop}\Segma Player"; Filename: "{app}\aura-media-manager.exe"; WorkingDir: "{app}"; IconFilename: "{app}\segma-player.ico"
 
 [InstallDelete]
 Type: files; Name: "{autodesktop}\Aura Media Companion.lnk"
 Type: files; Name: "{autoprograms}\Aura Media Companion.lnk"
+Type: filesandordirs; Name: "{app}\tools\mpv"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\{#NativeHostName}"; ValueType: string; ValueName: ""; ValueData: "{app}\{#NativeHostName}.json"; Flags: uninsdeletekey

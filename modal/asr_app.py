@@ -630,6 +630,32 @@ def assign_speakers(chunks, turns):
     return assigned, list(speaker_labels.values())
 
 
+def load_optional_diarization_pipeline(pipeline_type, model_id, token, cache_dir, device):
+    try:
+        pipeline = pipeline_type.from_pretrained(
+            model_id,
+            token=token,
+            cache_dir=cache_dir,
+        )
+        pipeline.to(device)
+        return pipeline
+    except Exception as error:
+        media_log(f"diarization unavailable error={type(error).__name__}")
+        return None
+
+
+def diarize_chunks(chunks, pipeline, audio_path):
+    fallback = [dict(chunk) if isinstance(chunk, dict) else {} for chunk in chunks or []]
+    if pipeline is None:
+        return fallback, []
+    try:
+        diarization = pipeline(audio_path)
+        return assign_speakers(fallback, diarization_turns(diarization))
+    except Exception as error:
+        media_log(f"diarization inference skipped error={type(error).__name__}")
+        return fallback, []
+
+
 @app.cls(
     image=image,
     gpu="L4",
@@ -687,12 +713,13 @@ class AnimeWhisperWorker:
         self.english_pipeline = None
         from pyannote.audio import Pipeline as DiarizationPipeline
 
-        self.diarization_pipeline = DiarizationPipeline.from_pretrained(
+        self.diarization_pipeline = load_optional_diarization_pipeline(
+            DiarizationPipeline,
             DIARIZATION_MODEL_ID,
-            token=huggingface_token,
-            cache_dir="/models/huggingface",
+            huggingface_token,
+            "/models/huggingface",
+            torch.device("cuda"),
         )
-        self.diarization_pipeline.to(torch.device("cuda"))
         translation_quantization = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -796,23 +823,29 @@ class AnimeWhisperWorker:
                 "no_repeat_ngram_size": 5,
             },
         )
-        set_job_progress(progress_key, "diarizing", 58)
-        diarization = self.diarization_pipeline(audio_path)
-        speaker_chunks, speakers = assign_speakers(
+        if self.diarization_pipeline is not None:
+            set_job_progress(progress_key, "diarizing", 58)
+        speaker_chunks, speakers = diarize_chunks(
             result.get("chunks", []),
-            diarization_turns(diarization),
+            self.diarization_pipeline,
+            audio_path,
         )
         set_job_progress(progress_key, "translating", 65)
         vtt = chunks_to_vtt(self.translate_chunks(speaker_chunks, source_language, progress_key))
         set_job_progress(progress_key, "finalizing", 99)
+        model_parts = [asr_model_id]
+        if self.diarization_pipeline is not None:
+            model_parts.append(DIARIZATION_MODEL_ID)
+        model_parts.append(TRANSLATION_MODEL_ID)
         return {
             "ok": True,
             "vtt": vtt,
             "title": request["title"],
-            "model": f"{asr_model_id}+{DIARIZATION_MODEL_ID}+{TRANSLATION_MODEL_ID}",
+            "model": "+".join(model_parts),
             "sourceLanguage": source_language,
             "speakers": speakers,
             "speakerCount": len(speakers),
+            "diarizationAvailable": self.diarization_pipeline is not None,
         }
 
 

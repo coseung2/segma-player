@@ -13,10 +13,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 await verifyFigmaSource();
 await Promise.all([
-  renderSegmaIcon(path.join(root, "companion-gui/assets/segma-mark.png"), 1024),
-  desktopIconPng(32).then((png) => writeFile(path.join(root, "companion-gui/assets/segma-mark-32.png"), png)),
-  desktopIconPng(256).then((png) => writeFile(path.join(root, "companion-gui/assets/segma-mark-256.png"), png)),
-  writeSegmaIco(path.join(root, "companion-gui/assets/segma-player.ico")),
   writeSegmaIco(path.join(root, "assets/microsoft-store/source/segma-player.ico")),
   renderSegmaIcon(path.join(root, "assets/microsoft-store/listing/logo-mark-1024x1024.png"), 1024),
   renderSegmaIcon(path.join(root, "assets/microsoft-store/listing/app-tile-300x300.png"), 300),

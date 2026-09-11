@@ -95,6 +95,11 @@ Current verified limits and behavior:
   stable `화자 1`, `화자 2`, ... labels to translated cues using exclusive
   speaker turns; WebVTT carries them as standard `<v ...>` voice spans and the
   result includes `speakers` plus `speakerCount` metadata;
+- diarization is optional at runtime: gated-model authentication or inference
+  failure logs only the exception type, returns zero speaker labels, and
+  continues ASR/translation. This prevents an expired Hugging Face token from
+  crash-looping the entire subtitle service; restoring speaker labels still
+  requires a valid token with accepted model conditions;
 - unfinished jobs are polled asynchronously; uploaded Modal audio files are
   removed in job cleanup and stale files are pruned after two hours.
 

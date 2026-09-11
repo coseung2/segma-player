@@ -8,12 +8,23 @@ product-direction source of truth.
 
 - `PRODUCT_DIRECTION.md` — approved Companion-first product ownership.
 - `README.md` — repository overview and current implementation status.
+- `TAURI_MIGRATION_SPEC.md` — Tauri v2/Svelte 5 layout, compatibility contract,
+  command/media inventory, verification status matrix, and rollback criteria.
+- `companion-tauri/README.md` — local Tauri source checks and 0.4.73 installed evidence.
 - `AGENTS.md` — development, incident, packaging, and live-QA working rules.
+
+`companion-tauri/` is the primary desktop source. The former `companion-gui`
+egui/eframe source was removed after installed verification and retained in the
+source backup documented by `INCIDENTS.md`. The browser extension and
+`native-host/` remain compatibility-bound surfaces and are not replaced by this
+UI migration.
 
 ## Active implementation contracts
 
-- `REFACTORING_PLAN.md` — current Companion-first refactoring order, frozen
-  compatibility contracts, phase gates, progress, and validation requirements.
+- `REFACTORING_PLAN.md` — in-progress/historical Companion-first refactoring
+  order, frozen compatibility contracts, phase gates, progress, and validation
+  requirements. It contains user changes, is not updated by this documentation
+  cutover, and must not be used to infer the current version.
 - `SITE_DOWNLOAD_MODES.md` — browser connector site/provider diagnostic layers
   and the Companion execution boundary.
 - `MODAL_SUBTITLE_INTEGRATION.md` — target Companion/Worker/Modal subtitle job
@@ -22,11 +33,9 @@ product-direction source of truth.
 - `SITE_QA_LOG.md` — append-only real-browser site evidence.
 - `modal/README.md` — current Modal service setup.
 - `site/README.md` and `site/design-system.md` — website operation and tokens.
-- `companion-gui/README.md` — the Companion manager window: how it reads job
-  state, which actions it can perform, and which backend commands do not exist
-  yet.
 - `design-system/README.md` — exported Figma tokens, components, and screens
   that the manager window is built from.
+- `companion-contract/` — persisted job/settings/native-host disk contract.
 
 ## Reference material, not a runtime contract
 
@@ -57,3 +66,8 @@ new product listing or rebrand:
 
 Historical evidence should not be shortened or rewritten into current claims.
 Add a new incident, QA entry, or current contract instead.
+
+Static tests, browser preview, native build, installed-app behavior, browser
+handoff, bundled ffmpeg, remote subtitles, PiP, and live-site QA are separate
+claims. The Tauri migration specification is the current status source of
+truth; a green static test or preview does not close the other statuses.

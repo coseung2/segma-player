@@ -733,6 +733,17 @@ The Pro development staging directory was rebuilt from this source state at
 `0.4.63`; its validated packaged closure remains exactly 58 files. No
 development ZIP was requested or created.
 
+#### Fullscreen HWND detachment follow-up — 2026-09-02
+
+The `0.4.64` maximize-only experiment remained live-failed because hiding the
+mpv child did not remove it from the root window's synchronous resize tree.
+The `0.4.65` follow-up detaches that child (`WS_CHILD`/`SetParent(NULL)`) before
+the root `Maximized` command, blocks surface geometry calls during the pending
+transition, and restores the original parent/style only after the root reports
+the requested maximize state. Manager tests pass 203/203 and release
+compilation passes; installed playback fullscreen remains the required live
+check.
+
 ## Stop conditions
 
 Pause the refactor when any of the following is true:

@@ -2,12 +2,20 @@
 
 ## Status
 
-This is the repository-level product boundary approved for the next architecture.
-The Companion UI and visual system are being designed separately in Figma; this
-document does not define screens, components, or visual behavior.
+This is the repository-level product boundary for the current architecture.
+The primary desktop implementation is `companion-tauri/` (Tauri v2, Svelte 5,
+TypeScript, HTML video, and Rust commands). The former `companion-gui/`
+egui/eframe source remains legacy and is retained for rollback and comparison
+pending installed verification and explicit user-approved deletion.
 
-The current codebase is still in migration. A statement below describes target
-ownership unless it is explicitly marked as current implementation.
+The codebase is in cutover verification. A statement below describes current
+ownership or implementation unless it is explicitly marked as a pending gate.
+The 0.4.73 release, installer build, installed binary parity, installed app
+smoke, and native `show-ui` have passed. User-profile Chrome/Whale reload,
+native import-picker, external-player, uninstall, real multi-speaker
+diarization, and remaining live-site gates stay separate. See
+[TAURI_MIGRATION_SPEC.md](TAURI_MIGRATION_SPEC.md) for the status matrix and
+acceptance gates.
 
 Current backend checkpoint: the Companion owns download jobs, playback, and
 subtitle work. The browser extension migration target is intentionally narrow:
@@ -19,18 +27,24 @@ of the extension surface.
 
 ### Aura Media Companion — execution core
 
-The Windows Companion performs the actual work and should own:
+The Windows Companion performs the actual work and owns:
 
 - the primary user interface and settings;
 - persistent download jobs, history, retry, pause, resume, and cancellation;
 - local media tools and post-processing;
 - native file selection and writing;
-- application updates, diagnostics, and future account/license surfaces.
+- application updates, diagnostics, and future account/license surfaces;
 - General/Pro entitlement, feature availability, job concurrency, byte limits,
-  quality policy, and upgrade surfaces.
-- media playback, player windows, playback history, and player settings.
+  quality policy, and upgrade surfaces;
+- media playback, player windows, playback history, and player settings;
 - subtitle extraction/import, ASR, translation, synchronization, storage, and
   playback-track management.
+
+`companion-tauri/` is the current implementation of this execution core. Its
+Rust command layer retains the existing disk-backed data contract. Playback in
+the new package uses HTML `<video>` with Tauri asset URLs; mpv and embedded
+HWND surfaces are retired from the new implementation. Bundled ffmpeg remains
+available at `tools/ffmpeg/ffmpeg.exe` for local media operations.
 
 ### Browser extension — primary browser entry point
 
@@ -79,11 +93,18 @@ them. Local work must not silently become a cloud upload path.
 - DRM, paywall, login, private-video, or other access-control bypass is outside
   the product boundary.
 
+The extension and `native-host/` remain compatibility boundaries. Native
+Messaging continues to use `com.aura.media_companion` over stdio, the installed
+manager filename remains `aura-media-manager.exe`, and the Tauri app retains
+`%LOCALAPPDATA%\Aura Media\Companion`, job markers, `settings.json` including
+`downloadFolder`, library metadata, subtitle sidecars, and the default
+`Downloads\Aura Media` location.
+
 ## Migration rules
 
-1. Keep the existing extension download path working while the Companion is
-   incomplete, but treat it as a transitional fallback rather than the future
-   product center.
+1. Keep the extension's bounded detection and Companion handoff working while
+   cutover verification is incomplete. Retained extension-primary download or
+   player code is compatibility reference, not the future product center.
 2. Move durable state and user-facing job control to the Companion before
    reducing the extension UI.
 3. Move General/Pro entitlement and every plan limit to the Companion, then
@@ -107,33 +128,39 @@ User browsing in Chrome/Whale/Edge
 
 The Companion can still be opened directly for job, folder, player, and settings
 management, but browser media discovery and link-command entry remain centered
-in the extension.
+in the extension. The current desktop window for this flow is the Tauri app;
+the former egui manager is removed from the current tree and retained only in
+the verified source backup.
 
-## Playback migration plan
+## Playback implementation and verification
 
-1. Define a versioned `play` command beside the download command. The payload
-   identifies the selected candidate, media type, page/frame source, title, and
-   only the bounded browser context required for playback.
-2. Build a Companion player spike covering progressive media, HLS, and DASH;
-   seeking, pause/resume, volume, fullscreen, hardware decoding, and failure
-   diagnostics are acceptance requirements.
-3. Decide the player runtime after the spike. Compare a native engine such as
-   libmpv with a WebView-based player using the real authenticated site fixtures;
-   do not choose from UI convenience alone.
-4. Route both detected candidates and extension link input through Download and
-   Play-in-Companion commands.
-5. Preserve short-lived authenticated playback through a bounded session or
-   request broker. Do not copy a browser profile or scrape cookie databases.
-6. Verify progressive, HLS, DASH, token refresh, tab switching, Chrome, and
-   Whale before removing the browser player from the extension package.
+The new package's player decision is complete: `companion-tauri/` uses HTML
+`<video>` with the scoped Tauri asset protocol, custom controls, subtitle cue
+rendering for supported sidecars, seek preview, fullscreen, OS PiP capability,
+and external-player fallback. mpv integration and embedded HWND surfaces are
+not part of the new package.
+
+The remaining acceptance work preserves the original migration requirements:
+
+1. Route detected candidates and extension link input through bounded
+   Companion commands; do not copy a browser profile or scrape cookie stores.
+2. Preserve short-lived authenticated playback through bounded session or
+   request context when the browser supplies it.
+3. Verify progressive, HLS, DASH, token refresh, tab switching, Chrome, and
+   Whale behavior before claiming broad browser playback support.
+4. Keep TS remux, thumbnails, GIF export, ASS rendering, and authenticated
+   remote subtitle retrieval as separately reported surfaces. A release-app
+   play/seek or seek-preview result does not close those gates.
 
 ## Subtitle migration plan
 
 The concrete Worker/Modal API, authentication, persistence, progress,
 cancellation, cleanup, and verification contract is defined in
-`MODAL_SUBTITLE_INTEGRATION.md`.
+`MODAL_SUBTITLE_INTEGRATION.md`. The Tauri app now has subtitle capability,
+import, synchronization, sidecar-loading, and generation command surfaces;
+remote Worker/Modal execution and authenticated retrieval remain pending.
 
-1. Define versioned subtitle commands for importing an observed subtitle track,
+1. Keep versioned subtitle commands for importing an observed subtitle track,
    extracting an audio source, generating ASR, translating, cancelling, and
    retrying.
 2. Keep browser-only detection in the extension: text-track URLs, language and
@@ -149,13 +176,24 @@ cancellation, cleanup, and verification contract is defined in
    language selection, timing offset, style settings, and external subtitle
    import.
 6. Verify existing tracks, generated subtitles, translation, cancellation,
-   restart recovery, authenticated sources, Chrome, and Whale before deleting
-   the extension-side subtitle pipeline.
+   restart recovery, authenticated sources, Chrome, and Whale before declaring
+   the remote subtitle pipeline complete or deleting extension-side legacy
+   subtitle code.
 
 ## Release status
 
+The 0.4.73 raw Tauri release, Inno Setup installer build/install, installed
+binary parity, native `show-ui`, and installed app smoke are verified. The app
+evidence covers actual local-data invokes, thumbnails, MP4 play/seek, a seek
+preview, OS PiP, fullscreen exit, and single-instance behavior. Synthetic
+installed-app checks also cover metadata, move, recycle deletion, TS remux,
+GIF export, sidecar synchronization, and remote subtitle generation. The exact
+Chrome browser-action popup, native subtitle import picker, external-player
+fallback, uninstall, real multi-speaker diarization, and the remaining
+live-site matrix stay pending.
+
 The Microsoft Store Companion submission and any Companion-first browser-store
-rebrand are on migration hold. Existing store copy and submission checklists
+rebrand remain on migration hold. Existing store copy and submission checklists
 may still support an explicitly scoped maintenance release of the current
 extension-primary product, but must not be reused as Companion-first copy
 without review.

@@ -54,7 +54,7 @@ test("the per-job Win32 progress window is gone and the manager binary owns the 
     ].map((file) => read(`./native-host/src/${file}`))).then((parts) => parts.join("\n")),
   ]);
   // Progress used to open a throwaway Win32 window per job. The manager window
-  // in `companion-gui` replaced it, so the host must carry no window code and
+  // in the Tauri manager replaced it, so the host must carry no window code and
   // must not spawn a per-job UI process.
   assert.doesNotMatch(nativeModules, /--job-ui/);
   assert.doesNotMatch(nativeModules, /mod windows_ui/);
@@ -115,17 +115,17 @@ test("Companion owns persistent recovery and cancellation outside the extension 
 });
 
 test("the extension stays free while the installed app owns General and Pro", async () => {
-  const [background, manager, license, nativeHost, runtimeFiles] = await Promise.all([
+  const [background, settingsView, license, nativeHost, runtimeFiles] = await Promise.all([
     read("./background.js"),
-    read("./companion-gui/src/app.rs"),
-    read("./companion-gui/src/license.rs"),
+    read("./companion-tauri/ui/src/lib/routes/SettingsView.svelte"),
+    read("./companion-tauri/src-tauri/src/license.rs"),
     read("./native-host/src/main.rs"),
     import("./scripts/build-dev-staging.mjs").then((module) => module.STORE_RUNTIME_FILES),
   ]);
   assert.doesNotMatch(background, /auraLicense|activateLicense|resolveEdition|resolvePlan/);
   assert.equal(runtimeFiles.includes("license.js"), false);
-  assert.match(manager, /AI 자막 생성은 앱 Pro 기능입니다/);
-  assert.match(manager, /self\.view = View::Settings/);
+  assert.match(settingsView, /licenseState\.license\?\.pro/);
+  assert.match(settingsView, /승인된 키는 이 기기에 로컬로 저장/);
   assert.match(license, /LICENSE_API_URL/);
   assert.match(license, /licenseKey/);
   assert.match(nativeHost, /"entitlementOwner": "companion"/);
@@ -182,6 +182,26 @@ test("companion installers include the store and current development extension o
   assert.match(installer, /DefaultDirName=\{localappdata\}\\Aura Media\\Companion/);
   assert.match(installer, /UsePreviousAppDir=no/);
   assert.match(installer, /SaveStringsToUTF8FileWithoutBOM\(ManifestPath, ManifestLines, False\)/);
+});
+
+test("the Tauri manager is the release source and retired mpv is not packaged", async () => {
+  const [script, installer, cargo, config] = await Promise.all([
+    read("./scripts/build-companion-installer.ps1"),
+    read("./installer/AuraMediaCompanion.iss"),
+    read("./companion-tauri/src-tauri/Cargo.toml"),
+    read("./companion-tauri/src-tauri/tauri.conf.json"),
+  ]);
+  assert.match(cargo, /\[\[bin\]\][\s\S]*name = "aura-media-manager"/);
+  assert.match(cargo, /\[features\][\s\S]*default = \["custom-protocol"\]/);
+  assert.match(cargo, /custom-protocol = \["tauri\/custom-protocol"\]/);
+  assert.match(config, /"mainBinaryName": "aura-media-manager"/);
+  assert.match(script, /& npm ci --prefix \$uiDirectory/);
+  assert.match(script, /companion-tauri\\src-tauri\\Cargo\.toml/);
+  assert.doesNotMatch(script, /mpv\\mpv\.exe/);
+  assert.match(installer, /companion-tauri\\src-tauri\\target\\release\\aura-media-manager\.exe/);
+  assert.match(installer, /Excludes: "mpv\\\*"/);
+  assert.doesNotMatch(installer, /Excludes: "mpv\\\*"[^\\r\\n]*createallsubdirs/);
+  assert.match(installer, /Type: filesandordirs; Name: "\{app\}\\tools\\mpv"/);
 });
 
 test("live media monitoring checks detection and optional Companion readiness without browser playback", async () => {

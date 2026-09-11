@@ -197,11 +197,31 @@ test("the Tauri manager is the release source and retired mpv is not packaged", 
   assert.match(config, /"mainBinaryName": "aura-media-manager"/);
   assert.match(script, /& npm ci --prefix \$uiDirectory/);
   assert.match(script, /companion-tauri\\src-tauri\\Cargo\.toml/);
+  assert.doesNotMatch(script, /companion-gui/);
   assert.doesNotMatch(script, /mpv\\mpv\.exe/);
   assert.match(installer, /companion-tauri\\src-tauri\\target\\release\\aura-media-manager\.exe/);
+  assert.doesNotMatch(installer, /companion-gui/);
   assert.match(installer, /Excludes: "mpv\\\*"/);
   assert.doesNotMatch(installer, /Excludes: "mpv\\\*"[^\\r\\n]*createallsubdirs/);
   assert.match(installer, /Type: filesandordirs; Name: "\{app\}\\tools\\mpv"/);
+});
+
+test("the installer builds and packages the file-backed cloud agent with Telegram disabled", async () => {
+  const [script, installer, cloudCargo, cloudMain, cloudContract] = await Promise.all([
+    read("./scripts/build-companion-installer.ps1"),
+    read("./installer/AuraMediaCompanion.iss"),
+    read("./cloud-agent/Cargo.toml"),
+    read("./cloud-agent/src/main.rs"),
+    read("./companion-contract/src/cloud.rs"),
+  ]);
+
+  assert.match(cloudCargo, /name = "aura-media-cloud"/);
+  assert.match(cloudContract, /CLOUD_JOB_CAPABILITY: &str = "cloud-job-v1"/);
+  assert.match(cloudMain, /"telegram": false/);
+  assert.match(script, /cloud-agent\\Cargo\.toml/);
+  assert.match(script, /cloud-agent\\target\\release\\aura-media-cloud\.exe/);
+  assert.match(installer, /cloud-agent\\target\\release\\aura-media-cloud\.exe/);
+  assert.doesNotMatch(`${script}\n${installer}`, /companion-gui/);
 });
 
 test("live media monitoring checks detection and optional Companion readiness without browser playback", async () => {

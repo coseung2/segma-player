@@ -109,9 +109,20 @@ $managerManifest = Join-Path $ProjectRoot 'companion-tauri\src-tauri\Cargo.toml'
 & cargo build --release --manifest-path $managerManifest
 if ($LASTEXITCODE -ne 0) { throw 'Companion Tauri manager release build failed.' }
 
+# Cloud jobs execute in a separate process so provider dependencies cannot
+# enlarge the browser-facing native host. The foundation supports mock jobs;
+# Telegram remains disabled until its provider and authentication exist.
+$cloudManifest = Join-Path $ProjectRoot 'cloud-agent\Cargo.toml'
+& cargo build --release --manifest-path $cloudManifest
+if ($LASTEXITCODE -ne 0) { throw 'Companion cloud agent release build failed.' }
+
 $managerBinary = Join-Path $ProjectRoot 'companion-tauri\src-tauri\target\release\aura-media-manager.exe'
 if (-not (Test-Path -LiteralPath $managerBinary -PathType Leaf)) {
   throw "Companion manager binary is missing: $managerBinary"
+}
+$cloudBinary = Join-Path $ProjectRoot 'cloud-agent\target\release\aura-media-cloud.exe'
+if (-not (Test-Path -LiteralPath $cloudBinary -PathType Leaf)) {
+  throw "Companion cloud agent binary is missing: $cloudBinary"
 }
 
 $compilerCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue

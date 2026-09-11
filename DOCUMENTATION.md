@@ -25,6 +25,8 @@ UI migration.
   order, frozen compatibility contracts, phase gates, progress, and validation
   requirements. It contains user changes, is not updated by this documentation
   cutover, and must not be used to infer the current version.
+- `CLOUD_STORAGE_ARCHITECTURE.md` — Companion-owned file-backed cloud job
+  boundary, current mock foundation, and the gated Telegram/TDLib target.
 - `SITE_DOWNLOAD_MODES.md` — browser connector site/provider diagnostic layers
   and the Companion execution boundary.
 - `MODAL_SUBTITLE_INTEGRATION.md` — target Companion/Worker/Modal subtitle job

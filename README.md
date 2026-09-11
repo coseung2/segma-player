@@ -24,7 +24,8 @@ reference; that code is outside the packaged runtime.
   jobs, subtitle generation/translation/storage, media and subtitle folders,
   local tools, settings, diagnostics, application lifecycle, General/Pro
   entitlement, and all plan limits. The current desktop implementation is
-  `companion-tauri/`.
+  `companion-tauri/`. A separate experimental cloud agent currently provides
+  only a deterministic local mock backend for the file-backed cloud job ABI.
 - **Website/services:** installation, policy, support, and explicitly declared
   remote capabilities.
 
@@ -41,11 +42,13 @@ cutover and is preserved in the verified source backup documented in
 `INCIDENTS.md`; it is not part of the current tree. The Tauri
 application remains a separate crate from `native-host` so the native messaging
 host stays a small stdio process with no GUI dependencies. The installer ships
-both, and the host's `--manager` argument launches the manager.
+the host, manager, and separate `aura-media-cloud.exe`; the host's `--manager`
+argument continues to launch the Tauri manager.
 
-The two processes share `%LOCALAPPDATA%\Aura Media\Companion`; there is no IPC
-between them. Job state files are the interface, and `settings.json` holds the
-one download folder both entry points use.
+The host and manager share `%LOCALAPPDATA%\Aura Media\Companion`; there is no
+IPC between them. Job state files are the interface, and `settings.json` holds
+the one download folder both entry points use. The cloud agent uses an isolated
+`cloud-jobs` namespace under the same root and is not wired to the manager UI.
 
 | Capability | Where it runs |
 | --- | --- |
@@ -54,6 +57,7 @@ one download folder both entry points use.
 | Library | Media files listed from the download folder |
 | Download folder | Locked, atomically replaced `settings.json`, shared by host and app |
 | Playback | HTML `<video>` using the Tauri asset protocol in `companion-tauri/` |
+| Experimental cloud jobs | `aura-media-cloud.exe`; local mock provider only |
 | General/Pro authentication | App settings; verified against `/api/license` |
 
 [companion-ui](companion-ui/README.md) is an earlier HTML prototype of the same
@@ -91,6 +95,10 @@ enforcement are implemented and verified.
   and General/Pro entitlement. Its Tauri player uses HTML video and owns seek
   preview, fullscreen, and PiP behavior. mpv and embedded HWND surfaces are
   retired from the new package.
+- `cloud-agent` defines the separate `cloud-job-v1` process and deterministic
+  mock upload/download/delete semantics. Telegram/TDLib, cloud catalog sync,
+  and cloud-library UI are not implemented. See
+  [CLOUD_STORAGE_ARCHITECTURE.md](CLOUD_STORAGE_ARCHITECTURE.md).
 
 The package graph is declared once in `scripts/store-runtime-files.json` and is
 consumed by both development staging and the PowerShell store packager. Each
@@ -115,6 +123,8 @@ are historical snapshots. Current site/provider/downloader boundaries are in
 rtk npm test
 rtk npm run test:media-sites
 rtk npm run build:dev-staging
+rtk cargo test --locked --manifest-path companion-contract/Cargo.toml
+rtk cargo test --locked --manifest-path cloud-agent/Cargo.toml
 rtk cargo test --manifest-path native-host/Cargo.toml
 rtk cargo fmt --check --manifest-path native-host/Cargo.toml
 rtk cargo test --manifest-path companion-tauri/src-tauri/Cargo.toml
@@ -217,6 +227,12 @@ generation have also passed. Chrome Default is loaded with current staging,
 but the exact browser-action popup click remains unautomated; native subtitle
 import, external-player fallback, uninstall, real multi-speaker diarization,
 and the remaining live-site matrix are still separate pending gates.
+
+The installer also builds and ships `aura-media-cloud.exe`. This foundation
+supports the file-backed `cloud-job-v1` contract and a deterministic local mock
+provider. It is foundation infrastructure rather than a user-facing cloud
+feature. Telegram explicitly reports unavailable and Telegram jobs fail closed;
+there is no TDLib authentication, remote catalog, or Telegram storage yet.
 
 ```powershell
 rtk pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-companion-installer.ps1 `

@@ -2,32 +2,31 @@
 
 ## Status
 
-This document is the implementation contract for the current Companion-owned
-cloud foundation. The implemented scope is the shared file-backed cloud job ABI
-and a deterministic local mock provider. Telegram/TDLib authentication, remote
-catalog synchronization, and cloud-library UI are not implemented and must not
-be advertised as available.
+The Companion cloud agent implements the shared file-backed cloud job ABI, a
+deterministic local mock provider, and a Telegram Bot API provider. Telegram
+upload, download, and deletion are available after a bot token and storage-chat
+ID are configured. The manager Library exposes these operations in its Telegram
+tab and runs them through the same file-backed job contract.
 
 ## Runtime boundary
 
 Cloud execution belongs to the installed Companion product. The browser
-connector remains plan-neutral and does not upload media bytes or hold cloud
-credentials.
+connector does not upload media bytes or hold Telegram credentials.
 
 ```text
 browser extension
-  -> aura-media-companion.exe        existing protocol-2 native host
+  -> aura-media-companion.exe        protocol-2 native host
 
 Segma Player manager
-  -> cloud job request/state files   future UI wiring
+  -> cloud job request/state files
   -> aura-media-cloud.exe            separate cloud execution process
-      -> mock blob store             implemented foundation
-      -> Telegram/TDLib              not implemented
+      -> mock blob store
+      -> Telegram Bot API
 ```
 
-The separate process keeps future provider dependencies out of both the Tauri
-manager and the Native Messaging host. Existing `--manager` behavior continues
-to launch `aura-media-manager.exe`; the native host protocol remains version 2.
+The separate cloud process keeps provider dependencies and credentials out of
+the Tauri manager and Native Messaging host. Existing `--manager` behavior and
+native-host protocol version 2 are unchanged.
 
 ## File-backed ABI
 
@@ -42,40 +41,73 @@ uses these files:
 {id}.runner.lock
 ```
 
-The request contract is `cloud-job-v1`. A request names its job, provider,
+The request contract is `cloud-job-v1`. A request names its provider and
 operation (`upload`, `download`, or `delete`), logical item ID, local path where
 applicable, optional virtual folder and filename, and creation time. State files
-record status, phase, byte progress, filename, errors, and timestamps.
+record status, phase, byte progress, filename, sanitized errors, and timestamps.
 
-The logical item ID is the stable Segma identity. Provider-native identifiers
-must remain provider metadata. Virtual folder changes are catalog changes and
-must not require media re-upload.
+The logical item ID is the stable Segma identity. Telegram message and file IDs
+remain provider metadata. Virtual-folder changes can be represented as catalog
+changes without re-uploading media.
+
+## Telegram Bot API provider
+
+The provider uses a private Telegram group containing the user and storage bot.
+Configuration is accepted only through `aura-media-cloud.exe
+--configure-telegram` as bounded stdin JSON and is stored at:
+
+```text
+%LOCALAPPDATA%\Aura Media\Companion\telegram-config.dpapi
+```
+
+The token and chat ID are encrypted with Windows current-user DPAPI. They are
+not written to job files, catalogs, logs, command-line arguments, or status
+output. `--status` reports `telegram: true` when the protected configuration can
+be decrypted and validated structurally; it is a local configuration signal,
+not a live Telegram health check.
+
+Uploads use conservative 45 MiB parts. The local durable catalog under
+`cloud-telegram\items` records total size, whole-file SHA-256, ordered part
+sizes and hashes, and Telegram message/file references. The catalog is written
+after each successful part, so a retry can resume from completed parts. A file
+is committed only after every part is recorded and the whole-file digest is
+known.
+
+Downloads resolve each Telegram file, verify every part hash and the whole-file
+hash, write to a temporary path, and atomically publish only after verification.
+An existing destination is never overwritten. Deletes remove every cataloged
+Telegram message and retain unresolved references if an operation fails.
+Cancellation is checked between remote operations.
+
+The Bot API cannot enumerate a bot's existing chat history. Consequently, the
+current implementation depends on its DPAPI configuration and local durable
+catalog for automatic recovery. Copying only the Telegram group to a new PC, or
+deleting `cloud-telegram\items`, does not reconstruct the library. Multi-device
+catalog sync, remote manifest discovery, and in-app bot setup are future work.
+Empty files are represented by a committed zero-part local catalog and do not
+create a Telegram document message.
 
 ## Mock provider
 
-The foundation stores deterministic mock blobs under:
+The deterministic mock provider stores blobs under:
 
 ```text
 %LOCALAPPDATA%\Aura Media\Companion\cloud-mock\items\{itemId}
 ```
 
-Uploads split data into 512 MiB parts. Retries reuse a completed part only when
-its size matches the expected size. The manifest is written after every part is
-present. Downloads assemble into a temporary file and atomically rename it;
-existing destinations are not overwritten. Delete is idempotent.
+It remains available for job, retry, cancellation, and materialization tests.
+It is not used as a fallback for failed Telegram jobs.
 
-This provider exists to verify job, retry, cancellation, and materialization
-semantics before any network provider is introduced. It is foundation-only and
-is not a user-facing cloud storage feature.
+## Verification checkpoint (2026-09-12 Asia/Seoul)
 
-## Telegram target and release gate
+- `cargo test --manifest-path cloud-agent/Cargo.toml`: 11 tests passed.
+- `cargo fmt --manifest-path cloud-agent/Cargo.toml -- --check`: passed.
+- `cargo clippy --manifest-path cloud-agent/Cargo.toml --all-targets --no-deps
+  -- -D warnings -A clippy::manual-div-ceil`: passed.
+- Live Bot API fixture: upload, download, byte equality, and delete passed.
+- Protected configuration: DPAPI file exists in the Companion root and
+  `aura-media-cloud.exe --status` reports `telegram: true`.
 
-A future Telegram provider may use a user-account Telegram API through TDLib.
-It would require protected sessions, private storage bootstrap and recovery,
-integrity metadata, restart and orphan handling, a recoverable catalog, manager
-folder UI, deterministic fixtures, dedicated-account live tests, third-party
-notices, and a platform-terms review.
-
-Until those gates are complete, `aura-media-cloud.exe --status` reports
-`telegram: false`, and Telegram jobs fail closed with a persisted failure state.
-No Telegram credentials or live Telegram calls belong in the current build.
+The manager integration additionally has typed UI checks and Tauri command tests.
+Installed-app picker and transfer behavior still requires a real manager-window
+check for each packaged release.

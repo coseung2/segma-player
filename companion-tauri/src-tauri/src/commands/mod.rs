@@ -1,3 +1,4 @@
+pub mod cloud;
 pub mod dto;
 pub mod jobs;
 pub mod library;

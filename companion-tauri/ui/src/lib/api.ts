@@ -260,6 +260,45 @@ export interface GifExportResponse {
   fileName: string;
 }
 
+export type CloudOperation = "upload" | "download" | "delete";
+
+export interface CloudStatusDto {
+  schemaVersion: number;
+  capability: string;
+  executableAvailable: boolean;
+  telegramConfigured: boolean;
+}
+
+export interface CloudItemDto {
+  itemId: string;
+  provider: string;
+  fileName: string;
+  size: number;
+}
+
+export interface CloudJobDto {
+  jobId: string;
+  provider: string;
+  itemId: string;
+  operation: CloudOperation;
+  status: string;
+  phase: string | null;
+  fileName: string | null;
+  progress: number | null;
+  completed: number | null;
+  total: number | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CloudUploadSelectionDto { localPath: string; fileName: string; size: number; }
+export interface CloudDownloadPickerRequest { fileName: string; }
+export interface CloudStartUploadRequest { localPath: string; folderId?: string | null; }
+export interface CloudItemRequest { itemId: string; }
+export interface CloudStartDownloadRequest { itemId: string; localPath: string; }
+export interface CloudJobRequest { jobId: string; }
+
 export interface PreviewUnavailable {
   available: false;
   command: string;
@@ -307,6 +346,25 @@ function previewResult<T>(command: string, payload: unknown): T {
     case "get_license": return {
       pro: false, maskedKey: null, expiresAt: null, daysRemaining: null, devices: null, limit: null,
     } as T;
+    case "cloud_status": return {
+      schemaVersion: 1,
+      capability: "cloud-job-v1",
+      executableAvailable: false,
+      telegramConfigured: false,
+    } as T;
+    case "list_cloud_items": return [] as T;
+    case "list_cloud_jobs": return [] as T;
+    case "pick_cloud_upload":
+    case "pick_cloud_download_destination": return null as T;
+    case "start_cloud_upload":
+    case "start_cloud_download":
+    case "start_cloud_delete": return {
+      jobId: `preview-${Date.now()}`,
+      provider: "telegram", operation: "upload", itemId: "preview-item",
+      status: "queued", phase: "queued", completed: null, total: null,
+      progress: 0, fileName: null, error: null, createdAt: Date.now(), updatedAt: Date.now(),
+    } as T;
+    case "cancel_cloud_job": return undefined as T;
     case "update_library_metadata": return {
       changed: true, persisted: false,
       fileName: (payload as MetadataUpdateRequest).fileName,
@@ -433,3 +491,12 @@ export const listSubtitleCapabilities = (): Promise<SubtitleCapabilitiesDto> => 
 export const startOrGenerateSubtitle = (request: StartOrGenerateSubtitleRequest): Promise<SubtitleJobResponse> => command("start_or_generate_subtitle", request);
 export const importSubtitle = (request: ImportSubtitleRequest): Promise<ImportSubtitleResponse> => command("import_subtitle", request);
 export const syncSubtitle = (request: SyncSubtitleRequest): Promise<SyncSubtitleResponse> => command("sync_subtitle", request);
+export const cloudStatus = (): Promise<CloudStatusDto> => command("cloud_status");
+export const listCloudItems = (): Promise<CloudItemDto[]> => command("list_cloud_items");
+export const listCloudJobs = (): Promise<CloudJobDto[]> => command("list_cloud_jobs");
+export const pickCloudUpload = (): Promise<CloudUploadSelectionDto | null> => command("pick_cloud_upload");
+export const pickCloudDownloadDestination = (request: CloudDownloadPickerRequest): Promise<string | null> => command("pick_cloud_download_destination", request);
+export const startCloudUpload = (request: CloudStartUploadRequest): Promise<CloudJobDto> => command("start_cloud_upload", request);
+export const startCloudDownload = (request: CloudStartDownloadRequest): Promise<CloudJobDto> => command("start_cloud_download", request);
+export const startCloudDelete = (request: CloudItemRequest): Promise<CloudJobDto> => command("start_cloud_delete", request);
+export const cancelCloudJob = (request: CloudJobRequest): Promise<void> => command("cancel_cloud_job", request);

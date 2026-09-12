@@ -26,6 +26,15 @@ pub fn run() {
 
     builder
         .invoke_handler(tauri::generate_handler![
+            commands::cloud::cloud_status,
+            commands::cloud::list_cloud_items,
+            commands::cloud::list_cloud_jobs,
+            commands::cloud::pick_cloud_upload,
+            commands::cloud::pick_cloud_download_destination,
+            commands::cloud::start_cloud_upload,
+            commands::cloud::start_cloud_download,
+            commands::cloud::start_cloud_delete,
+            commands::cloud::cancel_cloud_job,
             commands::jobs::list_jobs,
             commands::jobs::cancel_job,
             commands::jobs::pause_job,

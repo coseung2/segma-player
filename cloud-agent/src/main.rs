@@ -1,4 +1,7 @@
 mod mock;
+mod telegram;
+#[cfg(test)]
+mod telegram_fixture;
 
 use aura_companion_contract as contract;
 use contract::cloud::{
@@ -29,6 +32,9 @@ fn main() {
 fn run(arguments: Vec<String>) -> io::Result<()> {
     match arguments.as_slice() {
         [flag] if flag == "--status" => {
+            let telegram = contract::companion_root()
+                .map(|root| telegram::protected_config_available(&root))
+                .unwrap_or(false);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
@@ -36,7 +42,7 @@ fn run(arguments: Vec<String>) -> io::Result<()> {
                     "capabilities": [CLOUD_JOB_CAPABILITY, "mock-blob-v1"],
                     "providers": {
                         "mock": true,
-                        "telegram": false
+                        "telegram": telegram
                     }
                 }))
                 .map_err(io::Error::other)?
@@ -50,6 +56,10 @@ fn run(arguments: Vec<String>) -> io::Result<()> {
             run_job(job_id, Some(token))
         }
         [flag, request_path] if flag == "--submit" => submit_request(Path::new(request_path)),
+        [flag] if flag == "--configure-telegram" => {
+            let root = contract::companion_root()?;
+            telegram::configure_from_reader(&root, &mut io::stdin().lock())
+        }
         [flag] if flag == "--help" || flag == "-h" => {
             print_help();
             Ok(())
@@ -60,7 +70,7 @@ fn run(arguments: Vec<String>) -> io::Result<()> {
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: aura-media-cloud --status | --submit <request.json> | --run-job <job-id> [--claim-token <token>]",
+            "usage: aura-media-cloud --status | --configure-telegram | --submit <request.json> | --run-job <job-id> [--claim-token <token>]",
         )),
     }
 }
@@ -68,6 +78,7 @@ fn run(arguments: Vec<String>) -> io::Result<()> {
 fn print_help() {
     println!("Segma Player cloud agent");
     println!("  --status                Show protocol and provider capabilities");
+    println!("  --configure-telegram    Read token/channel JSON from stdin and protect it locally");
     println!("  --submit <request.json> Persist and execute one cloud request");
     println!("  --run-job <job-id>      Execute an already persisted cloud request");
 }
@@ -112,10 +123,9 @@ fn run_job_in(root: &Path, job_id: &str, claim_token: Option<&str>) -> io::Resul
         CloudProvider::Mock => mock::execute(root, &request, &mut state, |state| {
             cloud::write_cloud_state_in(&directory, state).map(|_| ())
         }),
-        CloudProvider::Telegram => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Telegram provider is not wired in this foundation build",
-        )),
+        CloudProvider::Telegram => telegram::execute(root, &request, &mut state, |state| {
+            cloud::write_cloud_state_in(&directory, state).map(|_| ())
+        }),
     };
 
     if let Ok(cancel_path) = cloud::cloud_cancel_path_in(&directory, job_id) {
@@ -174,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_telegram_provider_fails_closed_and_persists_failure() {
+    fn telegram_without_protected_config_fails_closed_and_persists_sanitized_failure() {
         let root = temp_root("telegram");
         let directory = root.join("cloud-jobs");
         fs::create_dir_all(&directory).expect("cloud jobs directory creates");
@@ -195,7 +205,7 @@ mod tests {
         assert!(states[0]
             .error
             .as_deref()
-            .is_some_and(|value| value.contains("not wired")));
+            .is_some_and(|value| !value.contains("token")));
         assert!(
             !cloud::cloud_runner_claim_path_in(&directory, &request.job_id)
                 .unwrap()

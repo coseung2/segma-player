@@ -142,7 +142,7 @@ where
     let part_count = if size == 0 {
         0
     } else {
-        (size + chunk_bytes - 1) / chunk_bytes
+        size.div_ceil(chunk_bytes)
     };
     let mut parts = Vec::with_capacity(part_count as usize);
     let mut completed = 0_u64;

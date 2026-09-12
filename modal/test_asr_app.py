@@ -148,6 +148,36 @@ class AudioUploadContractTests(unittest.TestCase):
 
 
 class SpeakerDiarizationTests(unittest.TestCase):
+    def test_model_load_failure_disables_diarization_without_crashing_worker(self):
+        pipeline_type = mock.Mock()
+        pipeline_type.from_pretrained.side_effect = RuntimeError("expired-token")
+        with mock.patch.object(ASR, "media_log") as log:
+            pipeline = ASR.load_optional_diarization_pipeline(
+                pipeline_type,
+                "gated/model",
+                "secret-token",
+                "/cache",
+                "cuda",
+            )
+        self.assertIsNone(pipeline)
+        self.assertIn("RuntimeError", log.call_args.args[0])
+        self.assertNotIn("secret-token", log.call_args.args[0])
+
+    def test_inference_failure_keeps_asr_chunks_without_speaker_labels(self):
+        chunks = [{"timestamp": [0.0, 1.0], "text": "hello"}]
+        pipeline = mock.Mock(side_effect=RuntimeError("gpu-failure"))
+        with mock.patch.object(ASR, "media_log") as log:
+            assigned, speakers = ASR.diarize_chunks(chunks, pipeline, "audio.wav")
+        self.assertEqual(assigned, chunks)
+        self.assertEqual(speakers, [])
+        self.assertIn("RuntimeError", log.call_args.args[0])
+
+    def test_missing_pipeline_keeps_asr_chunks_without_speaker_labels(self):
+        chunks = [{"timestamp": [0.0, 1.0], "text": "hello"}]
+        assigned, speakers = ASR.diarize_chunks(chunks, None, "audio.wav")
+        self.assertEqual(assigned, chunks)
+        self.assertEqual(speakers, [])
+
     def test_chunks_use_largest_overlap_and_stable_korean_labels(self):
         chunks = [
             {"timestamp": [0.0, 2.0], "text": "first"},

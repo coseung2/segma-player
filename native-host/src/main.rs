@@ -396,7 +396,7 @@ fn write_download_folder(root: &Path, folder: &str) -> io::Result<PathBuf> {
 
 /// Compatibility-only command for older extension callers.
 ///
-/// Current Library playback is owned by the manager's embedded mpv surface.
+/// Current Library playback is owned by the Tauri manager's HTML video surface.
 /// Keep this frozen protocol command until all installed pre-manager clients
 /// have aged out; new code must not route playback through the system default.
 #[cfg(target_os = "windows")]
@@ -582,8 +582,8 @@ fn spawn_job_runner(request: &Request) -> io::Result<()> {
 
 /// Name of the GUI binary that owns the manager window.
 ///
-/// The window lives in a separate crate (`companion-gui`) so the native
-/// messaging host stays a small stdio process with no GUI dependencies.
+/// The window lives in the separate Tauri crate so the native messaging host
+/// stays a small stdio process with no GUI dependencies.
 fn spawn_manager() -> io::Result<()> {
     #[cfg(target_os = "windows")]
     if focus_existing_manager() {
@@ -1038,7 +1038,7 @@ fn main() {
         return;
     }
     if args.get(1).and_then(|value| value.to_str()) == Some("--manager") {
-        // The manager window moved to the `companion-gui` crate. Keep this arm
+        // The manager window lives in the Tauri crate. Keep this arm
         // so an old Start Menu shortcut still opens the window instead of
         // silently starting a stdio host with no browser attached.
         let _ = spawn_manager();

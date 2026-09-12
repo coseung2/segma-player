@@ -52,7 +52,6 @@ if ([string]::IsNullOrWhiteSpace($AllowedExtensionIds)) {
 
 $required = @(
   (Join-Path $ToolsDirectory 'ffmpeg\ffmpeg.exe'),
-  (Join-Path $ToolsDirectory 'mpv\mpv.exe'),
   (Join-Path $ToolsDirectory 'yt-dlp.exe'),
   (Join-Path $ToolsDirectory 'node.exe'),
   (Join-Path $ToolsDirectory 'THIRD_PARTY_NOTICES.txt')
@@ -62,11 +61,6 @@ foreach ($path in $required) {
     throw "Required redistributable companion file is missing: $path"
   }
 }
-$thirdPartyNotices = Get-Content -LiteralPath (Join-Path $ToolsDirectory 'THIRD_PARTY_NOTICES.txt') -Raw -Encoding UTF8
-if ($thirdPartyNotices -notmatch '(?im)^mpv\b') {
-  throw 'THIRD_PARTY_NOTICES.txt must include the bundled mpv build and license notice.'
-}
-
 # YouTube began requiring a GVS PO token for the android_vr high-quality
 # streams that older yt-dlp builds still selected. 2026.08.19 switches the
 # tokenless default to a viable client; reject stale redistributable toolsets
@@ -86,17 +80,49 @@ if ($ytDlpVersion -lt $MinimumYtDlpVersion) {
   throw "Bundled yt-dlp $ytDlpVersion is too old; Companion requires $MinimumYtDlpVersion or newer."
 }
 
+$uiDirectory = Join-Path $ProjectRoot 'companion-tauri\ui'
+$uiPackageJson = Join-Path $uiDirectory 'package.json'
+$uiPackageLock = Join-Path $uiDirectory 'package-lock.json'
+foreach ($path in @($uiPackageJson, $uiPackageLock)) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    throw "Companion frontend package file is missing: $path"
+  }
+}
+
+# Build the production frontend before compiling Tauri so its configured
+# frontendDist directory is available to the Tauri build script.
+& npm ci --prefix $uiDirectory
+if ($LASTEXITCODE -ne 0) { throw 'Companion frontend dependency installation failed.' }
+& npm run build --prefix $uiDirectory
+if ($LASTEXITCODE -ne 0) { throw 'Companion frontend production build failed.' }
+$uiDist = Join-Path $uiDirectory 'dist'
+if (-not (Test-Path -LiteralPath (Join-Path $uiDist 'index.html') -PathType Leaf)) {
+  throw "Companion frontend output is missing: $uiDist"
+}
+
 & cargo build --release --manifest-path (Join-Path $ProjectRoot 'native-host\Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'Native companion release build failed.' }
 
-# The manager window is a separate crate so the native messaging host stays a
-# small stdio process with no GUI dependencies. The installer ships both.
-& cargo build --release --manifest-path (Join-Path $ProjectRoot 'companion-gui\Cargo.toml')
-if ($LASTEXITCODE -ne 0) { throw 'Companion manager release build failed.' }
+# The manager is now the Tauri application. The installer still ships it beside
+# the small stdio native messaging host.
+$managerManifest = Join-Path $ProjectRoot 'companion-tauri\src-tauri\Cargo.toml'
+& cargo build --release --manifest-path $managerManifest
+if ($LASTEXITCODE -ne 0) { throw 'Companion Tauri manager release build failed.' }
 
-$managerBinary = Join-Path $ProjectRoot 'companion-gui\target\release\aura-media-manager.exe'
+# Cloud jobs execute in a separate process so provider dependencies cannot
+# enlarge the browser-facing native host. The foundation supports mock jobs;
+# Telegram remains disabled until its provider and authentication exist.
+$cloudManifest = Join-Path $ProjectRoot 'cloud-agent\Cargo.toml'
+& cargo build --release --manifest-path $cloudManifest
+if ($LASTEXITCODE -ne 0) { throw 'Companion cloud agent release build failed.' }
+
+$managerBinary = Join-Path $ProjectRoot 'companion-tauri\src-tauri\target\release\aura-media-manager.exe'
 if (-not (Test-Path -LiteralPath $managerBinary -PathType Leaf)) {
   throw "Companion manager binary is missing: $managerBinary"
+}
+$cloudBinary = Join-Path $ProjectRoot 'cloud-agent\target\release\aura-media-cloud.exe'
+if (-not (Test-Path -LiteralPath $cloudBinary -PathType Leaf)) {
+  throw "Companion cloud agent binary is missing: $cloudBinary"
 }
 
 $compilerCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue

@@ -9,6 +9,7 @@ const repositoryRoot = path.dirname(scriptDirectory);
 const ROOT_TEST_PATTERN = /^[^/]+\.test\.mjs$/;
 const SHIPPED_TEST_DIRECTORIES = Object.freeze([
   "companion-contract",
+  "companion-tauri",
   "companion-ui",
   "scripts",
   "sites",

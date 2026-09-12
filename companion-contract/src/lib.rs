@@ -1,5 +1,7 @@
 //! Stable disk ABI shared by the native host and manager.
 
+pub mod cloud;
+
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -108,6 +110,11 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+pub fn write_json_atomic(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    write_bytes_atomic(path, &bytes)
 }
 
 #[cfg(target_os = "windows")]

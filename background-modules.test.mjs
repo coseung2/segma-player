@@ -61,6 +61,43 @@ test("Companion handoff keeps media and YouTube commands bounded", async () => {
   }), false);
 });
 
+test("Level5 HLS handoff carries page-decoded keys and fails closed without them", async () => {
+  const level5 = {
+    id: "candidate-l5",
+    tabId: 4,
+    frameId: 2,
+    resourceUrl: "https://k.vdnext.com/cast2/fixture/v.html",
+    pageUrl: "https://av19t.com/bj/1",
+    pageTitle: "Level5",
+    mediaType: "HLS_MEDIA",
+    player: "level5",
+  };
+  const keys = [{ uri: "https://k.vdnext.com/v/session", key: "AQIDBAUGBwgJCgsMDQ4PEA==" }];
+  const requests = [];
+  const asked = [];
+  const handoff = createCompanionHandoff({
+    resolveCandidate: async (candidate) => candidate,
+    requestHlsKeys: async (candidate) => { asked.push(candidate.frameId); return { ok: true, keys, playlist: "#EXTM3U\n" }; },
+    randomUuid: () => "job-l5",
+    browserContext: () => ({}),
+    startMedia: async (request) => { requests.push(request); },
+  });
+  await handoff.beginCandidateDownload(level5);
+  assert.deepEqual(asked, [2]);
+  assert.deepEqual(requests[0].hlsKeys, keys);
+  assert.equal(requests[0].hlsPlaylist, "#EXTM3U\n");
+
+  await handoff.beginCandidateDownload(progressiveCandidate());
+  assert.equal("hlsKeys" in requests[1], false, "other providers never ask the page for keys");
+
+  const failing = createCompanionHandoff({
+    resolveCandidate: async (candidate) => candidate,
+    requestHlsKeys: async () => ({ ok: false, error: "decode-session-failed" }),
+    startMedia: async () => { throw new Error("must not start"); },
+  });
+  await assert.rejects(() => failing.beginCandidateDownload(level5), /보호된 영상 키 확인 실패/);
+});
+
 test("candidate and pasted-link routes converge on the same Companion handoff", async () => {
   const candidates = new Map([["candidate-1", progressiveCandidate()]]);
   const handoffs = [];
@@ -134,6 +171,27 @@ test("candidate repository ranks, persists, restores, and clears per tab", async
   assert.equal(await repository.restore(), 0);
 });
 
+test("a player frame that switches servers drops only its stale candidates", () => {
+  // Jamak: BS (DoodStream) loaded first in frame 3, then DT (Streamtape)
+  // replaced it; the old Dood candidate was still downloaded and failed.
+  const repository = createCandidateRepository({ schedule: () => 0, cancelSchedule: () => {} });
+  const observe = (resourceUrl, frameId) => repository.observeResource({
+    pageTitle: "Board",
+    pageUrl: "https://board.example/post",
+    frameUrl: "https://player.example/e/x",
+    resourceUrl,
+    contentType: "video/mp4",
+    frameId,
+    detectionSource: "test",
+    confidence: 100,
+  }, 7);
+  observe("https://cdn.dood.example/old.mp4", 3);
+  observe("https://cdn.other.example/sidebar.mp4", 5);
+  assert.equal(repository.clearFrame(7, 3), 1);
+  const remaining = repository.rerankTabCandidates(7).map((candidate) => candidate.resourceUrl);
+  assert.deepEqual(remaining, ["https://cdn.other.example/sidebar.mp4"]);
+  assert.equal(repository.clearFrame(7, 0), 0, "the top frame is cleared only by tab navigation");
+});
 test("request evidence stores are bounded and return defensive views", () => {
   let now = 100;
   const traces = createQaRequestTraceStore({ limit: 2, now: () => now });

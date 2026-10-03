@@ -1,5 +1,14 @@
 # Aura Media Downloader Incident Log
 
+## Tooling incident: 2026-09-24 Computer Use connection unavailable
+
+- Status: OPEN / LIVE-UNVERIFIED. Timezone: Asia/Seoul (UTC+09:00).
+- Impact and reproduction: native Segma UI verification cannot proceed; importing the supported `@oai/sky` package succeeds but `sky.list_windows()` returns `Computer Use native pipe is unavailable` with Windows error 2, including after a fresh Node REPL reset.
+- Evidence: Codex desktop log `codex-desktop-94a9f12c-5743-442e-81e3-290cb14fe82e-23652-t0-i1-182146-0.log` records native pipe startup ready at 03:21:57 KST, plugin reinstallation success at 03:22:15, and app-server transport shutdown at 03:22:23. Live read-only process inventory subsequently found npm Codex processes but no packaged Codex desktop process; the named-pipe inventory contained zero Computer Use pipes.
+- Diagnosis: the current native client has no listening desktop connection. Reinstallation succeeded; why the desktop application was closed is not established. This does not demonstrate a Segma application defect.
+- Response: used the supported initialization and reset path; inspected focused desktop logs and pipe counts. No helper executable was launched directly, no custom protocol client was created, and no security settings were changed.
+- Follow-up: this user operates from CLI only. Do not instruct the user to move the conversation into the desktop app. The CLI session exposes the unified browser surface only (`CUA_REPL_ENABLED_SURFACES=browser`); native Tauri window validation therefore remains unavailable in this session. Continue with source, process, artifact, and remote pipeline evidence, and report the native UI gate explicitly.
+
 이 문서는 반복 수정과 회귀를 막기 위한 인시던트 기록이다. 코드 테스트만 통과한 경우에는 `해결됨`으로 닫지 않고 `코드 반영·실브라우저 미검증`으로 남긴다.
 
 ## 상태 규칙
@@ -41,6 +50,15 @@
 - 0.4.72 backend and installed E2E: production Worker deployment `5c48aeb2-2099-4843-b7a5-656d9df2d89f` restores binary-audio routing; Modal v17 degrades cleanly when the expired Hugging Face token cannot load pyannote. An installed-Tauri synthetic job progressed from extracting audio to transcribing and saved `synthetic.vtt` in 51 seconds. Synthetic metadata, move, Recycle Bin delete, organization preview, SRT sync/rediscovery, TS remux, thumbnail, seek preview, and two-second GIF checks passed, and the original download folder plus library-state metadata were restored afterward. Chrome Default was relaunched with staging-pro 0.4.72.
 - 0.4.72 final artifacts: installer SHA-256 `c99583734a075bc36fec70a6db64d6d57529ec5c58d125aeb583b59a79331d1a`; installed/release manager SHA-256 `053b499be4c3c4d7ab756c5de8e7483775d4fd36572ddf136510b8ef553a0b6e`; installed/release native-host SHA-256 `48463d6830efa11faa057243aef12f68fcac969611e20457de1b2ee40a7f4349`. Add/Remove Programs, manager, native-host hello, and Pro staging are version 0.4.72; `tools\mpv` remains absent.
 - 0.4.73 deletion follow-up: after the user explicitly approved removal, the exact workspace path `C:\Users\coseung2\Desktop\Projects\segma player\companion-gui` was deleted. Its 61-file source/assets/manifest backup remains at `C:\Users\coseung2\AppData\Local\Aura Media\Backups\companion-gui-source-pre-delete-0.4.72` with zero SHA-256 mismatches before deletion. Legacy asset generators and architecture assertions now use canonical Tauri/Store paths; historical incident references remain append-only.
+- 2026-09-24 follow-up reproduction: in the Tauri Subtitles view, start a local subtitle generation job, leave the view open until the job reaches a terminal state, and observe that the newly saved sidecar is not rediscovered until a manual refresh or media reselection. In the Player, switch media while the stage is fullscreen or the PiP fallback is active; the transient viewport mode can remain attached to the next selection and make playback appear unexpectedly enlarged or detached.
+- 2026-09-24 confirmed causes: SubtitlesView loaded jobs only once and did not perform a completion-edge sidecar refresh; PlayerView did not clear fullscreen/mini state when the media identity changed, and the fullscreen stage had no explicit viewport/aspect contract.
+- 2026-09-24 code action: add bounded five-second SubtitleView job polling with one final sidecar rediscovery after an active subtitle job becomes terminal; clear transient Player viewport modes on selection changes; define fullscreen stage dimensions and `object-fit: contain` explicitly. Changed files: `companion-tauri/ui/src/lib/routes/SubtitlesView.svelte`, `companion-tauri/ui/src/lib/routes/PlayerView.svelte`, `companion-tauri/ui/src/app.css`, and `companion-tauri/ui/src/lib/subtitle-surface.test.mjs`.
+- 2026-09-24 regression and staging: Svelte check 0 errors/0 warnings, Tauri Rust tests 54/54, focused UI tests 5/5, full Node suite 548 pass / 0 fail / 22 intentional skips, and `git diff --check` passed. Development staging version is `0.4.76` after the required manifest patch increment.
+- 2026-09-24 live verification: the exact installed Tauri/WebView2 subtitle generation completion path and the fullscreen/mini-player selection path remain `LIVE-UNVERIFIED`; keep this incident `CODE-FIXED / LIVE-UNVERIFIED` until those real interactions are retested.
+- 2026-09-24 broader UI review: long views could grow past the desktop viewport because the shell/content height contract was incomplete, while medium-width headers, subtitle actions, notices, modals, and media actions could keep a single-row layout and clip or push controls out of reach.
+- 2026-09-24 UI action: make the desktop shell a fixed viewport with a dedicated vertical content scroller, preserve normal document scrolling on compact layouts, add a 721–1000px reflow for subtitle controls, and allow notices, modals, headers, and media actions to wrap. Regression: focused layout/subtitle/player UI tests 7/7 and Svelte check 0 errors/0 warnings. Development staging version after this source change is `0.4.77`.
+- 2026-09-24 player follow-up: fullscreen entered from the mini-player could inherit the mini stage's higher-specificity fixed width, which explains the reported enlarged/cropped playback. Fullscreen entry now exits mini mode and the mini/fullscreen selector explicitly restores the viewport dimensions. Focused UI regression remains 4/4; the next development staging version is `0.4.78`.
+- 2026-09-24 live Worker/Modal smoke: generated a short local synthetic speech fixture, converted it to 16 kHz mono AAC, and submitted it through the deployed `https://aura.mdownloader.workers.dev/api/subtitles` using the existing approved local Pro entitlement without logging the key. The Worker returned `202` with a Modal job ID; polling completed successfully and returned a valid 93-byte WebVTT result. This proves the deployed upload, Modal `/submit-audio`, owner-bound polling, and result contract. The exact Tauri button click and local `Downloads\Aura Media` save remain `LIVE-UNVERIFIED`; the smoke result was stored only under `%TEMP%` and then treated as disposable.
 
 ### INC-2026-08-17-001 — 탭 이동 후 다운로드 진행창 누락
 
@@ -789,3 +807,277 @@
 - `0.4.53` Zoro-family live result: `https://hianime.to/watch/one-piece-100?ep=2142` did not reach `domcontentloaded` within 30 seconds. Detection and download are `BLOCKED / NOT_RUN`; this is not evidence of an extension failure. The deterministic profile/registry regression remains passing.
 - Installed Native Host verification: source and installed `0.4.53` binaries have SHA-256 `1FB3AADB31E8D0CC068FC1F2EE97AAD2F1AE00140939B07480B0DA09A54549BA`. An earlier exact persisted Episode 8 request measured about 0.114 MiB/s sequentially versus 6.798 MiB/s with adaptive ranges, roughly 60x for that request. Treat this as one-server evidence rather than a universal speed guarantee.
 - Live evidence: `artifacts/live-media-0.4.53-gogoanime-episode-8.json`, `artifacts/live-media-0.4.53-animepahe.json`, and `artifacts/live-media-0.4.53-zoro.json`. The user's currently open Chrome page still exposed an empty installed-baseline diagnostic snapshot because that profile was not reloaded with staging; retain that profile-specific gap rather than claiming it updated automatically.
+
+### INC-2026-09-19-048 — 완료로 표시되지만 출력 파일이 없는 다운로드 작업
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`
+- 영향: Queue가 초록 `완료` 칩을 보여주는데 보관함에는 파일이 없고 재생·폴더 열기·재시도 버튼이 전부 없었음. 이 PC의 설치 데이터에서 `status=completed` 미디어 작업 11건 중 출력 파일 존재 0건
+- 재현: `%LOCALAPPDATA%\Aura Media\Companion\jobs`의 완료 미디어 작업과 `settings.json`의 `downloadFolder`를 비교하면 완료 작업의 출력이 모두 사라진 상태임. 이 상태를 Queue에서 열면 아무 행동도 제공되지 않음
+- 확인된 원인: `model.rs`가 `tone == Success && file_present`일 때만 Play/OpenFolder를 반환하고 Retry는 `tone`이 Danger/Warning일 때만 붙이므로, 성공 톤 + 파일 없음은 빈 액션 목록이 됨. 누락 건수를 세는 `missing_output_count`는 DTO까지 오지만 UI에서 사용되지 않았음
+- 조치: `presentation_status_view`가 완료 + 출력 없음을 `파일 없음`/Warning으로 표시하고, 이미 존재하는 Retry 액션을 재사용함. Queue는 `jobType === "media"`만 표시하고 자막 작업은 자막 화면에만 노출함. 보관함은 `missingOutputCount` 안내와 새 항목 알림을 표시함
+- 변경 파일: `companion-tauri/src-tauri/src/model.rs`, `companion-tauri/src-tauri/src/commands/jobs.rs`, `companion-tauri/ui/src/lib/routes/QueueView.svelte`, `companion-tauri/ui/src/lib/routes/LibraryView.svelte`, `companion-tauri/ui/src/lib/stores/library.ts`
+- 회귀: `model::tests::completed_download_with_missing_output_is_truthful_and_retryable_when_possible`가 완료 + 파일 없음에서 상태 라벨·Warning 톤·restartable 여부에 따른 액션을 단언함. 이 PC의 모든 `.state.json`에 `jobType`이 존재함을 확인해 레거시 누락 위험이 없음을 확인함
+- 남은 검증: 실행 중 WebView에서 실제 행 표시와 `다시 받기` 클릭 결과는 확인하지 않음
+
+### INC-2026-09-19-049 — 크래시로 남은 러너 클레임이 작업을 영구 고착시킴
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`
+- 영향: 호스트가 비정상 종료하면 `create_new` 클레임 파일이 남아 이후 실행이 `job-already-running`으로 영구 차단됨. 미디어 작업에는 자막 요청과 달리 고아 정리가 없어 `running`이 계속 표시되고 취소·일시정지는 실행자 없는 마커만 남겼음
+- 확인된 원인: 러너 클레임을 `Drop`에서만 삭제하고 소유자 검증이나 만료 규칙이 없었음
+- 조치: 클레임을 token·PID·타임스탬프 레코드로 바꾸고, 30초 부모→자식 핸드오프 유예가 지난 뒤 소유 프로세스 부재가 확인될 때만 회수함. PID 재사용은 프로세스 생성 시각으로 판별하고, 조회가 불확실하면 클레임을 보존함. 회수는 어떤 프로세스도 종료시키지 않음. 시작 시 클레임 소유자가 없는 `queued`/`running` 미디어 작업을 재시도 가능한 `failed`(`media-interrupted`)로 전환함
+- 변경 파일: `native-host/src/job_store.rs`, `native-host/src/main.rs`
+- 회귀: `job_store::tests::expired_dead_owner_claim_is_recovered_but_live_owner_is_preserved`, `tests::media_job_without_a_runner_owner_becomes_retryable_failure`
+- 남은 검증: 실제 프로세스 강제 종료 후 재시작 경로는 실행하지 않음
+
+### INC-2026-09-19-050 — "Companion 연결됨"이 실제 확인 없는 상수였음
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`
+- 영향: 사이드바 연결 표시가 컴파일 타임 문자열이라 호스트가 없거나 도구가 준비되지 않아도 정상 연결처럼 보였음
+- 확인된 원인: UI가 `isTauriRuntime()` 삼항으로 고정 문자열을 표시했고 연결 상태를 조회하는 커맨드가 없었음
+- 조치: bounded `companion_connection_status` 커맨드를 추가함. 네이티브 호스트에 `status` 프레임을 보내고 2초 타임아웃 안에서만 응답을 파싱하며, 응답 크기는 12KiB로 제한하고 `ok`/`toolsReady`/`version`만 읽어 `connected`·`degraded`·`unavailable`로 표시함. UI는 첫 로드와 15초 주기로 상태를 갱신함
+- 변경 파일: `companion-tauri/src-tauri/src/lib.rs`, `companion-tauri/ui/src/App.svelte`, `companion-tauri/ui/src/lib/api.ts`
+- 회귀: `toolsReady` 응답 shape는 기존 native-host `status` 응답과 공유 fixture(`test-fixtures/companion/status-v2.json`)로 계약이 고정되어 있음
+- 남은 검증: 실제 앱에서 연결/제한/미연결 세 상태의 표시를 확인하지 않음. 상태 조회가 매 주기 네이티브 호스트 프로세스를 띄우는 비용도 실측하지 않음
+
+### INC-2026-09-19-051 — 실패한 자막 작업과 출력 없는 완료 작업은 재시도할 수 없었음
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`
+- 영향: 로컬 자막 작업 이력 5건이 모두 `failed`이고 `restartable=false`여서 어디에서도 다시 실행할 수 없었음. 출력이 사라진 완료 다운로드도 요청 기록이 없으면 `다시 받기`가 붙지 않았음
+- 확인된 원인: 종료 상태 전이에서 `<id>.request.json`을 삭제했고, `restartable`은 이 파일 존재만 확인하며, 호스트 재시작 경로도 같은 파일만 읽었음. 자막 화면은 액션을 cancel/pause/resume으로만 필터했음
+- 조치: 새 정책을 만들지 않고 기존 2시간 보존 창(`SUBTITLE_ACTIVE_MAX_AGE_MS` / `MAX_ACTIVE_AGE_MS`)을 재사용함. 실패한 자막 요청과 종료된 미디어 요청을 제한적으로 보존하고 기존 retry 커맨드로 재실행함. 완료·취소된 자막 기록은 즉시 정리하고, 보존 창이 지나면 요청 파일을 제거함. 로컬 자막은 원본 미디어 검증에 실패하면 Retry를 노출하지 않음
+- UI: `SubtitlesView.svelte`에 `같은 설정으로 다시 생성`, `QueueView.svelte`에 `다시 받기` 라벨을 추가함
+- 변경 파일: `native-host/src/main.rs`, `native-host/src/job_store.rs`, `companion-tauri/src-tauri/src/subtitles.rs`, `companion-tauri/src-tauri/src/commands/jobs.rs`, `companion-tauri/src-tauri/src/model.rs`, `companion-tauri/ui/src/lib/routes/SubtitlesView.svelte`, `companion-tauri/ui/src/lib/routes/QueueView.svelte`, `companion-tauri/ui/src/lib/stores/subtitles.ts`
+- 회귀: 실패 자막 보존·재실행·만료, 로컬 자막 재시도 가능, 원본 미디어 부재 시 Retry 억제, 완료 미디어 보존 기록 경로를 각각 덮음
+- 남은 검증: 실제 원격 자막 재생성과 실제 재다운로드 완료는 네트워크 작업 제외로 실행하지 않음(`NOT_RUN`)
+
+### INC-2026-09-19-052 — 보관함 미갱신, Telegram 상태 오진, 설정·복구 진입점 부재
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`
+- 영향: 보관함을 열어둔 채 다운로드가 끝나면 새 파일이 나타나지 않았고, Telegram 탭은 구성 요소 실행 파일이 없는데도 "설정 필요"로 안내해 원인을 오진했으며, 앱 안에 설정 화면이나 복구 경로가 없었음
+- 확인된 원인: 보관함은 마운트 시 1회만 조회했고, Telegram 분기는 `telegramConfigured`만 검사해 `executableAvailable`을 구분하지 않았으며, 봇 토큰·채팅 ID 입력 경로는 `aura-media-cloud.exe --configure-telegram` CLI뿐이었음
+- 조치: 보관함을 5초 가시 창 주기로 갱신하고 창이 포그라운드로 돌아오면 즉시 재조회하며, 기존 항목 순서·검색·필터·선택·스크롤을 유지한 채 `새 항목 N개` 안내로 알림. Telegram 상태를 `구성 요소 없음`/`설정 필요`/`사용 가능`으로 분리하고 탭 활성화 시 재확인함. 설정 화면에서 토큰과 저장소 채팅 ID를 저장하고(DPAPI 파일 계약 유지) 구성 요소 설치/복구를 실행하도록 함. 토큰은 메모리 → Tauri IPC → agent stdin으로만 전달하고 제출 직후 UI 상태에서 지움
+- 설치 소스 해석 순서: 매니저 옆 정상 바이너리 → 제한된 로컬 개발 빌드 경로 → 앱 디렉터리의 `Aura-Media-Companion-*-win-x64.exe` → 사용자가 직접 선택한 로컬 실행 파일. 로컬 소스가 없으면 재설치가 필요하다고 알리고 네트워크 다운로드는 하지 않음
+- 변경 파일: `companion-tauri/ui/src/lib/stores/library.ts`, `companion-tauri/ui/src/lib/routes/LibraryView.svelte`, `companion-tauri/ui/src/lib/stores/cloud.ts`, `companion-tauri/src-tauri/src/commands/cloud.rs`, `companion-tauri/src-tauri/src/lib.rs`, `companion-tauri/ui/src/lib/api.ts`, `companion-tauri/ui/src/lib/routes/SettingsView.svelte`, `companion-tauri/ui/src/App.svelte`
+- 별건 수정: `companion-architecture.test.mjs`의 `"telegram": false` 단언이 실제 Telegram Bot API 공급자 커밋(`e98c06f`, 2026-09-12 15:52)보다 먼저 작성된 낡은 계약이었음. `protected_config_available` 기반 fail-closed와 토큰 비내장을 확인하는 단언으로 교체함
+- 회귀: 잘못된 토큰/채팅 ID 사전 거절, 256바이트 초과 payload 거절, agent 실행 실패 시 토큰·채팅 ID 비노출 테스트
+- 남은 검증: 실제 DPAPI 저장과 실제 설치 파일 실행은 자격 증명·설치 상태 보호를 위해 실행하지 않았음. Telegram 업로드·다운로드·삭제는 `NOT_RUN`
+
+### INC-2026-09-19-053 — 자막 "끄기"가 첫 트랙으로 되돌아감
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`
+- 영향: 재생 화면에서 자막을 끄면 즉시 첫 트랙으로 되돌아가고 셀렉트 표시가 실제 상태와 어긋났음. 트랙이 하나면 같은 세션에서 자막을 다시 켤 수 없었고, 뷰를 전환하면 선택이 사라졌음
+- 확인된 원인: `selectedSubtitleFile`이 컴포넌트 로컬 상태였고, 현재 값이 트랙 목록에 없으면 첫 트랙으로 되돌리는 이펙트가 "사용자가 끔"과 "아직 선택하지 않음"을 구분하지 못했음
+- 조치: `playbackChoice`를 `unset`/`off`/`track` 세 상태로 분리하고 자막 스토어에 보관함. 표시와 오버레이는 `resolveSubtitlePlayback` 결과만 사용하며, 트랙 목록이 바뀌면 사라진 트랙은 `unset`으로 되돌리되 `off`는 유지함. 자막 작업 목록은 문자열 추측 대신 `jobType === "subtitle"`로 분류함
+- 변경 파일: `companion-tauri/ui/src/lib/stores/subtitles.ts`, `companion-tauri/ui/src/lib/routes/PlayerView.svelte`, `companion-tauri/ui/src/lib/routes/SubtitlesView.svelte`
+- 남은 검증: 실제 재생 중 끄기/켜기 클릭과 뷰 전환 후 유지 여부는 확인하지 않음. 재생 선택은 세션 범위이며 파일별로 저장되지 않음
+
+### INC-2026-09-19-전체 검증 (위 048–053)
+
+- `cargo test --manifest-path native-host/Cargo.toml`: 73 passed / 0 failed
+- `cargo test --manifest-path companion-tauri/src-tauri/Cargo.toml`: 54 passed / 0 failed
+- `npm --prefix companion-tauri/ui run check`: 0 errors / 0 warnings; 프로덕션 빌드 성공
+- `npm run test:shipped`: 364 tests, 347 pass / 0 fail / 17 skip
+- 두 Rust 매니페스트 `cargo fmt --check`와 `git diff --check` 통과
+- 확장 프로그램 소스는 변경하지 않아 `manifest.json` 버전과 `artifacts/chrome-web-store/staging-pro`는 갱신하지 않았고 개발 ZIP도 만들지 않음
+- 실브라우저·실사이트 검증은 `NOT_RUN`이므로 이 묶음은 `RESOLVED`가 아님
+
+### INC-2026-09-19-통합검증-추가 — 048–053 변경 통합 재검증
+
+- 일시: 2026-09-19 Asia/Seoul
+- 범위: Native Host, Companion Tauri, cloud-agent, companion-contract, Companion UI, 배포 대상 Node 계약, UX 정량 스킬
+- 결과: `PASS`
+- 검증: `native-host` 73개, `companion-tauri/src-tauri` 54개, `cloud-agent` 11개, `companion-contract` 8개 테스트 통과; `npm --prefix companion-tauri/ui run check` 0 errors/0 warnings; UI production build 성공; `npm run test:shipped` 364개 중 347 pass / 0 fail / 17 skip; `companion-architecture.test.mjs` 11 pass; 두 Rust `cargo fmt --check`, `git diff --check`, UX 스킬 `klm_score.py selftest` 통과
+- 실행 계약: 빌드된 `aura-media-cloud.exe --status`가 protocol 1, `cloud-job-v1`, mock/telegram provider를 반환함. 현재 사용자 데이터에 보호된 Telegram 설정이 있어 이 로컬 실행 파일의 Telegram capability가 `true`로 관찰됨
+- 실앱 상태: 설치된 Companion Manager/Host는 2026-09-05 빌드이며 최신 변경을 포함하지 않음. 설치 디렉터리에는 `aura-media-cloud.exe`가 없어 이번 변경의 실제 Tauri 화면·Telegram 업로드/다운로드/삭제 클릭스루는 실행하지 않음
+- 자동화 상태: CUA 화면 표면 초기화가 `failed to write kernel assets: 지정된 경로를 찾을 수 없습니다`로 실패해 실제 행 클릭·설정 저장·자막 끄기/켜기 화면 검증은 `NOT_RUN`
+- 판정: 소스와 계약 통합은 통과했지만 실앱 변경은 `CODE-FIXED / LIVE-UNVERIFIED` 유지. `CHUNK_BYTES = 45 * 1024 * 1024`와 `CATALOG_VERSION = 1`은 별도 텔레그램 복원 호환성 이슈로 남아 있음
+
+- 최신 설치 후속 확인(2026-09-19): UI production build, Manager release, Native Host release, cloud-agent release를 다시 생성해 설치본에 반영함. 세 실행 파일 모두 소스와 설치본 SHA-256이 일치하고, 설치된 `aura-media-cloud.exe --status`가 `cloud-job-v1` 및 Telegram provider를 반환함. Manager는 최신 설치 경로에서 기동 확인
+- GitHub `coseung2/segma-player#7`의 썸네일 이슈를 확인함. 현재 `companion-tauri/ui/src/app.css`의 `.media-thumb-image`는 컨테이너 전체 크기와 `object-fit: cover`를 사용하고, 목록 레이아웃도 별도 크기를 지정함. 실제 Tauri 그리드·목록 화면은 CUA 초기화 실패로 `NOT_RUN`이므로 이슈는 열린 상태로 유지
+
+### INC-2026-09-19-054 — 보관함 썸네일 카드가 그리드 열 폭을 채우지 못함 (GitHub #7)
+
+- 상태: `RESOLVED`
+- 증상: 보관함 로컬 탭에서 미디어 카드의 썸네일이 카드 영역보다 훨씬 작게 표시되고 주변에 빈 여백이 생김. 재생·크기·별점 등 나머지 카드 요소는 정상 폭을 차지함
+- 재현: 설치된 0.4.75 매니저에서 보관함을 열면 그리드 열 폭은 236px인데 썸네일 카드만 왼쪽 위에 작게 그려짐. 관측 당시 두 개의 테스트 미디어가 있는 상태에서 UIA 좌표로 카드 59x34, 픽셀 스캔으로 어두운 카드 배경이 같은 영역에만 존재함을 확인함
+- 확인된 원인: `.media-thumb`가 `display: grid`와 `aspect-ratio: 16 / 9`만 지정하고 폭을 지정하지 않았음. Chromium/WebView2는 `<button>`을 `display: grid`로 바꿔도 블록 레벨로 늘리지 않아 버튼이 내용 크기로 줄고, 그 작은 폭에서 `aspect-ratio`가 높이를 파생시킴. WebView2 CDP 측정에서 계산된 폭이 `42.66px`, 높이가 `24px`였고 `display`는 `grid`, `aspect-ratio`는 `16 / 9`로 확인됨
+- 조치: `companion-tauri/ui/src/app.css`의 `.media-thumb`에 `width: 100%`를 추가함. 그리드 보기와 목록 보기 모두 배정된 열 폭을 따름
+- 변경 파일: `companion-tauri/ui/src/app.css`, `companion-tauri/ui/src/lib/library-thumbnail-layout.test.mjs`
+- 회귀: `library-thumbnail-layout.test.mjs`가 썸네일 카드의 `width: 100%`·`aspect-ratio`·`display`, 썸네일 이미지의 `object-fit: cover`와 컨테이너 채움, 목록 보기의 150px 썸네일 열을 각각 단언함
+- 실검증: 설치본 매니저 SHA-256 `ae4aca9e1ab9ab22980349f25221b2f069334ddf709a7cb97e9385532f37bc8b`로 재실행 후 WebView2 CDP로 측정해 그리드 보기 썸네일 `236x133`, 목록 보기 `150x84`, `HAS_IMG=yes`를 확인함. 같은 화면의 픽셀 스캔에서도 컬러 썸네일 영역이 수정 전 32x32 블록 1개에서 수정 후 약 160x190 영역으로 확대됨
+- 남은 범위: 브라우저 확장 감지·다운로드·자막 표면은 이번 변경과 무관하며 재실행하지 않음
+
+### INC-2026-09-19-055 — 신규 UI 기능 실사용 점검 (그림자 관찰 포함)
+
+- 상태: `CODE-FIXED / LIVE-VERIFIED` (점검 기록)
+- 방법: 설치된 최신 매니저를 실제로 실행하고, Windows UI Automation 좌표 클릭과 WebView2 CDP `Runtime.evaluate`로 화면 상태를 측정함. CUA 표면이 `failed to write kernel assets`로 초기화되지 않아 대체 경로를 사용했고, CDP는 로컬 루프백 디버그 포트를 일시적으로 사용한 뒤 정상 실행으로 되돌림
+- 확인됨: 사이드바 `Companion 연결됨`이 실제 상태 조회 결과로 표시됨. 보관함 5초 폴링이 새 파일을 자동 반영하고 `새 항목 1개가 추가되었습니다.` 안내와 `확인되지 않은 다운로드 11개가 있습니다.` 안내를 표시함. 텔레그램 탭이 `사용 가능`으로 정확히 표시되고 최근 전송 3건(업로드·다운로드·삭제, `segma-live-check.bin`)을 나열함. 설정 화면에 `텔레그램 보관함` 그룹과 `봇 토큰`·`저장소 채팅 ID` 입력, 저장 버튼이 있고 빈 값에서는 저장이 비활성임. 다운로드 화면이 완료+출력 없음 작업을 `파일 없음`으로 표시함
+- 미확인 1: 다운로드 화면의 `다시 받기` 버튼이 대상 작업에 없음. `jobs` 디렉터리에 `.request.json`이 0건이고 남은 기록이 모두 2026-09-12 이전이라 2시간 보존 창을 이미 지난 상태임. 새 작업에는 나타나야 하지만 실패·완료 이력이 오래된 경우 재시도 경로가 없다는 뜻이므로 보존 정책 결정이 필요함
+- 미확인 2: 텔레그램 실제 업로드·다운로드·삭제와 자막 재생성은 네트워크 작업이라 실행하지 않음
+- 그림자 관찰: 썸네일 생성은 정상이며 14초 테스트 영상에서 JPG가 생성되고 화면에 표시됨. 다만 썸네일 인자는 `-ss 3` 고정이라 3초 미만 미디어는 썸네일을 만들지 못함(이번 수정 범위 밖, 미조치)
+
+### INC-2026-10-03-056 — 시크바 프레임이 버려지고 로딩 상태가 보이지 않음
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `CODE-FIXED / LIVE-VERIFIED (isolated native app)`; 사용자 설치본 반영 전.
+- 재현: 로컬 영상을 열고 시크바 위에서 같은 0.5초 구간 안의 포인터를 계속 움직이거나 끝부분으로 이동. 기존 코드가 모든 움직임마다 진행 중 응답을 무효화하고 이미지가 없으면 버블도 숨김. EOF 1ms 앞을 요청하면 마지막 프레임 이후 시각이 선택되어 JPEG가 생기지 않음.
+- 조치: 동일 프레임 구간 병합, 실행 1개/최신 대기 1개, 선택 변경·이탈 시 오래된 응답 차단, 로딩/실패와 실제 프레임 시간 표시, 키보드·터치 입력 연결. 끝 시각을 0.5초 캐시 구간만큼 앞당김. 시크바 입력 높이 44px.
+- 변경: `companion-tauri/ui/src/lib/routes/PlayerView.svelte`, `seek-preview.ts`, `app.css`, `companion-tauri/src-tauri/src/media.rs`; 관련 scheduler/input/native 회귀 테스트.
+- 검증: UI 관련 14개와 Rust 미디어 12개 통과. 실제 bundled ffmpeg로 기존 EOF 실패 재현, 1.52초/0.04초 영상의 수정된 JPEG 생성·디코딩 통과. 격리된 실제 Tauri `0.4.79` 창에서 CUA 클릭으로 12초 합성 영상을 6초로 탐색하고 미리보기 이미지·시간 표시를 확인. 사용자 영상은 변경하지 않음.
+- 남은 검증: 최종 설치본, 연속 드래그/파일 전환/재생 중 탐색, 터치 실기기. 확장/사이트 표면은 이 수정으로 검증되지 않음.
+
+### INC-2026-10-03-057 — 다운로드 기록 삭제 기능 부재와 취소 요청 상태 혼동
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `CODE-FIXED / LIVE-UNVERIFIED` (개별 삭제는 격리 네이티브에서 확인).
+- 재현: 완료·실패·취소된 행에 기록 삭제가 없으며, 취소 클릭 직후 단순 요청 성공 안내 뒤 취소 버튼이 다시 활성화됨. 조회 응답 순서도 보장하지 않아 삭제 직전 조회가 나중에 도착할 경우 오래된 목록을 복구할 수 있음.
+- 원인: 기록 삭제 API/UI가 없고, 기존 단일 action 문자열은 IPC 요청 완료만 추적함. pending 상태와 최신 목록 응답 판별이 없었음.
+- 조치: 파일을 보존하는 terminal media history 삭제 API, 개별 삭제/현재 필터의 기록 정리, 취소됨 필터와 상태별 개수. 취소·일시정지·재개·재시도는 실제 작업 상태 변경까지 pending 표시하며 중복 클릭 차단. 20초 미확인은 지연 오류로 표시하고 새로 조회 가능. 오래된 조회 결과 차단.
+- 변경: Native Host `job_store.rs`, `main.rs`; Companion `jobs.rs`, `commands/jobs.rs`, `lib.rs`; UI `api.ts`, `stores/jobs.ts`, `routes/QueueView.svelte`, `queue-policy.ts`, `app.css`.
+- 회귀: 부모 queue/store 행동 테스트 6개 통과(취소 접수≠완료, 중복 클릭, 늦게 도착한 조회, 삭제 실패 보존, 활성/일시정지/자막 보호). worker Native Host 82개와 Companion jobs 11개 통과. Windows 격리 stdio probe는 일시정지 취소/원본 보존/기록 삭제/30초 이후 live-owner 보호 통과.
+- 실검증: 격리된 Tauri `0.4.79` 창에서 취소 테스트 행의 기록 삭제 버튼 클릭 후 3→2개, 해당 state 파일 제거 및 합성 MP4 보존 확인. 현재 실제 사용자 이력은 삭제하지 않음. 앱 연결 표시는 실제 테스트 Native Host 응답을 사용.
+- 남은 검증: 일괄 정리, 재시작 후 유지, 최종 설치본과 실행 중 HTTP/HLS/yt-dlp 취소·파일 잠김 해제. 고아 러너 복구는 기존 `INC-2026-09-19-049`와 연결하되 실행 중 전송 정리는 별도 확인 중.
+- 06:30 후속(사용자 보고): 자막 작업 기록은 삭제할 수 없었음. Host 삭제가 `media`만 허용했고 자막 화면에 삭제 버튼이 없었음. 완료·실패·취소된 `subtitle` 기록도 같은 runner claim 보호 아래 삭제하도록 확장(실행 중 자막은 건너뜀). 개인 요청 파일 `.subtitle.request.json`까지 함께 제거하고, 생성된 자막 파일과 영상은 지우지 않음. 자막 화면에 행별 `기록 삭제`와 확인창이 있는 `기록 정리` 추가, 삭제 안내 문구는 "저장된 영상과 자막 파일은 그대로 있습니다."로 변경.
+- 회귀: host 기록 삭제 테스트에 완료 자막(삭제)·실행 중 자막(보존) 추가, UI 정책 테스트에 자막 삭제 가능/실행 중 불가 추가. Native Host 93 passed / 1 ignored, UI 8 passed, svelte-check 0/0. 새 host/manager를 설치 경로에 반영하고 사용자 manager 창을 재시작했음(활성 작업 0개 확인 후). 설치 host에 기록 삭제 요청을 보내 정상 응답 확인. 실제 자막 화면 클릭 검증은 이번 세션의 화면 조작 도구가 Windows 앱을 노출하지 않아 `NOT_RUN`.
+
+### INC-2026-08-30-046 후속 — Gogoanime 부수 영상이 본편보다 먼저 선택됨 (2026-10-03)
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED`. Chrome headless + Aura AdBlock on + 확장 `0.4.78` 전체 실검사에서 Episode 8과 Bleach Episode 4 모두 bkcdn MP4 score 97이 본편 Googlevideo score 84를 앞섬. `artifacts/live-media-baseline-all-on.json`, `artifacts/gogo-media-origin-evidence.json`.
+- 확인: 실제 `/player/` JW Player의 Googlevideo 영상 길이 1434.97초. 기존 0.4.52 Googlevideo 억제 해제와 재스캔 수정은 후보 유실을 고쳤지만 함께 감지된 부수 영상의 우선순위까지 제한하지 않았음.
+- 조치: Gogoanime profile이 검증된 본편 호스트 Googlevideo/Megaplay를 선언하고 ranking이 그 사이트에서만 우선순위 가산. 일반 CDN을 전역 광고로 차단하지 않음. 기존 fixture에 더 강한 부수 후보를 추가하고 타사이트/가짜 suffix 비적용 회귀 추가. Bleach의 현재 Blogger 경로와 기존 Megaplay 경로를 live 기대값에서 명시적으로 구분.
+- 변경: `sites/gogoanime/profile.js`, `regressions.js`, `ranking.test.mjs`, `sites/profile.js`, `candidate-ranking.js`, `site-regression.test.mjs`, `scripts/live-media-smoke.mjs`. 공통 전송 엔진은 이 사이트 수정에서 변경하지 않음.
+- 회귀: media-site 46개 및 보강된 site/ranking 31개 통과. 수정된 staging의 본편 선택·실제 저장은 후속 검증 필요.
+
+- 02:04 후속: 수정 staging `0.4.79`에서 Episode 8 본편이 선택되고 extension→installed host `0.4.73` 경로로 86,888,236바이트 파일 저장, ffprobe에서 H.264/AAC·1434.97초 확인. Bleach는 선택 이후 Google SABR 요청 혼입과 별도 Windows 실행 오류가 발견돼 사이트 전체는 아직 `LIVE-UNVERIFIED` 유지.
+
+### INC-2026-10-03-058 — 다운로드 중 Windows 프로세스 확인 실패와 취소 후 파일 정리
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `INVESTIGATING`; 활성 실행 경로 수정·회귀 작업 진행 중.
+- 실제 재현: Chrome headless + staging `0.4.79` + installed host `0.4.73`, AnimePahe progressive는 85,983,233/263,183,344바이트, Gogoanime Bleach는 92,274,689/97,218,681바이트까지 받은 뒤 `미디어 도구 종료 상태를 확인하지 못했습니다.` / `액세스가 거부되었습니다. (os error 5)`로 실패. 실패 작업의 완성 MP4는 없음.
+- 증거: `artifacts/live-download-authoritative-evidence.json`, 마지막 `artifacts/live-media-0.4.79-on-focused.json`. 두 사이트에서 동일 증상이라 단일 사이트 설정 문제로 취급하지 않음. 정확한 Windows 오류 원인은 아직 미확정.
+- 관련 사용자 증상: 취소가 지연되고 일부 파일이 재부팅 전까지 삭제되지 않음. 원래 `.cancel` 마커만 기록하는 Companion 경로와 실행자/자식 프로세스/partial 파일 소유권·핸들 종료 순서를 확인 중. 기존 고아 claim 건은 `INC-2026-09-19-049`, 원래 pause/retry 도입은 `INC-2026-08-24-016`.
+- 독립 검토: token 없는 `--run-job`의 PID 0 lease, paused 취소의 partial 잔존, history 삭제 중 부분 실패로 retry request 소실 가능성이 확인되어 수정자에게 전달. 기존 2시간 요청 보존은 `INC-2026-09-19-051`의 명시적 정책으로 유지하고 UI에 원본 페이지에서 다시 받는 경로를 안내함.
+- 최종 변경 파일·프로토콜 회귀·새 host 설치본 실검증 결과는 같은 기록에 이어 적을 것. 사용자 원본 파일은 테스트에서 삭제하지 않음.
+
+- 원인 추적 정정: 기존 progressive 경로(`git show HEAD:native-host/src/media_download.rs` 823/846/921/961)는 `update_state`/`update_transfer_state`의 실패도 `StatusError`로 분류하여 "미디어 도구 종료 상태" 문구를 표시했음. 해당 문구만으로 프로세스 종료 오류라고 단정할 수 없고, 전송 중 상태 JSON 게시 실패가 직접 조사 대상임. 진행 상태 저장 경합을 Windows 파일 잠금 fixture로 재현·검증하도록 범위를 확장함. AV 등 특정 잠금 주체는 확인되지 않았음.
+
+- 02:37–02:40 수정/검증: HTTP 실행을 취소 가능한 소유 프로세스로 분리하고 Windows Job Object에 실행 전 자식을 배정함. 취소 시 하위 yt-dlp/ffmpeg·HTTP 연결 종료를 기다린 뒤 reader를 합류하고 작업별 output workspace만 정리. 완료 파일은 기존 파일을 대체하지 않고 publish. 일시정지는 workspace를 보존, 취소·실패는 정리, 정리 실패는 `download-cleanup-failed`로 유지하여 기록 삭제로 복구 단서를 잃지 않게 함. token 없는 러너의 실제 PID 기록, Native Messaging pipe 상속 제거, 기록 삭제 부분 실패 복원도 포함.
+- 상태 저장: Windows 원자 교체의 error 5/32만 최대 2초 재시도. 실제 파일을 잠갔다 푸는 회귀에서 일시 오류 복구와 영구 오류 시 이전 state 보존을 각각 통과. 정확한 실제 PC 잠금 주체는 여전히 미확인; 상세 `artifacts/lifecycle-probe/state-origin-evidence.json`.
+- 변경: `native-host/src/job_store.rs`, `main.rs`, `media_download.rs`, `youtube.rs`, Companion `jobs.rs`/`commands/jobs.rs`. 회귀 부모 실행: Native Host 91 passed / 1 helper ignored; Tauri 56 passed / 1 native media test separately run earlier.
+- Windows 프로세스 실검증(합성 프로토콜): 부모가 release 바이너리로 `artifacts/lifecycle-probe/active-probe.mjs` 독립 실행. HTTP headers/body/ranges 취소 39–52ms, YOUTUBE/HLS_MASTER/HLS_MEDIA/DASH 자식 트리 취소 59–65ms; 소유 프로세스·연결 모두 종료, 부분 폴더 제거, 기존 sentinel 보존, cleanup failure→retry 및 파일 충돌 보호 통과. `artifacts/lifecycle-probe/active-node-1790962810477/result.json`. 실제 사이트 파일 저장/취소와는 별도 증거.
+- 설치: 개발 버전 `0.4.79`, staging 59 files, ZIP 미생성. Host SHA256 `1083E3531A02F31FD168379582142064A837D975CC18E5457BEC109CCA3F06EC`; Manager `9F21BB432627C3D6C1A51B88E18C0C4AC57682B745F6B7956322883862F61A1A`. 설치본 동일 해시 확인; rollback 실행 파일 `artifacts/runtime-backup-20261003-024045`. 설치 중 구 PowerShell의 Get-FileHash 부재로 host 복사 후 검증 단계가 멈춰, 원본 backup을 보존하고 .NET SHA256으로 재검증 및 manager 복사를 완료함. 설치 registry/credentials/user media는 변경하지 않음.
+- 새 설치본 실제 사이트 재실행 및 최종 독립 리뷰 진행 중이므로 전체 사건은 미해결 상태 유지.
+- 02:43 설치본 재실행: AnimePahe 263,183,344바이트(1280x720, 1430초)와 Gogoanime Bleach 97,218,681바이트(640x360, 1472초)가 이전 os error 5 없이 완료되고 bundled ffmpeg 전체 디코딩 통과. 링크 입력 직접 MP4(1,128,375바이트)와 YouTube 19초 영상도 완료·전체 디코딩 통과 (`artifacts/live-media-on-focused-20261003-024112.json`, `artifacts/popup-handoff-1790962921148.json`).
+- 독립 리뷰 P1(06:00 반영): HEAD의 YouTube 기록은 `jobType`이 없어 새 취소·기록 삭제·고아 복구에서 제외되고, Companion DTO도 `null`이라 Queue에 보이지 않았음. `job_store::is_media_job`(미지정 또는 media)로 세 경로를 통일하고 DTO는 미지정을 `media`로 정규화, subtitle은 그대로 제외. 회귀: 실제 `jobType` 없는 JSON의 paused 취소와 completed 기록 삭제, DTO 정규화. Native Host 93 passed / 1 ignored, Tauri 56 passed.
+- 테스트 fixture 수정: Windows에서 nonblocking listener로 accept한 소켓이 nonblocking을 상속해 read timeout이 동작하지 않아 `stalled_http_range_cancellation...` fixture가 요청을 끝까지 읽지 못하는 경우가 있었음. 제품 코드 회귀가 아니며 accept 직후 blocking으로 되돌려 해결.
+
+### INC-2026-10-03-060 — AVsee 대용량 파일이 병렬 요청 제한(HTTP 429)으로 실패
+
+- 일시: 2026-10-03 05:49 Asia/Seoul. 상태: `CODE-FIXED / LIVE-UNVERIFIED`.
+- 사용자 보고: `https://02.avsee.is/javc/2165198?page=5`가 다운로드되지 않음. 처음에는 페이지를 벗어나서 생긴 문제로 생각했으나 실제로는 페이지와 무관하게 실패.
+- 증거: job `3600c589`, 확장 0.4.79→host 0.4.79, PROGRESSIVE, `data.cdn.avsee.is` 1,159,279,811바이트 중 58,720,257바이트 이후 `progressive range HTTP 429`로 실패. 감지·인계·전송 시작은 정상. 화면 이탈은 원인이 아님: 다운로드는 브라우저와 분리된 Companion 프로세스에서 실행되고 확장에는 탭 종료 시 작업 취소 경로가 없음.
+- 확인된 원인: `INC-2026-08-30-046`(0.4.53)에서 도입한 병렬 2 MiB range 전송이 처리량만 보고 동시 요청을 늘림. 429/503은 일반 오류와 같이 250/500ms 재시도 3회 후 전체 작업 실패로 처리되어, 서버가 동시 연결을 제한하면 대용량 파일이 수십 MB 후 실패함.
+- 조치: range 응답 429/503을 별도 `Throttled`로 분리. 배치 컨트롤러가 도착한 연속 구간은 저장하고, 동시 요청을 절반으로 줄이고 그 상한을 유지, `Retry-After`(최대 30초) 또는 지수 백오프 동안 취소·일시정지를 계속 확인한 뒤 같은 바이트부터 재개. 최대 8회 연속 제한 후에만 명확한 메시지로 실패. 동시 요청 1까지 허용. 대기 중 상태 문구 `서버 요청 제한으로 잠시 기다리는 중…`.
+- 변경: `native-host/src/media_download.rs`(공통 progressive 전송; 단일 사이트 설정으로는 해결 불가한 전송 계층 결함으로 판단), `sites/avsee/regressions.js` live fixture 추가.
+- 회귀: 동시 요청이 2개 이상이면 429를 주는 로컬 HTTP 서버에서 3개 chunk+7바이트 파일이 바이트 단위로 정확히 완료되고 429가 실제로 발생했음을 확인. backoff/동시성 하한 단위 검사. Native Host 93 passed / 1 ignored. 새 host를 설치 경로에 반영(SHA256 `4620BBD6…D483`, 이전 실행 파일은 같은 폴더 `aura-media-companion.replaced-060754.exe`).
+- 06:17 실검증: 같은 페이지를 isolated Chrome + staging 0.4.79 + 새 host로 재실행, 1,541,966,556바이트(1280x720, 7093.8초) 완료·전체 디코딩 exit 0. 이전 실패 지점(약 59 MB)을 넘어 완료됐지만, 표본 상태에 대기 문구가 없어 이번 실행에서 429가 실제 발생했는지는 확인하지 못함. 429 경로 자체는 로컬 서버 회귀로 검증. 사용자 Chrome 프로필 경로는 미검증이라 `CODE-FIXED / LIVE-VERIFIED (isolated browser)`.
+
+### INC-2026-10-03-059 — Blogger의 SABR 세션이 다운로드할 MP4를 덮어씀
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `CODE-FIXED / LIVE-UNVERIFIED` (후속은 유효 MP4 전송까지 확인).
+- 재현: Gogoanime Bleach 실제 다운로드가 `progressive response is not media (application/vnd.yt-ump)`로 실패. 보존 요청을 값 노출 없이 확인하니 itag 없는 `sabr=1` URL이었고, 서명 범위에 sabr가 포함되어 있음.
+- 확인된 원인: media-element fallback이 프로토콜 응답을 모두 progressive로 취급하고 candidate key가 host/path만 사용하여 같은 `/videoplayback`의 영상 ID·itag와 SABR 세션을 합침. 나중 관측된 세션 URL이 기존 파일 URL을 덮어씀.
+- 조치: `providers/googlevideo.js`에서 SABR/UMP를 일반 파일 후보에서 제외하고 signed URL은 재작성하지 않음. Googlevideo identity에 영상 ID·itag·mime만 사용하여 서명 갱신은 같은 형식에 갱신하고 다른 영상·품질은 분리. Gogoanime/AnimePahe profile과 provider registry/배포 allowlist 연결.
+- 변경: `candidate.js`, `providers/googlevideo.js`, `providers/ids.js`, `providers/registry.js`, 해당 site profiles, `scripts/store-runtime-files.json`, provider 회귀 테스트.
+- 회귀: provider/candidate/ranking/site 74개 통과. 후속 실제 Gogoanime 요청은 MP4 97,218,681바이트 중 92,274,689바이트까지 전송되어 이전 UMP 오류는 미재현했지만 별도 INC-058로 저장 완료 실패. 이 부분만으로 사이트 전체 성공을 주장하지 않음.
+
+- INC-056/057 추가 네이티브 검증: `artifacts/native-ui-qa/ui-evidence.json`에 시크바 가운데 이미지, 키보드 End의 끝부분 이미지, 개별 기록 삭제, 2개 일괄 정리, 앱 종료·재실행 후 0개 유지 확인을 저장. 합성 MP4는 계속 존재. 사용자 설치본은 아직 갱신 전.
+
+### INC-2026-09-19-052 후속 — 첫 보관함 로딩과 폴링 경합으로 잘못된 새 항목 알림 (2026-10-03)
+
+- 상태: `CODE-FIXED / LIVE-UNVERIFIED` (기존 잘못된 알림은 실제 네이티브에서 재현).
+- 재현: 격리 `0.4.79` 앱에서 기존 합성 MP4 하나만 있는 보관함을 처음 열면 `새 항목 1개`가 나타나며, 재생→보관함→휴지통 이동으로 파일이 실제 삭제되고 목록이 비어도 알림은 그대로 남음. 파일 잠김 자체는 이 재생/삭제 경로에서 재현되지 않았고 휴지통 이동은 성공.
+- 확인된 원인: mount의 초기 load 직후 즉시 silent poll이 sequence를 앞질러 기존 파일을 새 파일로 계산함. 새 항목 수는 누적 정수라 제거된 파일을 추적하지 못함.
+- 조치: 최초 poll 예약 및 초기 loading 중 silent 요청 억제. 미확인 파일명을 추적하여 새 응답과 교집합을 취하고, 삭제/폴더 변경/확인 시 실제 항목에 맞춰 알림 갱신.
+- 변경: `companion-tauri/ui/src/lib/stores/library.ts`, `library-store.test.mjs`.
+- 회귀: 실제 store의 지연 IPC/초기 로딩 경합 및 추가→유지→삭제 행동 테스트 2개 통과. 수정 UI의 최종 네이티브 재검증은 설치 빌드 후 수행.
+
+### INC-2026-10-03-061 — 일본어 자막 작업이 빈 WEBVTT로 끝나 `subtitle-service-invalid-response`로 실패
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `CODE-FIXED / LIVE-VERIFIED (app, isolated profile)` — 16:00 항목 참고.
+- 사용자 보고: 자막 작업 기록에서 CAWB-050(7,093초) ja→ko 작업이 65%에서 `subtitle-service-invalid-response`로 실패. 같은 요청에서 실패한 자막 기록을 삭제할 수 없던 문제도 함께 처리.
+- 증거: Companion job `subtitle-1790976505789-1`, remote call `fc-01M3Z8AWTS6MN6YMH0W4B166K1`. ignored 진단 테스트 `diagnose_remote_subtitle_job`로 원격 결과를 조회한 결과, 서비스는 완료했지만 `vtt="WEBVTT\n"`(cue 0개)를 반환했고 앱의 `valid_vtt`가 이를 거부함. Modal 로그에 `Whisper did not predict an ending timestamp`.
+- 확인된 원인: `litagin/anime-whisper`는 timestamp 토큰 없이 학습된 모델(generation config `return_timestamps: False`)이라 long-form `return_timestamps=True`가 끝 시간이 `None`인 chunk를 만듦. `chunks_to_vtt`는 끝 시간이 없는 chunk를 모두 버려 영상 전체가 빈 자막이 됨. 화자 분리(pyannote 약관 미승인 `RepositoryNotFoundError`)는 별개이며 ASR 실패 원인이 아님.
+- 조치: 일본어는 모델 timestamp 대신 노이즈 바닥 대비 6 dB 에너지로 발화 구간을 찾고 짧은 쉼(0.5초)은 잇고 이웃 발화를 최대 15초 창으로 묶어 16개씩 배치 전사(`speech_windows`/`transcribe_windows`). 끝 시간이 없는 chunk는 다음 chunk 시작 또는 6초에서 닫음. 문장부호만 있는 결과("...")는 cue에서 제외. cue가 0개면 완료 대신 `subtitle-no-speech` 오류를 반환하고 Companion이 "음성을 인식하지 못했습니다" 계열 문구로 표시. 앱 자막 화면에 "자막 생성은 영상의 처음 1시간까지 처리됩니다" 안내 추가(기존 1시간 상한은 Modal/앱 모두 유지, 1시간 초과 영상은 앞 1시간만 자막화됨).
+- 변경: `modal/asr_app.py`, `modal/test_asr_app.py`, `companion-tauri/src-tauri/src/subtitles.rs`, `companion-tauri/ui/src/lib/routes/SubtitlesView.svelte`, 자막 기록 삭제(`native-host` 작업 기록 허용, `SubtitlesView.svelte` 기록 삭제/기록 정리).
+- 회귀: Modal 단위 테스트 17개 통과(open timestamp 닫기, cue 0개, 문장부호 cue 제외, 무음 구간 분할·최대 길이, 창 전사 시간). 실제 영상 앞 10분 WAV 기준 창 78개·발화 435초/600초 커버.
+- 배포·실검증: `modal deploy modal/asr_app.py`(aura-japanese-asr) 2회. 배포된 GPU worker에 같은 영상 앞 10분을 직접 실행해 이전 0개 대신 한국어 cue 78개(161초)를 확인, 검증용 업로드 파일은 볼륨에서 삭제. 앱에서 같은 작업을 다시 생성하는 전체 경로는 아직 미실행.
+- 설치: Companion manager 재빌드(Tauri 56 passed / 2 ignored, svelte-check 0 errors) 후 설치 경로 교체 SHA256 `9CA31421…`, 이전 파일 `aura-media-manager.replaced-*.exe` 보존, 앱 재실행(PID 24064).
+
+### INC-2026-10-03-062 — 다시 검색이 이미 찾은 LuluStream 후보를 지움
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `CODE-FIXED / LIVE-VERIFIED (isolated headless browser)`.
+- 재현: 헤드리스 Chrome + staging 0.4.79, AdBlock on, `https://luluvdo.com/e/1mq6hx0bz91y`. 처음 감지에서 `cdn1029.cdn-tnmr.org/.../master.m3u8`(JW Player, HLS_MEDIA) 후보 1개가 생기지만 팝업 "다시 검색" 후 같은 후보 ID로 다운로드하면 `candidate-not-found`.
+- 확인된 원인: `popup.js`의 rescan이 먼저 `clear-tab`으로 탭 후보를 모두 지우고 감지기를 다시 깨움. 이미 manifest를 받은 플레이어는 다시 요청하지 않으므로, 네트워크로만 관측됐던 후보가 영구히 사라짐.
+- 조치: rescan에서 `clear-tab` 제거. 탭 이동(`tabs.onUpdated` loading+url)과 탭 닫기는 기존대로 후보를 정리.
+- 변경: `popup.js`, `popup.test.mjs`(사전 관측 manifest가 rescan 뒤에도 같은 ID로 남는지; 수정 전 실패·수정 후 통과 확인).
+- 실검증(헤드리스, AdBlock on): 같은 후보로 Companion 다운로드 완료, 279,410,571바이트, 1280x720, 1,279.9초, ffmpeg 전체 디코딩 exit 0. 테스트 하네스의 `unexpected-primary-player`는 fixture 기대값(`hlsjs`)과 실제 플레이어(`jwplayer`) 차이일 뿐 다운로드 실패가 아님.
+
+### INC-2026-10-03-063 — Level5(av19) HLS가 "Incorrect AES key length"로 실패
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `CODE-FIXED / LIVE-VERIFIED (isolated headless browser)`.
+- 재현: 헤드리스 Chrome + staging 0.4.79, AdBlock on, `av19-level5-iframe-session`(`https://av19t.com/bj/39141`). 후보 `k.vdnext.com/cast2/.../v.html`(Level5, HLS_MEDIA)는 정상 감지되지만 Companion yt-dlp가 `ERROR: Incorrect AES key length (938 bytes)`로 실패(이전 보고 988 bytes).
+- 확인된 원인: Level5의 `/v/session` 키 응답은 원본 키가 아닌 난독화 payload이고 페이지 플레이어 런타임(`decode_session`)만 풀 수 있음. 예전 확장 내 HLS 다운로더는 `decode-hls-key` 메시지로 원본 프레임에 키 해독을 요청했으나, `b6e6215`에서 Companion 다운로드로 전환하면서 호출부가 사라져 `decodeHlsKeyInSourceFrame` 정책과 `decode-level5-key` 수신부가 남은 채 사용되지 않음. Companion은 원시 payload를 키로 사용.
+- 추가 확인: Level5 키 URI는 요청마다 다른 토큰을 가짐. Companion이 playlist를 다시 받으면 페이지가 해독하지 않은 키 URI가 나와 `hls key was not decoded by the page`로 실패(첫 수정본 0.4.80에서 실제 재현).
+- 조치: (1) `level5-page-bridge.js`가 media playlist를 받고 모든 AES-128 키를 페이지 런타임으로 해독하여 `{keys, playlist}` 반환. (2) `content.js`가 형식 검증 후 전달. (3) `background-companion-handoff.js`는 provider 정책 `decodeHlsKeyInSourceFrame`인 후보만 원본 frame에 요청하고 실패 시 Companion에 넘기지 않고 명확한 키 오류로 중단. (4) `companion-client.js`/Native Host가 `hlsKeys`(최대 16개, 16/32바이트, 공개 HTTP URI)와 `hlsPlaylist`(최대 512 KiB, 키와 함께만 허용)를 검증. (5) Native Host가 작업 workspace의 `.keys/`에 키 파일과 로컬 playlist를 쓰고 키 URI만 로컬 파일로 바꾸어 yt-dlp `--enable-file-urls`로 실행. segment는 원본 공개 HTTP URL 유지, 비공개 주소는 거부. 작업 종료 시 workspace 정리로 키 파일도 삭제.
+- 변경: `level5-page-bridge.js`, `content.js`, `background.js`, `background-companion-handoff.js`, `companion-client.js`, `native-host/src/media_download.rs`, `native-host/src/main.rs`, 관련 테스트, `test-fixtures/companion/status-v2.json`(버전).
+- 회귀: Node 581 pass; Native Host 96 pass/1 ignored. 새 테스트: 키·playlist 검증, 토큰이 다른 키 URI 정확 대응, 미해독 키 거부, 설치된 yt-dlp/ffmpeg로 키 서버 없이 페이지 키만으로 AES-128 HLS 복호화 후 전체 디코딩 성공.
+- 설치: Native Host 0.4.80 설치 경로 교체(SHA256 `54C3EC7E…`, 이전 파일 `aura-media-companion.replaced-*.exe` 보존), staging-pro 0.4.80.
+
+### INC-2026-10-03-064 — Jamak Streamtape가 광고 응답(JSON)이나 1회용 토큰 반복으로 실패
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `CODE-FIXED / LIVE-VERIFIED (isolated headless browser)`.
+- 재현: 헤드리스 Chrome, site-allow, Jamak 게시물 83에서 DT(Streamtape) 선택 후 재생 클릭. 후보 `streamtape.com/get_video`(PROGRESSIVE)는 감지되지만 (1) 다운로드 시작 시 후보 URL이 `axgbr.com/400/…`로 바뀌어 `progressive response is not media (application/json)`, (2) 이를 고치면 `progressive range HTTP 200`.
+- 확인된 원인 1: 다운로드 직전 `refresh-media-source`가 프레임의 최근 관측 기록 중 가장 최신 항목을 고름. 같은 플레이어·세션·경로와 무관한 광고 redirect도 후보가 되어 원래 소스를 대체.
+- 확인된 원인 2: `/get_video` 토큰 URL은 첫 요청에서 `tapecontent.net` 실제 파일로 302 redirect하고 재사용 시 HTTP 200 비영상 응답. 병렬 range 작업이 매번 원래 토큰 URL을 다시 요청.
+- 조치: `content.js` refresh는 같은 session, 같은 player, 또는 같은 origin+path 기록만 대체 후보로 사용(없으면 기존 후보 유지). Native Host는 첫 응답을 실제로 제공한 공개 URL로 range 요청을 고정(`pinned_range_command`, 비공개 주소는 고정하지 않음).
+- 변경: `content.js`, `content.test.mjs`(광고 요청이 소스를 대체하지 않음; 수정 전 실패 확인), `native-host/src/media_download.rs`(+단위 테스트), `sites/jamak/regressions.js`(DT 선택→재생 활성화), `scripts/live-media-smoke.mjs`(활성화 단계 배열, load 대기, 내장 reCAPTCHA 힌트가 실제 결과를 덮지 않음, yt-dlp 완료 판정, 프로필 정리 실패 무시), `artifacts/run-live-sites.ps1`(헤드리스 고정, 다운로드 대기 시간 인자).
+- 회귀: Node 582 pass, Native Host 97 pass/1 ignored. staging 0.4.81, host SHA256 `B4B63937…`.
+- 실검증: 586,477,596바이트, 1920x1080, 2,534.5초, 전체 디코딩 exit 0. 공통 progressive 변경 영향은 AVsee 등 재검증 결과를 아래에 추가.
+- 실검증(헤드리스, AdBlock on, 0.4.80 최종): 같은 av19 페이지에서 키 8개 해독, 758,180,769바이트, 1080x460, 2,458.6초, 전체 디코딩 exit 0(전송 약 8분). 테스트 하네스의 90초 대기 초과는 진행 중 작업을 취소한 것으로 실패 아님.
+- 0.4.81 공통 progressive 변경 후 재검증(헤드리스, AdBlock on): AVsee javc/2165198 1,541,966,556바이트 1280x720 7,093.8초(333초), Gogoanime Blogger 86,888,236바이트 640x360, AsianPorn 101,508,754바이트 1080p, Beeg 9,667,665바이트 — 모두 전체 디코딩 exit 0. AVsee javmgs 다른 미러(01.avsee.is)는 HTTP 451 차단으로 미검증.
+
+### INC-2026-10-03-065 — HLS 다운로드 취소 후 작업 폴더가 남고 진행률이 표시되지 않음
+
+- 일시: 2026-10-03 15:00–15:50 Asia/Seoul. 상태: `CODE-FIXED / LIVE-VERIFIED (isolated headless browser)`.
+- 재현 1(취소 잔여물): 헤드리스 Chrome + AdBlock on, LuluStream HLS 다운로드 15초 후 확장에서 취소. 작업이 `failed`, `download-cleanup-failed: … (os error 32)`가 되고 다운로드 폴더에 `.aura-job-…` 폴더(`.part`, `.part-FragN.part`, `.ytdl`)가 남음. 직후 확인 시 파일은 모두 잠금 해제 상태. 사용자가 말한 "폴더에서 삭제가 안 되고 재부팅 후 사라짐"과 같은 증상 계열.
+- 확인된 원인 1: yt-dlp/ffmpeg Job Object가 종료된 직후에도 Windows가 마지막 파일 handle을 잠시 유지(최종 flush, 보안 검사). `cleanup_download_workspace_in`은 재시도 없이 한 번만 삭제를 시도.
+- 재현 2(진행률 없음): MissAV 930 MB HLS 작업이 5분 넘게 `미디어 다운로드를 준비하는 중…`, progress 없음으로 표시되다 완료로 바뀜.
+- 확인된 원인 2: yt-dlp는 `--print`가 있으면 `--quiet`를 함께 켬. 설치된 yt-dlp로 같은 인자를 실행하면 `AURA_PROGRESS` 줄이 전혀 나오지 않고 `--progress`를 추가하면 출력됨(직접 확인).
+- 조치: 작업 폴더 정리를 오류 5/32에 한해 최대 10초 재시도(그 외 오류와 계속 잠긴 경우는 기존대로 실패 보고, 재취소로 복구 가능). yt-dlp media/YouTube 실행 인자에 `--progress` 추가.
+- 변경: `native-host/src/job_store.rs`(+600ms 동안 잠긴 fragment를 두고 취소하는 회귀 테스트, 재시도 비활성 시 실패 확인), `native-host/src/media_download.rs`, `native-host/src/youtube.rs`(+인자 assert).
+- 회귀: Native Host 98 pass/1 ignored, Node 582 pass. host 0.4.82 SHA256 `95E25975…`, staging 0.4.82.
+- 실검증(헤드리스, `artifacts/cancel-live-qa.mjs`): 기존 실패 작업을 새 host로 다시 취소 → `cancelled`, 남은 폴더 0. LuluStream HLS 8초·15초·25초 취소 모두 `cancelled`(약 0.22초), 다운로드 폴더 잔여 0. 취소 직전 상태 `다운로드 중 · 49.9% 7.33MiB/s ETA 00:19`, progress 50으로 진행률 표시 확인. Gogoanime progressive 0.6초 취소도 `cancelled`, 잔여 0.
+- 2026-10-03 15:55 네이티브 UI 실검증(격리 프로필 0.4.82 manager, CDP로 실제 버튼 클릭): 자막 화면 "자막 생성 실패 테스트 기록 삭제" → 해당 기록만 삭제, "기록 정리" 확인 대화상자 → 남은 자막 기록 삭제, 생성된 `.ko.srt` 파일 유지. 다운로드 화면 취소됨 필터에서 기록 삭제도 동작. 증거 `artifacts/native-ui-qa/subtitle-history-evidence.json`. 자막 재생성(실제 Modal 작업) 경로는 아직 앱에서 미실행.
+- 2026-10-03 16:00 앱 실경로 실검증(0.4.82 manager, 격리 프로필, CDP로 실제 클릭): 보관함에서 일본어 음성 3분 클립 재생 → 자막 화면 "자막 생성"(ja→ko). 앱이 오디오만 추출해 업로드, 원격 단계 표시(extracting-audio 등) 후 90초 만에 `completed`, `Segma QA ja speech.vtt` 저장, cue 8개. 이전 실패(cue 0개 → invalid-response)는 재현되지 않음. 증거 `artifacts/native-ui-qa/subtitle-create-evidence.json`. 상태 `CODE-FIXED / LIVE-VERIFIED (app, isolated profile)`. 사용자의 원래 2시간 영상은 파일이 다운로드 폴더에 없어 재실행하지 않음(1시간 상한 안내 유지).
+
+### INC-2026-10-03-066 — 사용자 Chrome에서 Jamak 다운로드가 `progressive HTTP 403`로 실패
+
+- 일시: 2026-10-03 20:19 Asia/Seoul, 사용자 Chrome 프로필(0.4.82). 상태: `CODE-FIXED / LIVE-VERIFIED (isolated headless browser)`; 사용자 Chrome 재확인 대기.
+- 재현: Jamak 게시물 83, DT(Streamtape) 선택 후 확장 다운로드 → job `1236bae8…` `failed`, `progressive HTTP 403`. 저장된 요청 URL은 영상이 아닌 `playmogo.com/pass_md5/…`(DoodStream 토큰 엔드포인트), referrer `playmogo.com/`.
+- 확인된 원인 1: 게시판은 처음 BS(DoodStream/PlayMogo) 플레이어를 로드하고 사용자가 DT로 바꾸면 같은 iframe이 Streamtape로 이동. 이전 플레이어의 후보가 그 frame에 남아 있었음(frame 단위 정리 없음).
+- 확인된 원인 2: Dood 호스트의 모든 요청을 media 요소로 간주하는 규칙 때문에 1회용·브라우저 전용 토큰 엔드포인트 `/pass_md5/`가 PROGRESSIVE 후보가 됨. Companion이 재요청하면 403.
+- 조치: `/pass_md5/`를 비미디어 리소스로 제외(`candidate.js`). sub_frame에 새 문서(2xx)가 들어오면 그 frame의 기존 후보를 제거(`clearFrame`, top frame은 탭 이동 때만).
+- 변경: `candidate.js`, `background-candidate-repository.js`, `background.js`, `candidate.test.mjs`, `background-modules.test.mjs`, `sites/jamak/regressions.js`(BS 기본 서버 fixture 추가).
+- 회귀: Node 584 pass. staging 0.4.83.
+- 실검증(헤드리스, site-allow): BS 기본 서버 → `cloudatacdn.com` 실제 파일, 578,390,581바이트 1280x720 2,534.5초; DT → `streamtape.com/get_video`, 586,477,596바이트 1080p — 둘 다 전체 디코딩 exit 0.
+- 추가 발견(같은 실행): Streamtape 파일 이름이 `jamak.cc_bbs_board.php_bo_table=…` 또는 `www.jamak.cc`로 저장됨. 원인: 플레이어 frame 후보를 만들 때 탭 제목이 아직 주소(로딩 중 Chrome 표시값)였고 그 값이 15초 캐시에 저장됨. 조치: 주소 형태 제목은 제목 없음으로 처리·캐시 안 함(`looksLikeAddressTitle`), 다운로드 직전 주소 형태면 최대 3초 동안 탭 제목 재조회 후 top frame의 읽기 전용 `get-page-title`로 문서 제목 사용. 회귀: `avsee-title.test.mjs` 판별 테스트. 재실검증: 두 서버 모두 `FC2-PPV-1788676 …` 제목으로 저장(578,390,581 / 586,477,596바이트). QA 사본 삭제.
+
+### INC-2026-10-03-067 — 다운로드 작업 카드가 정보에 비해 지나치게 큼 (UI 개편 1단계)
+
+- 일시: 2026-10-03 Asia/Seoul. 상태: `CHANGED / LIVE-VERIFIED (isolated native app)`.
+- 사용자 보고: 앱이 하는 역할에 비해 카드들이 너무 큼. 다운로드는 제목·진행도·화질 한 행이면 충분하고 카드 형태도 원하지 않음. Figma 계획(`hHbERxUjJeaWJ3eYFM1UlA`, 페이지 "Redesign 2026-10 (compact)") 와이어프레임 승인.
+- 측정(1280×860): 기존 작업 카드 164–192px, 화면당 3–4개, 232px 사이드바.
+- 변경: 다운로드를 카드 대신 40px 표 행으로(상태 점·제목·화질·상태/진행률·크기·시간·아이콘 동작, 진행률은 행 하단 2px 막대, 세부 사유는 행 tooltip). 화질은 파일명/제목의 `[1080p]` 등에서 추출, HLS/DASH는 형식 표시. 셸 사이드바 232px → 64px 아이콘 레일, 화면 제목·버튼·필터 크기 축소. 동작(일시정지·재개·재시도·취소·재생·폴더·기록 삭제)과 접근성 라벨은 유지.
+- 변경 파일: `companion-tauri/ui/src/App.svelte`, `lib/routes/QueueView.svelte`, `lib/queue-policy.ts`(+`queue-policy.test.mjs` 화질·제목 테스트), `app.css`. 버전 0.4.84.
+- 검증: svelte-check 0 errors, UI 테스트 통과, Node 585 pass, Native Host 98 pass. 격리 프로필 네이티브 앱 캡처에서 작업 8개가 행으로 표시되고 열 정렬 확인(`artifacts/native-ui-qa/screens/queue.png`). 사용자 앱 설치(manager `780F922D…`, host `82D929AE…`) 후 재실행.
+- 남은 단계: 보관함 목록화, 자막·설정 행 정리, 재생 화면(와이어프레임 순서).
+- 2단계(0.4.85): 보관함 기본 보기를 목록으로, 48px 행(썸네일 64px·제목·길이/화질/크기/날짜 한 줄·시청 상태·별점·아이콘 동작), 그리드는 선택 보기로 유지. 자막 작업 기록을 다운로드와 같은 행 형식으로, 자막 관리·미리보기 패널 여백 축소. 설정 그룹 헤더를 얇은 한 줄로, 행 패딩 16→8px(그룹 높이 159–298 → 93–168px). 재생 화면: 무대를 창 높이에 맞춰 축소, 컨트롤을 시크바+한 줄로(44→34px 버튼), 다음 재생을 행 목록으로, 재생 속도 선택값이 비어 보이던 문제 수정(숫자 value 바인딩). 시크바 미리보기 동작 확인. 격리 앱 실측(1280×860): 보관함 51px 행, 자막 화면 스크롤 없음, 재생 화면 1188→982px. 설치 후 재실행. svelte-check 0, UI·Node·Tauri(56)·Host(98) 테스트 통과.

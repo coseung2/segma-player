@@ -866,6 +866,32 @@ test("MAIN-world observations bridge detected manifests", async () => {
   assert.equal(env.sent.some((message) => /^mse-capture-/.test(message.type || "")), false);
 });
 
+test("refresh never swaps a Streamtape source for a later unrelated frame request", async () => {
+  // Jamak/Streamtape: an ad redirect (axgbr.com) observed after /get_video
+  // was returned as the "fresh" source and Companion saved JSON.
+  const env = baseEnvironment({ runtimeHandler: () => ({ ok: true }) });
+  await importFreshContent();
+  const dispatch = (data) => {
+    for (const handler of env.windowEventHandlers.message || []) handler({ source: globalThis, data });
+  };
+  const source = "https://streamtape.com/get_video?id=fixture&expires=1&token=a";
+  dispatch({
+    type: "aura-media-observer-event-v1",
+    kind: "media",
+    source: "fetch",
+    url: "https://axgbr.com/400/11716279",
+    contentType: "application/json",
+    observedAt: 1_700_000_020_000,
+  });
+  const responsePromise = new Promise((resolve) => {
+    env.onMessage({ type: "refresh-media-source", resourceUrl: source, player: "streamtape", sessionId: "" }, {}, resolve);
+  });
+  const request = env.posted.find((message) => message.type === "aura-media-observer-snapshot-request-v1");
+  dispatch({ type: "aura-media-observer-event-v1", kind: "snapshot-complete", requestId: request.requestId, count: 0 });
+  const refreshed = await responsePromise;
+  assert.notEqual(refreshed.url, "https://axgbr.com/400/11716279");
+  assert.equal(refreshed.ok, false, "no matching source keeps the existing candidate");
+});
 test("player-adapter metadata is preserved and refresh snapshots return the latest token URL", async () => {
   const env = baseEnvironment({ runtimeHandler: () => ({ ok: true }) });
   await importFreshContent();

@@ -305,13 +305,15 @@ async function rescan() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab?.id) {
-      await sendBackground({ type: "clear-tab", tabId: tab.id }).catch(() => {});
+      // Keep already observed candidates: a player that loaded its manifest
+      // before the scan will not request it again, so clearing here loses the
+      // only usable source. Navigation clears the tab separately.
       // A player usually lives in a subframe. Inject missing detectors into all
       // frames, then wake every existing detector through a same-world DOM
       // event so the button also works after the popup was opened pre-playback.
       await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
-        files: ["content.js"],
+        files: ["content-extraction.js", "content.js"],
       }).catch(() => {});
       await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },

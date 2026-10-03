@@ -11,6 +11,8 @@ const MAX_MEDIA_DOWNLOAD_TITLE_BYTES = 512;
 const MAX_MEDIA_DOWNLOAD_ID_BYTES = 128;
 const MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES = 512;
 const MAX_MEDIA_DOWNLOAD_ACCEPT_LANGUAGE_BYTES = 256;
+const MAX_MEDIA_DOWNLOAD_HLS_KEYS = 16;
+const MAX_MEDIA_DOWNLOAD_HLS_PLAYLIST_BYTES = 512 * 1024;
 const SUBTITLE_TIMEOUT_MS = 10_000;
 const MAX_SUBTITLE_URL_BYTES = 4_096;
 const MAX_SUBTITLE_TITLE_BYTES = 512;
@@ -21,7 +23,8 @@ const SUBTITLE_INPUT_KEYS = new Set(["candidateId", "sourceLanguage", "media", "
 const SUBTITLE_MEDIA_KEYS = new Set(["type", "title", "pageUrl", "resourceUrl", "audioRenditionUrl"]);
 const SUBTITLE_CONTEXT_KEYS = new Set(["tabId", "frameId", "contextLeaseId"]);
 const MEDIA_DOWNLOAD_INPUT_KEYS = new Set([
-  "jobId", "candidateId", "url", "referrer", "title", "inputKind", "userAgent", "acceptLanguage",
+  "jobId", "candidateId", "url", "referrer", "title", "inputKind", "userAgent", "acceptLanguage", "hlsKeys",
+  "hlsPlaylist",
 ]);
 const MEDIA_DOWNLOAD_INPUT_KINDS = new Set(["PROGRESSIVE", "HLS_MASTER", "HLS_MEDIA", "DASH"]);
 const SAFE_MEDIA_DOWNLOAD_ID = /^[A-Za-z0-9_-]+$/;
@@ -165,8 +168,17 @@ function mediaDownloadPayload(input) {
   const referrer = canonicalPublicHttpUrl(input.referrer ?? "");
   const userAgent = input.userAgent ?? "";
   const acceptLanguage = input.acceptLanguage ?? "";
+  const hlsKeys = mediaDownloadHlsKeys(input.hlsKeys, input.inputKind);
+  const hlsPlaylist = input.hlsPlaylist ?? "";
+  const validPlaylist = hlsPlaylist === ""
+    ? !hlsKeys?.length
+    : typeof hlsPlaylist === "string" && Boolean(hlsKeys?.length)
+      && hlsPlaylist.startsWith("#EXTM3U")
+      && utf8Length(hlsPlaylist) <= MAX_MEDIA_DOWNLOAD_HLS_PLAYLIST_BYTES
+      && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(hlsPlaylist);
   if (!validId(input.jobId) || !validId(input.candidateId)
     || !url || referrer === null
+    || hlsKeys === null || !validPlaylist
     || !validBoundedText(input.title, MAX_MEDIA_DOWNLOAD_TITLE_BYTES, { required: true })
     || !MEDIA_DOWNLOAD_INPUT_KINDS.has(input.inputKind)
     || (userAgent && !validBrowserMetadata(userAgent, MAX_MEDIA_DOWNLOAD_USER_AGENT_BYTES))
@@ -187,7 +199,24 @@ function mediaDownloadPayload(input) {
     inputKind: input.inputKind,
     ...(userAgent ? { userAgent } : {}),
     ...(acceptLanguage ? { acceptLanguage } : {}),
+    ...(hlsKeys.length ? { hlsKeys, hlsPlaylist } : {}),
   };
+}
+
+// Page-decoded AES-128 keys for an HLS playlist: [{ uri, key(base64 16/32 bytes) }].
+function mediaDownloadHlsKeys(value, inputKind) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_MEDIA_DOWNLOAD_HLS_KEYS
+    || (inputKind !== "HLS_MASTER" && inputKind !== "HLS_MEDIA")) return null;
+  const keys = [];
+  for (const item of value) {
+    if (!isPlainRecord(item) || Object.keys(item).some((key) => key !== "uri" && key !== "key")) return null;
+    const uri = canonicalPublicHttpUrl(item.uri, { required: true });
+    const key = typeof item.key === "string" ? item.key : "";
+    if (!uri || !/^[A-Za-z0-9+/]{22}==$|^[A-Za-z0-9+/]{43}=$/.test(key)) return null;
+    keys.push({ uri, key });
+  }
+  return keys;
 }
 
 function containsForbiddenSubtitleInput(value, visited = new WeakSet()) {

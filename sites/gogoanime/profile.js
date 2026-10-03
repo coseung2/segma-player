@@ -13,8 +13,11 @@ export const gogoanimeSite = defineSiteProfile({
   modules: {
     primaryDownloader: DOWNLOADER_IDS.HLS,
     fallbackDownloaders: [DOWNLOADER_IDS.PROGRESSIVE],
-    providers: [PROVIDER_IDS.GENERIC],
+    providers: [PROVIDER_IDS.GOOGLEVIDEO, PROVIDER_IDS.GENERIC],
   },
   titleSelectors: ["article h1", "h1"],
   playerFramePaths: ["/player/"],
+  // The episode player uses Blogger or Megaplay. Auxiliary embedded videos
+  // can otherwise outrank it merely by producing more detection events.
+  preferredMediaHosts: ["googlevideo.com", "megaplay.su"],
 });

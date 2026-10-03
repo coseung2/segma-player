@@ -1,6 +1,12 @@
 (() => {
   const REQUEST = "aura-level5-key-request-v1";
   const RESPONSE = "aura-level5-key-response-v1";
+  const PLAYLIST_KEYS_REQUEST = "aura-level5-playlist-keys-request-v1";
+  const PLAYLIST_KEYS_RESPONSE = "aura-level5-playlist-keys-response-v1";
+  // Level5 key URIs carry per-fetch tokens, so the Companion must use this
+  // exact playlist text; refetching it yields keys the page never decoded.
+  const MAX_PLAYLIST_BYTES = 512 * 1024;
+  const MAX_PLAYLIST_KEYS = 16;
   const MEDIA_EVENT = "aura-media-observer-event-v1";
   const MEDIA_DISCOVERY_REQUEST = "aura-level5-media-discovery-request-v1";
   const WRAPPED_PLAYER = Symbol("aura-level5-player-wrapped");
@@ -374,10 +380,124 @@
 
   observeLevel5Player();
 
+  // Resolves one key URI to raw 16/32-byte AES key material, or throws an
+  // Error whose message is a stable failure code.
+  async function resolveKeyBytes(keyUrl) {
+    const url = new URL(keyUrl);
+    const sessions = activeHlsSessions();
+    for (const hls of sessions) {
+      const key = cachedKey(hls, url.href);
+      if (key) return key;
+    }
+
+    let failure = "level5-key-unavailable";
+    try {
+      const key = await decodeRuntimeKey(url.href);
+      return key;
+    } catch (error) {
+      failure = errorCode(error, failure);
+      // Older Level5 builds may not expose the runtime assets used by current players.
+    }
+
+    const delayedCached = await waitForCachedKey(sessions, url.href);
+    if (delayedCached) return delayedCached;
+
+    for (const hls of sessions) {
+      try {
+        return await loadKey(hls, url.href);
+      } catch (error) {
+        const cached = cachedKey(hls, url.href);
+        if (cached) return cached;
+        if (failure === "not-level5-session-key" || failure === "level5-key-unavailable") {
+          failure = errorCode(error, "level5-loader-failed");
+        }
+        // Try another active Level5 player in this frame.
+      }
+    }
+    throw new Error(failure);
+  }
+
+  function keyAttributes(line) {
+    const attributes = {};
+    const pattern = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/g;
+    let match;
+    while ((match = pattern.exec(line.slice(line.indexOf(":") + 1)))) {
+      attributes[match[1]] = match[2].replace(/^"|"$/g, "");
+    }
+    return attributes;
+  }
+
+  // Reads the media playlist as the player does and decodes every AES-128 key
+  // it references, so the Companion can decrypt segments without the page.
+  async function playlistKeys(href) {
+    let response;
+    try {
+      response = await fetch(href, { cache: "no-store" });
+    } catch {
+      throw new Error("playlist-fetch-failed");
+    }
+    if (!response.ok) throw new Error(`level5-key-http-${response.status}`);
+    const text = await response.text().catch(() => "");
+    if (!text.startsWith("#EXTM3U") || text.length > MAX_PLAYLIST_BYTES) {
+      throw new Error("invalid-level5-playlist");
+    }
+    // Variant playlists carry the keys; a master playlist has none to resolve.
+    if (/^#EXT-X-STREAM-INF/m.test(text)) return { keys: [], playlist: "" };
+    const base = response.url || href;
+    const uris = [];
+    const absoluteLines = [];
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (line && !line.startsWith("#")) {
+        absoluteLines.push(new URL(line, base).href);
+        continue;
+      }
+      if (line.startsWith("#EXT-X-MAP:") || line.startsWith("#EXT-X-KEY:")) {
+        absoluteLines.push(line.replace(/URI="([^"]*)"/, (_match, value) => `URI="${new URL(value, base).href}"`));
+      } else {
+        absoluteLines.push(line);
+      }
+      if (!line.startsWith("#EXT-X-KEY:")) continue;
+      const attributes = keyAttributes(line);
+      if (!attributes.METHOD || attributes.METHOD === "NONE") continue;
+      if (attributes.METHOD !== "AES-128" || !attributes.URI) throw new Error("unsupported-key-method");
+      const uri = new URL(attributes.URI, base).href;
+      if (!uris.includes(uri)) uris.push(uri);
+      if (uris.length > MAX_PLAYLIST_KEYS) throw new Error("too-many-level5-keys");
+    }
+    const playlist = `${absoluteLines.join("\n")}\n`;
+    if (playlist.length > MAX_PLAYLIST_BYTES) throw new Error("invalid-level5-playlist");
+    const keys = [];
+    for (const uri of uris) keys.push({ uri, key: encode(await resolveKeyBytes(uri)) });
+    return { keys, playlist: keys.length ? playlist : "" };
+  }
+
   window.addEventListener("message", async (event) => {
     if (event.source !== window) return;
     if (event.data?.type === MEDIA_DISCOVERY_REQUEST) {
       for (const hls of activeHlsSessions()) reportSessionManifests(hls);
+      return;
+    }
+    if (event.data?.type === PLAYLIST_KEYS_REQUEST) {
+      const requestId = typeof event.data.requestId === "string" ? event.data.requestId : "";
+      let url;
+      try {
+        url = new URL(event.data.url);
+        if (!/^https?:$/.test(url.protocol) || !requestId) throw new Error("invalid-request");
+      } catch {
+        return;
+      }
+      try {
+        const { keys, playlist } = await playlistKeys(url.href);
+        window.postMessage({ type: PLAYLIST_KEYS_RESPONSE, requestId, ok: true, keys, playlist }, "*");
+      } catch (error) {
+        window.postMessage({
+          type: PLAYLIST_KEYS_RESPONSE,
+          requestId,
+          ok: false,
+          error: errorCode(error, "level5-key-unavailable"),
+        }, "*");
+      }
       return;
     }
     if (event.data?.type !== REQUEST) return;
@@ -390,47 +510,16 @@
       return;
     }
 
-    const sessions = activeHlsSessions();
-    for (const hls of sessions) {
-      const key = cachedKey(hls, url.href);
-      if (!key) continue;
-      window.postMessage({ type: RESPONSE, requestId, ok: true, key: encode(key) }, "*");
-      return;
-    }
-
-    let failure = "level5-key-unavailable";
     try {
-      const key = await decodeRuntimeKey(url.href);
+      const key = await resolveKeyBytes(url.href);
       window.postMessage({ type: RESPONSE, requestId, ok: true, key: encode(key) }, "*");
-      return;
     } catch (error) {
-      failure = errorCode(error, failure);
-      // Older Level5 builds may not expose the runtime assets used by current players.
+      window.postMessage({
+        type: RESPONSE,
+        requestId,
+        ok: false,
+        error: errorCode(error, "level5-key-unavailable"),
+      }, "*");
     }
-
-    const delayedCached = await waitForCachedKey(sessions, url.href);
-    if (delayedCached) {
-      window.postMessage({ type: RESPONSE, requestId, ok: true, key: encode(delayedCached) }, "*");
-      return;
-    }
-
-    for (const hls of sessions) {
-      try {
-        const key = await loadKey(hls, url.href);
-        window.postMessage({ type: RESPONSE, requestId, ok: true, key: encode(key) }, "*");
-        return;
-      } catch (error) {
-        const cached = cachedKey(hls, url.href);
-        if (cached) {
-          window.postMessage({ type: RESPONSE, requestId, ok: true, key: encode(cached) }, "*");
-          return;
-        }
-        if (failure === "not-level5-session-key" || failure === "level5-key-unavailable") {
-          failure = errorCode(error, "level5-loader-failed");
-        }
-        // Try another active Level5 player in this frame.
-      }
-    }
-    window.postMessage({ type: RESPONSE, requestId, ok: false, error: failure }, "*");
   });
 })();

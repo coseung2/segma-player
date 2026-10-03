@@ -83,6 +83,7 @@ for (const fixture of fixtures) {
     }
     if (fixture.expected.primaryTitle) assert.equal(primary.pageTitle, fixture.expected.primaryTitle);
     if (fixture.expected.primaryPlayer) assert.equal(primary.player, fixture.expected.primaryPlayer);
+    if (fixture.expected.rejectedPrimaryHosts) assert.equal(fixture.expected.rejectedPrimaryHosts.includes(new URL(primary.resourceUrl).hostname), false);
     if (fixture.expected.rejectedAdvertisementHost) {
       const advertisement = ranked.find((candidate) =>
         new URL(candidate.resourceUrl).hostname === fixture.expected.rejectedAdvertisementHost);

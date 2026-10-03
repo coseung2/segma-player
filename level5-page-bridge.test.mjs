@@ -175,7 +175,7 @@ test("Level5 bridge decodes session responses with the page runtime before loade
   assert.match(source, /runtime-import-failed/);
   assert.match(source, /wasm-init-failed/);
   assert.match(source, /decode-session-failed/);
-  assert.match(source, /error: failure/);
+  assert.match(source, /throw new Error\(failure\)/);
 });
 
 test("Level5 bridge reuses Hls.js decrypted key cache before requesting the key again", () => {

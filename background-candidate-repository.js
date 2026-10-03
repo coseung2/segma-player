@@ -99,6 +99,25 @@ export function createCandidateRepository({
     if (persist) persistCandidates();
   }
 
+  // A player iframe that navigates to another player (e.g. a board switching
+  // from DoodStream to Streamtape) invalidates every candidate it produced.
+  function clearFrame(tabId, frameId) {
+    if (!Number.isInteger(tabId) || !Number.isInteger(frameId) || frameId <= 0) return 0;
+    let removed = 0;
+    for (const [key, item] of candidates) {
+      if (item.tabId === tabId && item.frameId === frameId) {
+        candidates.delete(key);
+        removed += 1;
+      }
+    }
+    frameStatesByTab.get(tabId)?.delete?.(frameId);
+    if (removed) {
+      rerankTabCandidates(tabId);
+      persistCandidates();
+    }
+    return removed;
+  }
+
   async function restore() {
     if (!storageSession?.get) return 0;
     try {
@@ -130,6 +149,7 @@ export function createCandidateRepository({
     rerankTabCandidates,
     persistCandidates,
     clearTab,
+    clearFrame,
     restore,
   });
 }

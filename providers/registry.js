@@ -1,10 +1,12 @@
 import { doodProvider } from "./dood.js";
+import { googleVideoProvider } from "./googlevideo.js";
 import { hlsjsProvider } from "./hlsjs.js";
 import { PROVIDER_IDS } from "./ids.js";
 import { level5Provider } from "./level5.js";
 import { playerApiProvider } from "./player-api.js";
 
 export const PROVIDERS = Object.freeze([
+  googleVideoProvider,
   doodProvider,
   level5Provider,
   playerApiProvider,

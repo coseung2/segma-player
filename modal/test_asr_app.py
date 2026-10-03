@@ -199,6 +199,58 @@ class SpeakerDiarizationTests(unittest.TestCase):
         ])
         self.assertIn("<v 화자 1>안녕하세요", vtt)
 
+    def test_missing_end_timestamp_is_closed_instead_of_dropped(self):
+        # Reproduces a whole-video job that returned only "WEBVTT".
+        vtt = ASR.chunks_to_vtt([
+            {"timestamp": (0.0, None), "text": "첫 대사"},
+            {"timestamp": (3.0, None), "text": "둘째 대사"},
+            {"timestamp": (20.0, None), "text": "마지막 대사"},
+        ])
+        self.assertIn("00:00:00.000 --> 00:00:03.000\n첫 대사", vtt)
+        self.assertIn("00:00:03.000 --> 00:00:09.000\n둘째 대사", vtt)
+        self.assertIn("00:00:20.000 --> 00:00:26.000\n마지막 대사", vtt)
+
+    def test_punctuation_only_chunks_are_not_cues(self):
+        vtt = ASR.chunks_to_vtt([
+            {"timestamp": (1.0, 2.0), "text": "..."},
+            {"timestamp": (3.0, 4.0), "text": "…"},
+            {"timestamp": (5.0, 6.0), "text": "쪽..."},
+        ])
+        self.assertEqual(vtt.count("-->"), 1)
+        self.assertIn("쪽...", vtt)
+
+    def test_no_usable_chunks_yield_no_cues(self):
+        vtt = ASR.chunks_to_vtt([{"timestamp": (None, None), "text": "x"}, {"timestamp": (1.0, 2.0), "text": ""}])
+        self.assertNotIn("-->", vtt)
+
+    def test_speech_windows_skip_silence_and_respect_the_maximum(self):
+        import numpy as np
+        rate = 16000
+        tone = lambda seconds: (0.5 * np.sin(np.arange(int(rate * seconds)) / 8)).astype(np.float32)
+        silence = lambda seconds: np.zeros(int(rate * seconds), dtype=np.float32)
+        audio = np.concatenate([silence(5), tone(3), silence(2), tone(40), silence(4)])
+        windows = ASR.speech_windows(audio, rate)
+        self.assertGreaterEqual(len(windows), 4)
+        self.assertAlmostEqual(windows[0][0], 5.0, delta=0.1)
+        self.assertAlmostEqual(windows[0][1], 8.0, delta=0.2)
+        for start, end in windows:
+            self.assertLessEqual(end - start, ASR.WINDOW_MAX_SECONDS + 0.05)
+            self.assertFalse(start < 4.9, "leading silence must not become a cue")
+        self.assertLessEqual(windows[-1][1], 50.1)
+
+    def test_windowed_transcription_produces_timed_cues(self):
+        import numpy as np
+        rate = 16000
+        audio = np.concatenate([np.zeros(rate * 2, np.float32), (0.5 * np.sin(np.arange(rate * 3) / 8)).astype(np.float32)])
+        calls = []
+        def fake_pipeline(inputs, batch_size=None, generate_kwargs=None):
+            calls.append(len(inputs))
+            return [{"text": "テスト"} for _ in inputs]
+        chunks = ASR.transcribe_windows(fake_pipeline, audio, rate, {})
+        vtt = ASR.chunks_to_vtt(chunks)
+        self.assertEqual(calls, [1])
+        self.assertIn("00:00:02.000 --> 00:00:05.000\nテスト", vtt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ export const animepaheSite = defineSiteProfile({
   modules: {
     primaryDownloader: DOWNLOADER_IDS.PROGRESSIVE,
     fallbackDownloaders: [DOWNLOADER_IDS.HLS],
-    providers: [PROVIDER_IDS.GENERIC],
+    providers: [PROVIDER_IDS.GOOGLEVIDEO, PROVIDER_IDS.GENERIC],
   },
   titleSelectors: ["article h1", "h1"],
 });

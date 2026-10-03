@@ -10,6 +10,7 @@ export interface LibraryState {
   data: LibraryListResponse;
   loading: boolean;
   refreshing: boolean;
+  newEntryCount: number;
   action: string | null;
   error: string | null;
   notice: string | null;
@@ -18,20 +19,101 @@ export interface LibraryState {
 
 const emptyData: LibraryListResponse = { folder: null, folders: [], entries: [], missingOutputCount: 0, usageBytes: 0 };
 export const libraryState = writable<LibraryState>({
-  data: emptyData, loading: false, refreshing: false, action: null, error: null, notice: null, organization: null,
+  data: emptyData, loading: false, refreshing: false, newEntryCount: 0, action: null, error: null, notice: null, organization: null,
 });
 let libraryRequestSequence = 0;
+let polling = false;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let unseenEntryNames = new Set<string>();
+
+function mergeLibraryResponse(current: LibraryListResponse, response: LibraryListResponse): LibraryListResponse {
+  const nextByIdentity = new Map(response.entries.map((entry) => [entry.fileName, entry]));
+  const currentNames = new Set(current.entries.map((entry) => entry.fileName));
+  const preserved = current.entries
+    .filter((entry) => nextByIdentity.has(entry.fileName))
+    .map((entry) => nextByIdentity.get(entry.fileName)!);
+  const newEntries = response.entries.filter((entry) => !currentNames.has(entry.fileName));
+  return { ...response, entries: [...preserved, ...newEntries] };
+}
 
 export async function loadLibrary(folder: string | null, silent = false): Promise<void> {
+  if (silent && get(libraryState).loading) return;
   const sequence = ++libraryRequestSequence;
   libraryState.update((state) => ({ ...state, loading: !silent, refreshing: silent, error: null }));
   try {
     const response = await listLibrary({ folder });
     if (sequence !== libraryRequestSequence) return;
-    libraryState.update((state) => ({ ...state, data: response, loading: false, refreshing: false }));
+    libraryState.update((state) => {
+      const sameFolder = state.data.folder === response.folder;
+      const data = silent && sameFolder ? mergeLibraryResponse(state.data, response) : response;
+      if (!silent || !sameFolder) unseenEntryNames.clear();
+      else {
+        const previousNames = new Set(state.data.entries.map((entry) => entry.fileName));
+        const nextNames = new Set(response.entries.map((entry) => entry.fileName));
+        unseenEntryNames = new Set([...unseenEntryNames].filter((name) => nextNames.has(name)));
+        for (const name of nextNames) if (!previousNames.has(name)) unseenEntryNames.add(name);
+      }
+      return {
+        ...state,
+        data,
+        newEntryCount: unseenEntryNames.size,
+        loading: false,
+        refreshing: false,
+      };
+    });
   } catch (error) {
     if (sequence !== libraryRequestSequence) return;
     libraryState.update((state) => ({ ...state, loading: false, refreshing: false, error: error instanceof Error ? error.message : "보관함을 불러오지 못했습니다." }));
+  }
+}
+
+export function acknowledgeNewLibraryEntries(): void {
+  unseenEntryNames.clear();
+  libraryState.update((state) => ({ ...state, newEntryCount: 0 }));
+}
+
+// The Library re-lists real files, so refresh on a slow visible-window tick and
+// immediately when the window returns to the foreground instead of polling
+// continuously in the background.
+const LIBRARY_POLL_INTERVAL_MS = 5_000;
+
+function scheduleLibraryPoll(delayMs = LIBRARY_POLL_INTERVAL_MS): void {
+  if (!polling) return;
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  pollTimer = setTimeout(() => void pollLibrary(), delayMs);
+}
+
+async function pollLibrary(): Promise<void> {
+  if (!polling) return;
+  if (typeof document !== "undefined" && document.hidden) {
+    scheduleLibraryPoll();
+    return;
+  }
+  await loadLibrary(get(libraryState).data.folder, true);
+  scheduleLibraryPoll();
+}
+
+function handleLibraryVisibilityChange(): void {
+  if (!polling) return;
+  if (typeof document !== "undefined" && document.hidden) return;
+  scheduleLibraryPoll(0);
+}
+
+export function startLibraryPolling(): void {
+  if (polling) return;
+  polling = true;
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", handleLibraryVisibilityChange);
+  }
+  scheduleLibraryPoll();
+}
+
+export function stopLibraryPolling(): void {
+  polling = false;
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  pollTimer = null;
+  if (typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", handleLibraryVisibilityChange);
   }
 }
 

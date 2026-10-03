@@ -121,6 +121,19 @@ test("keeps blob media-element sources as UNKNOWN instead of a broken button", (
 });
 
 test("rejects browser chrome and Cloudflare challenge resources as media", () => {
+  // User Chrome 0.4.82: the PlayMogo token endpoint was saved as the
+  // download URL and Companion got HTTP 403 (single-use, browser-bound).
+  const passUrl = "https://playmogo.com/pass_md5/258545891-119-71-1791021874-hash/xvap35yty5u7";
+  assert.equal(isKnownNonMediaResourceUrl(passUrl), true);
+  assert.equal(makeCandidate({
+    pageTitle: "PlayMogo",
+    pageUrl: "https://playmogo.com/e/xvap35yty5u7",
+    resourceUrl: passUrl,
+    contentType: "text/html",
+    fromMediaElement: true,
+    tabId: 1,
+    frameId: 3,
+  }), null);
   const challengeUrl = "https://player.example/cdn-cgi/challenge-platform/h/g/flow/token";
   const faviconUrl = "https://player.example/favicon.ico";
   assert.equal(isKnownNonMediaResourceUrl(challengeUrl), true);

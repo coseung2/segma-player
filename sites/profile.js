@@ -14,6 +14,7 @@ export function defineSiteProfile({
   modules,
   titleSelectors = [],
   playerFramePaths = [],
+  preferredMediaHosts = [],
 }) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(String(id || ""))) throw new TypeError("invalid site id");
   const normalizedHosts = [...new Set((Array.isArray(hosts) ? hosts : [])
@@ -33,6 +34,7 @@ export function defineSiteProfile({
     fallbackModes: Object.freeze([...fallbackModes]),
     titleSelectors: normalizedTitleSelectors,
     playerFramePaths: normalizedPlayerFramePaths,
+    preferredMediaHosts: Object.freeze([...new Set(preferredMediaHosts.map((host) => String(host).trim().toLowerCase()).filter((host) => /^[a-z0-9.-]+$/.test(host)))]),
     modules: Object.freeze({
       primaryDownloader: modules?.primaryDownloader || "unknown",
       fallbackDownloaders: Object.freeze([...(modules?.fallbackDownloaders || [])]),

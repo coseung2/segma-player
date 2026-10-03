@@ -5,6 +5,12 @@ export interface CommandError {
   message: string;
 }
 
+export interface CompanionConnectionStatus {
+  state: "connected" | "degraded" | "unavailable";
+  label: string;
+  version: string | null;
+}
+
 export type JobActionCode = "pause" | "resume" | "retry" | "play" | "cancel" | "openFolder";
 
 export interface JobDto {
@@ -36,6 +42,7 @@ export interface JobDto {
 export interface JobsResponse { jobs: JobDto[]; }
 export interface JobIdRequest { jobId: string; }
 export interface JobActionResponse { jobId: string; accepted: boolean; }
+export interface RemoveJobHistoryResponse { removedIds: string[]; skippedIds: string[]; }
 export interface JobOutputDto { folder: string | null; fileName: string; }
 
 export interface LibraryMetadataDto {
@@ -298,6 +305,7 @@ export interface CloudStartUploadRequest { localPath: string; folderId?: string 
 export interface CloudItemRequest { itemId: string; }
 export interface CloudStartDownloadRequest { itemId: string; localPath: string; }
 export interface CloudJobRequest { jobId: string; }
+export interface ConfigureTelegramRequest { token: string; channelId: string; }
 
 export interface PreviewUnavailable {
   available: false;
@@ -323,6 +331,7 @@ const previewMetadata = (): LibraryMetadataDto => ({
 
 function previewResult<T>(command: string, payload: unknown): T {
   switch (command) {
+    case "companion_connection_status": return { state: "unavailable", label: "브라우저 미리보기", version: null } as T;
     case "list_jobs": return { jobs: [] } as T;
     case "list_subtitle_capabilities": return {
       sourceLanguages: [
@@ -352,6 +361,8 @@ function previewResult<T>(command: string, payload: unknown): T {
       executableAvailable: false,
       telegramConfigured: false,
     } as T;
+    case "configure_telegram": return undefined as T;
+    case "install_cloud_component": throw nativeUnavailableError();
     case "list_cloud_items": return [] as T;
     case "list_cloud_jobs": return [] as T;
     case "pick_cloud_upload":
@@ -392,6 +403,7 @@ function previewResult<T>(command: string, payload: unknown): T {
     case "pause_job":
     case "resume_job":
     case "retry_job": return { jobId: (payload as JobIdRequest).jobId, accepted: true } as T;
+    case "remove_job_history": throw nativeUnavailableError();
     case "resolve_job_output":
     case "reveal_job_output": throw nativeUnavailableError();
     case "open_library_folder":
@@ -460,7 +472,9 @@ export function authorizedAssetUrl(response: Pick<PrepareMediaSourceResponse, "p
 }
 
 export const listJobs = (): Promise<JobsResponse> => command("list_jobs");
+export const getCompanionConnectionStatus = (): Promise<CompanionConnectionStatus> => command("companion_connection_status");
 export const cancelJob = (request: JobIdRequest): Promise<JobActionResponse> => command("cancel_job", request);
+export const removeJobHistory = (request: { jobIds: string[] }): Promise<RemoveJobHistoryResponse> => command("remove_job_history", request);
 export const pauseJob = (request: JobIdRequest): Promise<JobActionResponse> => command("pause_job", request);
 export const resumeJob = (request: JobIdRequest): Promise<JobActionResponse> => command("resume_job", request);
 export const retryJob = (request: JobIdRequest): Promise<JobActionResponse> => command("retry_job", request);
@@ -492,6 +506,8 @@ export const startOrGenerateSubtitle = (request: StartOrGenerateSubtitleRequest)
 export const importSubtitle = (request: ImportSubtitleRequest): Promise<ImportSubtitleResponse> => command("import_subtitle", request);
 export const syncSubtitle = (request: SyncSubtitleRequest): Promise<SyncSubtitleResponse> => command("sync_subtitle", request);
 export const cloudStatus = (): Promise<CloudStatusDto> => command("cloud_status");
+export const configureTelegram = (request: ConfigureTelegramRequest): Promise<void> => command("configure_telegram", request);
+export const installCloudComponent = (): Promise<void> => command("install_cloud_component");
 export const listCloudItems = (): Promise<CloudItemDto[]> => command("list_cloud_items");
 export const listCloudJobs = (): Promise<CloudJobDto[]> => command("list_cloud_jobs");
 export const pickCloudUpload = (): Promise<CloudUploadSelectionDto | null> => command("pick_cloud_upload");

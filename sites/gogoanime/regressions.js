@@ -9,8 +9,15 @@ export const gogoanimeRegressions = Object.freeze([
       livePrimaryHostFlexible: true,
       primaryHostSuffix: ".googlevideo.com",
       primaryTitle: "Futsutsuka na Akujo dewa Gozaimasu ga: Suuguu Chouso Torikae Den Episode 8 English Subbed",
+      rejectedPrimaryHosts: ["z6v2p9a8.bkcdn.net"],
     }),
     candidates: Object.freeze([
+      Object.freeze({
+        pageTitle: "Futsutsuka na Akujo dewa Gozaimasu ga: Suuguu Chouso Torikae Den Episode 8 English Subbed",
+        pageUrl: "https://gogoanime.by/futsutsuka-na-akujo-dewa-gozaimasu-ga-suuguu-chouso-torikae-den-episode-8-english-subbed/",
+        resourceUrl: "https://z6v2p9a8.bkcdn.net/library/834176/1342b400f1b83542546aec8bb73bc20d6b1329ba.mp4",
+        contentType: "video/mp4", frameId: 0, source: "media-element", confidence: 100, main: true,
+      }),
       Object.freeze({
         pageTitle: "Futsutsuka na Akujo dewa Gozaimasu ga: Suuguu Chouso Torikae Den Episode 8 English Subbed",
         pageUrl: "https://gogoanime.by/player/?source=blogger&url=encoded",
@@ -18,9 +25,9 @@ export const gogoanimeRegressions = Object.freeze([
         resourceUrl: "https://rr4---sn-npoe7nl6.googlevideo.com/videoplayback?id=blogger-video",
         contentType: "video/mp4",
         frameId: 228,
-        source: "media-element",
-        player: "blogger",
-        confidence: 96,
+        source: "web-response",
+        player: "",
+        confidence: 70,
         main: true,
       }),
     ]),
@@ -33,6 +40,8 @@ export const gogoanimeRegressions = Object.freeze([
     expected: Object.freeze({
       primaryHost: "megaplay.su",
       primaryPlayer: "player-page",
+      livePrimaryHosts: ["megaplay.su", "googlevideo.com"],
+      rejectedPrimaryHosts: ["z6v2p9a8.bkcdn.net"],
     }),
     candidates: Object.freeze([
       Object.freeze({

@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { get } from "svelte/store";
   import { onMount } from "svelte";
-  import type { JobDto } from "../api";
   import type { ShellView } from "../views";
-  import { jobsState, loadJobs, runJobAction } from "../stores/jobs";
+  import { jobsState, loadJobs, removeHistory, runJobAction } from "../stores/jobs";
+  import { canRemoveHistory, pendingActionLabel } from "../queue-policy";
   import { playerState } from "../stores/player";
   import {
     generateSubtitleFor,
@@ -19,15 +20,50 @@
 
   let { view, onOpenLibrary }: { view: ShellView; onOpenLibrary: () => void } = $props();
   let selectedSubtitleFile = $state("");
+  let subtitleJobWasActive = false;
+  let subtitleRefreshInFlight = false;
   let selected = $derived($playerState.selection);
   let selectedTrack = $derived($subtitleState.subtitles.find((item) => item.fileName === selectedSubtitleFile) ?? null);
-  let subtitleJobs = $derived($jobsState.jobs.filter(isSubtitleJob));
+  let subtitleJobs = $derived($jobsState.jobs.filter((job) => job.jobType === "subtitle"));
+  let removableSubtitleIds = $derived(subtitleJobs.filter((job) => canRemoveHistory(job) && !$jobsState.busy[job.jobId] && !$jobsState.pending[job.jobId]).map((job) => job.jobId));
+  let subtitleHistoryDialog: HTMLDialogElement;
+  let subtitleHistoryIds = $state<string[]>([]);
+
+  function confirmSubtitleHistoryRemoval(): void {
+    subtitleHistoryIds = [...removableSubtitleIds];
+    subtitleHistoryDialog.showModal();
+  }
+
+  function removeConfirmedSubtitleHistory(): void {
+    subtitleHistoryDialog.close();
+    void removeHistory(subtitleHistoryIds);
+  }
   let maxOffsetSeconds = $derived($subtitleState.capabilities?.maxOffsetSeconds ?? 24 * 60 * 60);
   let canSync = $derived(Boolean(selected && selectedTrack && subtitleFormat(selectedTrack.fileName, selectedTrack.format) !== "ass"));
 
+  async function refreshSubtitleSurface(): Promise<void> {
+    if (subtitleRefreshInFlight) return;
+    subtitleRefreshInFlight = true;
+    try {
+      await loadJobs(true);
+      const current = get(playerState).selection;
+      const active = get(jobsState).jobs.some((job) => job.jobType === "subtitle" && job.active);
+      // Keep the completed transition visible: the first poll after an active
+      // job ends must rediscover the newly saved sidecar exactly once.
+      if (current && (active || subtitleJobWasActive)) {
+        await loadSubtitlesFor(current.folder, current.entry.fileName, true);
+      }
+      subtitleJobWasActive = active;
+    } finally {
+      subtitleRefreshInFlight = false;
+    }
+  }
+
   onMount(() => {
-    void loadJobs();
+    void refreshSubtitleSurface();
     void loadSubtitleCapabilities();
+    const timer = window.setInterval(() => { void refreshSubtitleSurface(); }, 5_000);
+    return () => window.clearInterval(timer);
   });
 
   $effect(() => {
@@ -44,11 +80,6 @@
     if (!tracks.some((track) => track.fileName === selectedSubtitleFile)) selectedSubtitleFile = tracks[0]?.fileName ?? "";
   });
 
-  function isSubtitleJob(job: JobDto): boolean {
-    const haystack = `${job.jobType ?? ""} ${job.outputFormat ?? ""} ${job.title} ${job.detail ?? ""}`.toLowerCase();
-    return haystack.includes("subtitle") || haystack.includes("자막") || haystack.includes("srt") || haystack.includes("vtt");
-  }
-
   function currentFile(): string | null { return selected?.entry.fileName ?? null; }
   function currentFolder(): string | null { return selected?.folder ?? null; }
   function refresh(): void {
@@ -57,10 +88,11 @@
   }
   function refreshCapabilities(): void { void loadSubtitleCapabilities(true); }
   function isPending(action: "generate" | "import" | "sync"): boolean { return $subtitleState.pendingAction === action; }
-  function actionLabel(action: string): string { return ({ cancel: "취소", pause: "일시정지", resume: "재개" } as Record<string, string>)[action] ?? action; }
+  function actionLabel(action: string): string { return ({ cancel: "취소", pause: "일시정지", resume: "재개", retry: "같은 설정으로 다시 생성" } as Record<string, string>)[action] ?? action; }
 
   function generate(): void {
     if (!selected || !$subtitleState.selectedSourceLanguage || !$subtitleState.selectedTargetLanguage) return;
+    subtitleJobWasActive = true;
     void generateSubtitleFor({
       folder: selected.folder,
       fileName: selected.entry.fileName,
@@ -155,7 +187,7 @@
             </label>
             <button class="button secondary" type="button" onclick={syncSelected} disabled={Boolean($subtitleState.pendingAction) || !canSync}>{isPending("sync") ? "동기화 중…" : "자막 동기화"}</button>
           </div>
-          <p class="subtitle-capability-note">지원 형식: {$subtitleState.capabilities.formats.map((format) => format.toUpperCase()).join(", ")} · 오프셋 범위: ±{maxOffsetSeconds}초</p>
+          <p class="subtitle-capability-note">지원 형식: {$subtitleState.capabilities.formats.map((format) => format.toUpperCase()).join(", ")} · 오프셋 범위: ±{maxOffsetSeconds}초 · 자막 생성은 영상의 처음 1시간까지 처리됩니다.</p>
         {:else}<div class="notice error" role="alert">자막 기능을 확인하지 못했습니다.<button class="text-button" type="button" onclick={refreshCapabilities}>다시 확인</button></div>{/if}
       </section>
 
@@ -179,8 +211,16 @@
   {/if}
 
   <section class="subtitle-jobs" aria-labelledby="subtitle-jobs-title">
-    <div class="panel-heading"><div><h2 id="subtitle-jobs-title">자막 작업 기록</h2><p>Queue에 기록된 자막 관련 작업만 표시합니다.</p></div><button class="button quiet" type="button" onclick={() => loadJobs()} disabled={$jobsState.loading || $jobsState.refreshing}>새로 고침</button></div>
+    <div class="panel-heading"><div><h2 id="subtitle-jobs-title">자막 작업 기록</h2></div><div class="header-actions"><button class="button secondary" type="button" onclick={confirmSubtitleHistoryRemoval} disabled={!removableSubtitleIds.length}>기록 정리</button><button class="button quiet" type="button" onclick={() => loadJobs()} disabled={$jobsState.loading || $jobsState.refreshing}>새로 고침</button></div></div>
+    {#if $jobsState.error}<div class="notice error" role="alert">{$jobsState.error}</div>{/if}
+    {#if $jobsState.notice}<div class="notice success" role="status">{$jobsState.notice}</div>{/if}
     {#if subtitleJobs.length === 0}<p class="empty compact-empty">자막 작업이 없습니다.</p>
-    {:else}<div class="job-list">{#each subtitleJobs as job (job.jobId)}<article class="job-card"><div class="job-main"><div class="eyebrow"><span class="type-chip">{job.outputFormat ?? "SUBTITLE"}</span><span class="status-chip tone-{job.tone}">{job.statusLabel}</span></div><h3>{job.title}</h3><p>{job.detail ?? job.fileName ?? job.statusText}</p></div><div class="job-meta"><span>{job.progress === null ? job.statusText : `${job.progress}%`}</span><span>{job.language ?? ""}</span></div>{#if job.progress !== null}<div class="progress-track" role="progressbar" aria-label={`${job.title} 진행률`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={job.progress}><span style={`width: ${job.progress}%`}></span></div>{/if}<div class="job-footer"><span>{job.statusText}</span><div class="row-actions">{#each job.actions.filter((action) => ["cancel", "pause", "resume"].includes(action)) as action}<button class="button quiet" type="button" disabled={$jobsState.action === `${action}:${job.jobId}`} onclick={() => runJobAction(job, action)}>{$jobsState.action === `${action}:${job.jobId}` ? "처리 중…" : actionLabel(action)}</button>{/each}</div></div></article>{/each}</div>{/if}
+    {:else}<div class="job-table subtitle-job-table" role="list" aria-label="자막 작업">{#each subtitleJobs as job (job.jobId)}{@const busy = $jobsState.busy[job.jobId] ?? $jobsState.pending[job.jobId]?.action}{@const running = job.active || job.paused}<div class="job-row" class:job-active={job.active} role="listitem" aria-busy={Boolean(busy)} title={[job.detail, job.statusText].filter(Boolean).join(" · ") || undefined}><span class="job-dot tone-{job.tone}" aria-hidden="true"></span><span class="job-title">{job.title}</span><span class="job-quality">{(job.outputFormat ?? "SUB").toUpperCase()}</span><span class="job-status tone-{job.tone}" role="status">{busy ? pendingActionLabel(busy) : running && job.progress !== null ? `${job.statusLabel} ${job.progress}%` : job.statusLabel}</span><span class="job-size">{job.language ?? ""}</span><span class="job-actions">{#each job.actions.filter((action) => ["cancel", "pause", "resume", "retry"].includes(action)) as action}<button class="icon-button" type="button" disabled={Boolean(busy)} title={actionLabel(action)} aria-label={`${job.title} ${actionLabel(action)}`} onclick={() => runJobAction(job, action)}><span aria-hidden="true">{busy === action ? "…" : ({ cancel: "✕", pause: "❚❚", resume: "▶", retry: "↻" } as Record<string, string>)[action]}</span></button>{/each}{#if canRemoveHistory(job)}<button class="icon-button" type="button" disabled={Boolean($jobsState.busy[job.jobId])} title="기록 삭제" aria-label={`${job.title} 기록 삭제`} onclick={() => removeHistory([job.jobId])}><span aria-hidden="true">{$jobsState.busy[job.jobId] === "remove" ? "…" : "⌫"}</span></button>{/if}</span>{#if running}<span class="job-progress" class:indeterminate={job.active && job.progress === null} role="progressbar" aria-label={`${job.title} 진행률`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={job.progress ?? undefined}><span style={`width: ${job.progress ?? 0}%`}></span></span>{/if}</div>{/each}</div>{/if}
   </section>
 </section>
+
+<dialog class="history-dialog" bind:this={subtitleHistoryDialog} aria-labelledby="subtitle-history-title" aria-describedby="subtitle-history-description">
+  <h2 id="subtitle-history-title">자막 작업 기록 {subtitleHistoryIds.length}개를 삭제할까요?</h2>
+  <p id="subtitle-history-description">완료·실패·취소된 자막 작업 기록만 삭제됩니다. 생성된 자막 파일은 그대로 유지됩니다.</p>
+  <div class="modal-actions"><button class="button secondary" type="button" onclick={() => subtitleHistoryDialog.close()}>돌아가기</button><button class="button danger" type="button" onclick={removeConfirmedSubtitleHistory}>기록 삭제</button></div>
+</dialog>

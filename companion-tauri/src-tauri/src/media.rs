@@ -264,7 +264,9 @@ pub(crate) fn quantize_timestamp(target_seconds: f64, duration_seconds: f64) -> 
     if !target_seconds.is_finite() || !duration_seconds.is_finite() || duration_seconds <= 0.0 {
         return 0;
     }
-    let maximum = (duration_seconds - 0.001).max(0.0);
+    // Seeking inside the final frame's display interval can discard that
+    // frame and produce no JPEG. Stay one cache slot before the media end.
+    let maximum = (duration_seconds - PREVIEW_QUANTUM_MILLIS as f64 / 1_000.0).max(0.0);
     let clamped_millis = (target_seconds.max(0.0).min(maximum) * 1_000.0).floor() as u64;
     clamped_millis / PREVIEW_QUANTUM_MILLIS * PREVIEW_QUANTUM_MILLIS
 }
@@ -714,8 +716,65 @@ mod tests {
         assert_eq!(quantize_timestamp(1.499, 10.0), 1_000);
         assert_eq!(quantize_timestamp(1.500, 10.0), 1_500);
         assert_eq!(quantize_timestamp(99.0, 10.0), 9_500);
+        assert_eq!(quantize_timestamp(1.52, 1.52), 1_000);
+        assert_eq!(quantize_timestamp(0.04, 0.04), 0);
         assert_eq!(quantize_timestamp(f64::NAN, 10.0), 0);
         assert_eq!(quantize_timestamp(1.0, 0.0), 0);
+    }
+
+    #[test]
+    #[ignore = "requires SEGMA_TEST_FFMPEG; creates only isolated synthetic media"]
+    fn native_seek_preview_decodes_short_and_final_frame_requests() {
+        let ffmpeg = PathBuf::from(env::var_os("SEGMA_TEST_FFMPEG").expect("SEGMA_TEST_FFMPEG"));
+        let root = temp_root("native-preview");
+        for (name, duration) in [("tail.mp4", 1.52), ("short.mp4", 0.04)] {
+            let source_path = root.join(name);
+            run_ffmpeg(
+                &ffmpeg,
+                &[
+                    "-nostdin".into(),
+                    "-f".into(),
+                    "lavfi".into(),
+                    "-i".into(),
+                    format!("color=c=red:s=320x180:r=25:d={duration}").into(),
+                    "-c:v".into(),
+                    "mpeg4".into(),
+                    source_path.as_os_str().to_owned(),
+                ],
+            )
+            .unwrap();
+            let source = validate_media_ref(&root, None, name).unwrap();
+            let before = fs::read(&source.path).unwrap();
+            if name == "tail.mp4" {
+                // Old 1ms EOF margin selected 1.500s, after the last frame
+                // at 1.480s. ffmpeg writes no image (exit status varies by build).
+                let old = root.join("old-preview.jpg");
+                let _ = run_ffmpeg(
+                    &ffmpeg,
+                    &seek_preview_ffmpeg_arguments(&source.path, 1_500, &old),
+                );
+                assert!(!old.exists() || fs::metadata(old).unwrap().len() == 0);
+            }
+            let (preview, timestamp) =
+                generate_seek_preview(&source, duration, duration, &root.join("cache"), &ffmpeg)
+                    .unwrap();
+            assert_eq!(timestamp, if name == "tail.mp4" { 1_000 } else { 0 });
+            assert!(fs::metadata(&preview).unwrap().len() > 0);
+            run_ffmpeg(
+                &ffmpeg,
+                &[
+                    "-nostdin".into(),
+                    "-i".into(),
+                    preview.as_os_str().to_owned(),
+                    "-f".into(),
+                    "null".into(),
+                    "-".into(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(fs::read(&source.path).unwrap(), before);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

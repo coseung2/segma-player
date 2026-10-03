@@ -1,4 +1,6 @@
 import { canonicalHttpUrl, isLikelyHlsSegmentUrl } from "./candidate.js";
+import { downloadPolicyForCandidate } from "./download-policy.js";
+import { level5KeyErrorMessage } from "./level5-key-error.js";
 import {
   mediaDownloadBrowserContext,
   startCompanionMediaDownload,
@@ -30,6 +32,7 @@ export function isYouTubeDetectionCandidate(candidate) {
 
 export function createCompanionHandoff({
   resolveCandidate,
+  requestHlsKeys = null,
   randomUuid = () => crypto.randomUUID(),
   browserContext = mediaDownloadBrowserContext,
   startMedia = startCompanionMediaDownload,
@@ -37,8 +40,32 @@ export function createCompanionHandoff({
 } = {}) {
   if (typeof resolveCandidate !== "function") throw new TypeError("missing-candidate-resolver");
 
+  // Providers whose key endpoint returns an obfuscated payload (Level5) can
+  // only be decoded by the player running in the source frame. Collect those
+  // keys before the handoff; the Companion cannot reach that page runtime.
+  async function sourceFrameHlsKeys(candidate) {
+    const none = { hlsKeys: [], hlsPlaylist: "" };
+    if (candidate.mediaType !== "HLS_MEDIA" && candidate.mediaType !== "HLS_MASTER") return none;
+    if (!downloadPolicyForCandidate(candidate, candidate.resourceUrl).decodeHlsKeyInSourceFrame) return none;
+    if (typeof requestHlsKeys !== "function"
+      || !Number.isInteger(candidate.tabId) || !Number.isInteger(candidate.frameId)) {
+      throw Object.assign(new Error(level5KeyErrorMessage("level5-key-unavailable")), {
+        code: "level5-key-unavailable",
+      });
+    }
+    const response = await requestHlsKeys(candidate);
+    if (response?.ok === true && Array.isArray(response.keys)) {
+      return response.keys.length
+        ? { hlsKeys: response.keys, hlsPlaylist: String(response.playlist || "") }
+        : none;
+    }
+    const code = typeof response?.error === "string" ? response.error : "level5-key-unavailable";
+    throw Object.assign(new Error(level5KeyErrorMessage(code)), { code: "level5-key-unavailable" });
+  }
+
   async function queueMediaDownload(candidate) {
     const transferCandidate = await resolveCandidate(candidate);
+    const { hlsKeys, hlsPlaylist } = await sourceFrameHlsKeys(transferCandidate);
     const jobId = randomUuid();
     await startMedia({
       jobId,
@@ -47,6 +74,7 @@ export function createCompanionHandoff({
       ...(transferCandidate.pageUrl ? { referrer: transferCandidate.pageUrl } : {}),
       title: transferCandidate.pageTitle || "미디어 다운로드",
       inputKind: transferCandidate.mediaType,
+      ...(hlsKeys.length ? { hlsKeys, hlsPlaylist } : {}),
       ...browserContext(),
     });
     return { mode: "media-companion", jobId };

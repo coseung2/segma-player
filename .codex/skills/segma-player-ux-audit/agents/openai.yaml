@@ -1,0 +1,8 @@
+interface:
+  display_name: "Segma Player UX Audit"
+  short_description: "정량·정성으로 Segma Player UX를 감사하고 개선"
+  brand_color: "#FFA31A"
+  default_prompt: "Use $segma-player-ux-audit to evaluate this Segma Player flow quantitatively and qualitatively."
+
+policy:
+  allow_implicit_invocation: true

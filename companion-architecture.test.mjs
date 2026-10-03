@@ -138,7 +138,7 @@ test("candidate and link downloads have no local execution fallback", async () =
     read("./content.js"),
     read("./background-companion-handoff.js"),
   ]);
-  assert.match(background, /createCompanionHandoff\(\{ resolveCandidate: resolvePlayerCandidate \}\)/);
+  assert.match(background, /createCompanionHandoff\(\{[\s\S]{0,400}resolvePlayerCandidate\(candidate\)/);
   assert.match(handoff, /const transferCandidate = await resolveCandidate\(candidate\)/);
   assert.match(handoff, /startMedia\(\{/);
   assert.match(handoff, /mode: "media-companion"/);
@@ -206,7 +206,7 @@ test("the Tauri manager is the release source and retired mpv is not packaged", 
   assert.match(installer, /Type: filesandordirs; Name: "\{app\}\\tools\\mpv"/);
 });
 
-test("the installer builds and packages the file-backed cloud agent with Telegram disabled", async () => {
+test("the installer builds and packages the file-backed cloud agent with Telegram fail-closed until configured", async () => {
   const [script, installer, cloudCargo, cloudMain, cloudContract] = await Promise.all([
     read("./scripts/build-companion-installer.ps1"),
     read("./installer/AuraMediaCompanion.iss"),
@@ -217,7 +217,13 @@ test("the installer builds and packages the file-backed cloud agent with Telegra
 
   assert.match(cloudCargo, /name = "aura-media-cloud"/);
   assert.match(cloudContract, /CLOUD_JOB_CAPABILITY: &str = "cloud-job-v1"/);
-  assert.match(cloudMain, /"telegram": false/);
+  // The Telegram Bot API provider is implemented, so status must report the
+  // protected configuration instead of a hardcoded provider flag. An
+  // unconfigured or unresolvable root still reports false.
+  assert.match(cloudMain, /protected_config_available/);
+  assert.match(cloudMain, /unwrap_or\(false\)/);
+  assert.doesNotMatch(cloudMain, /"telegram":\s*(?:true|false)/);
+  assert.doesNotMatch(cloudMain, /\d{6,12}:[A-Za-z0-9_-]{30,}/);
   assert.match(script, /cloud-agent\\Cargo\.toml/);
   assert.match(script, /cloud-agent\\target\\release\\aura-media-cloud\.exe/);
   assert.match(installer, /cloud-agent\\target\\release\\aura-media-cloud\.exe/);

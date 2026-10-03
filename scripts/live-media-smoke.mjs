@@ -162,7 +162,14 @@ function evaluateCase(fixture, candidates) {
       actual: "[path-redacted]",
     };
   }
-  if (expected.primaryHost && !expected.livePrimaryHostFlexible && displayHost(primary) !== expected.primaryHost) {
+  const liveHosts = expected.livePrimaryHosts;
+  if (liveHosts && !liveHosts.some((host) => displayHost(primary) === host || displayHost(primary).endsWith(`.${host}`))) {
+    return { ok: false, reason: "unexpected-primary-host", expected: liveHosts, actual: displayHost(primary) };
+  }
+  if ((expected.rejectedPrimaryHosts || []).includes(displayHost(primary))) {
+    return { ok: false, reason: "rejected-primary-host", actual: displayHost(primary) };
+  }
+  if (!liveHosts && expected.primaryHost && !expected.livePrimaryHostFlexible && displayHost(primary) !== expected.primaryHost) {
     return {
       ok: false,
       reason: "unexpected-primary-host",
@@ -186,7 +193,7 @@ function evaluateCase(fixture, candidates) {
       actual: primary?.pageTitle || "",
     };
   }
-  if (expected.primaryPlayer && primary?.player !== expected.primaryPlayer) {
+  if (expected.primaryPlayer && (!liveHosts || displayHost(primary) === expected.primaryHost) && primary?.player !== expected.primaryPlayer) {
     return {
       ok: false,
       reason: "unexpected-primary-player",
@@ -438,10 +445,28 @@ async function downloadCandidateAndWait(controlPage, candidateId) {
     if (["completed", "failed", "cancelled"].includes(job?.status)) break;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
+  const timedOut = !["completed", "failed", "cancelled"].includes(job?.status);
+  if (timedOut) {
+    // This job was created by this probe. Never leave an unbounded test
+    // transfer behind when its observation deadline expires.
+    await controlPage.evaluate(async (jobId) => {
+      const { cancelCompanionJob } = await import(chrome.runtime.getURL("companion-client.js"));
+      await cancelCompanionJob(jobId);
+    }, accepted.jobId);
+    const cleanupDeadline = Date.now() + 15_000;
+    do {
+      job = await companionJobSnapshot(controlPage, accepted.jobId);
+      if (["completed", "failed", "cancelled"].includes(job?.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    } while (Date.now() < cleanupDeadline);
+  }
   const completedBytes = Number(job?.completed);
   return {
-    ok: job?.status === "completed" && Number.isFinite(completedBytes) && completedBytes > 0,
-    reason: job?.status || "download-timeout",
+    // yt-dlp (HLS/DASH) jobs report a saved file name but no byte counter.
+    ok: !timedOut && job?.status === "completed"
+      && ((Number.isFinite(completedBytes) && completedBytes > 0) || Boolean(job?.fileName)),
+    reason: timedOut ? "download-timeout" : job?.status || "download-timeout",
+    timedOut,
     elapsedMs: Date.now() - startedAt,
     job,
   };
@@ -765,6 +790,21 @@ async function main() {
           || /octet-stream/i.test(navigationContentType)
           || /attachment/i.test(String(navigationHeaders["content-disposition"] || ""));
         const challenge = await waitForUserChallenge(page, navigationResponse?.status() ?? null);
+        if (autoplay && fixture.activationSelector && !challenge.detected) {
+          // Page scripts bind player buttons after load; clicking earlier is a no-op.
+          await page.waitForLoadState("load", { timeout: 20_000 }).catch(() => {});
+          await page.waitForTimeout(3_000);
+          // Ad-heavy hosts navigate popups on click; do not wait for navigation.
+          // An array runs ordered steps, e.g. choose a server, then start playback.
+          const steps = Array.isArray(fixture.activationSelector)
+            ? fixture.activationSelector : [fixture.activationSelector];
+          for (const selector of steps) {
+            await page.locator(selector).first()
+              .click({ timeout: 10_000, noWaitAfter: true })
+              .catch(() => {});
+            await page.waitForTimeout(1_000);
+          }
+        }
         if (autoplay) {
           for (const frame of page.frames().slice(1)) {
             const safeToClick = await frame.evaluate(() => {
@@ -881,7 +921,9 @@ async function main() {
               expected: [...expectedFinalHosts],
               actual: pageState.finalHost,
             };
-        if (pageState.challengeHint && !challenge.completed) {
+        // A challenge hint (often an embedded reCAPTCHA frame) only blocks the
+        // case when it actually prevented the expected media from appearing.
+        if (pageState.challengeHint && !challenge.completed && !evaluation.ok) {
           evaluation = {
             ok: false,
             blocked: true,
@@ -978,6 +1020,10 @@ async function main() {
       } finally {
         page?.off("response", observeResponse);
         await closePageBounded(page);
+        await mkdir(path.dirname(reportPath), { recursive: true });
+        await writeFile(`${reportPath}.progress.json`, `${JSON.stringify({ extensionVersion, companionStatus, adblockMode: activeAdblockMode, results }, null, 2)}\n`, "utf8");
+        const latest = results.at(-1);
+        process.stdout.write(`SITE_CHECK ${fixture.id} ${latest?.ok ? "PASS" : latest?.reason || "FAILED"}\n`);
       }
     }
   } finally {
@@ -988,7 +1034,9 @@ async function main() {
       ]);
       if (!closed) await context.browser()?.close().catch(() => {});
     }
-    await rm(profileDirectory, { recursive: true, force: true });
+    // Chrome can hold its profile journal briefly after close; cleanup failure
+    // must not turn a completed site check into a failed run.
+    await rm(profileDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }).catch(() => {});
   }
 
   const companionReady = companionStatus.ok === true

@@ -2,20 +2,21 @@
   import { onMount } from "svelte";
   import type { CloudItemDto, CloudJobDto, LibraryEntryDto } from "../api";
   import type { ShellView } from "../views";
-  import { libraryState, editMetadata, loadLibrary, moveFile, openFolder, organize, recycleFile, revealFile } from "../stores/library";
+  import { acknowledgeNewLibraryEntries, libraryState, editMetadata, loadLibrary, moveFile, openFolder, organize, recycleFile, revealFile, startLibraryPolling, stopLibraryPolling } from "../stores/library";
   import { failThumbnail, requestThumbnail, resetThumbnails, thumbnailState } from "../stores/thumbnails";
   import { mediaIdentity, normalizeFolder } from "../selection-identity";
   import { selectMedia } from "../stores/player";
   import {
     cancelCloudTransfer, cloudState, deleteCloudItem, downloadCloudItem,
     isCloudJobActive, isCloudJobCancellable, loadCloud, startCloudPolling,
-    stopCloudPolling, uploadCloudItem,
+    stopCloudPolling, uploadCloudItem, installMissingCloudComponent,
   } from "../stores/cloud";
 
-  let { view, onOpenPlayer }: { view: ShellView; onOpenPlayer: () => void } = $props();
+  let { view, onOpenPlayer, onOpenSettings }: { view: ShellView; onOpenPlayer: () => void; onOpenSettings: () => void } = $props();
   let query = $state("");
   let filter = $state<"all" | "favorite" | "unwatched" | "inProgress" | "completed">("all");
-  let display = $state<"grid" | "list">("grid");
+  // Rows are the default: the library is mostly file management, not browsing.
+  let display = $state<"grid" | "list">("list");
   let deleteTarget = $state<LibraryEntryDto | null>(null);
   let moveTarget = $state<LibraryEntryDto | null>(null);
   let destination = $state("");
@@ -28,23 +29,26 @@
 
   onMount(() => {
     void loadLibrary(null);
-    if (typeof IntersectionObserver === "undefined") return;
-    thumbnailObserver = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const target = entry.target as HTMLElement;
-        const identity = thumbnailNodes.get(target);
-        if (!identity) continue;
-        requestThumbnail(identity.folder, identity.fileName);
-        thumbnailObserver?.unobserve(target);
-      }
-    }, { rootMargin: "0px" });
-    for (const node of thumbnailNodes.keys()) thumbnailObserver.observe(node);
+    startLibraryPolling();
+    if (typeof IntersectionObserver !== "undefined") {
+      thumbnailObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const target = entry.target as HTMLElement;
+          const identity = thumbnailNodes.get(target);
+          if (!identity) continue;
+          requestThumbnail(identity.folder, identity.fileName);
+          thumbnailObserver?.unobserve(target);
+        }
+      }, { rootMargin: "0px" });
+      for (const node of thumbnailNodes.keys()) thumbnailObserver.observe(node);
+    }
     return () => {
       thumbnailObserver?.disconnect();
       thumbnailObserver = null;
       thumbnailNodes.clear();
       resetThumbnails();
+      stopLibraryPolling();
     };
   });
   let data = $derived($libraryState.data);
@@ -93,6 +97,23 @@
   function selectFolder(folder: string | null) { void loadLibrary(folder); }
   function folderLabel(folder: string | null) { return folder ?? "전체 보관함"; }
   function formatDate(value: number) { return value ? new Date(value).toLocaleDateString("ko-KR") : "날짜 없음"; }
+  function formatClock(seconds: number) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return "";
+    const total = Math.round(seconds);
+    const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+    return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+  }
+  // One-line meta for list rows: duration · quality · size · date.
+  function rowMeta(entry: LibraryEntryDto) {
+    const quality = /(?:^|[\[\s(_-])(\d{3,4})p(?=[\]\s)_.-]|$)/i.exec(entry.fileName)?.[1];
+    return [formatClock(entry.metadata.duration), quality ? `${quality}p` : "", entry.size ?? "", formatDate(entry.modifiedAt)].filter(Boolean).join(" · ");
+  }
+  function watchText(entry: LibraryEntryDto) {
+    const { watchState, lastPosition, duration } = entry.metadata;
+    if (watchState === "completed") return "다 봄";
+    if (watchState === "inProgress") return duration > 0 ? `시청 중 ${Math.min(99, Math.round((lastPosition / duration) * 100))}%` : "시청 중";
+    return "안 봄";
+  }
   function toggleFavorite(entry: LibraryEntryDto) { void editMetadata({ folder: data.folder, fileName: entry.fileName, favorite: !entry.metadata.favorite }); }
   function setRating(entry: LibraryEntryDto, rating: number) { void editMetadata({ folder: data.folder, fileName: entry.fileName, rating }); }
   function startMove(entry: LibraryEntryDto) { moveTarget = entry; destination = ""; }
@@ -142,9 +163,11 @@
   {#if libraryTab === "local"}
   <div id="local-library-panel" role="tabpanel">
   <div class="folder-strip" aria-label="보관함 폴더"><button class:active={data.folder === null} class="folder-button" type="button" onclick={() => selectFolder(null)}>전체 보관함 <span>{data.entries.length}</span></button>{#each data.folders as folder}<button class:active={data.folder === folder.name} class="folder-button" type="button" ondragover={(event) => event.preventDefault()} ondrop={(event) => dropOnFolder(event, folder.name)} onclick={() => selectFolder(folder.name)}>{folder.name} <span>{folder.mediaCount}</span></button>{/each}</div>
-  <div class="toolbar library-toolbar"><div class="segmented-control" role="tablist" aria-label="보관함 필터">{#each filters as [value, label]}<button class:active={filter === value} type="button" role="tab" aria-selected={filter === value} onclick={() => (filter = value)}>{label}</button>{/each}</div><label class="search-field"><span class="sr-only">보관함 검색</span><input bind:value={query} type="search" placeholder="제목 또는 파일명 검색" /></label><div class="segmented-control compact" aria-label="표시 방식"><button class:active={display === "grid"} type="button" onclick={() => (display = "grid")}>그리드</button><button class:active={display === "list"} type="button" onclick={() => (display = "list")}>목록</button></div></div>
+  <div class="toolbar library-toolbar"><div class="segmented-control" role="tablist" aria-label="보관함 필터">{#each filters as [value, label]}<button class:active={filter === value} type="button" role="tab" aria-selected={filter === value} onclick={() => (filter = value)}>{label}</button>{/each}</div><label class="search-field"><span class="sr-only">보관함 검색</span><input bind:value={query} type="search" placeholder="제목 또는 파일명 검색" /></label><div class="segmented-control compact" aria-label="표시 방식"><button class:active={display === "list"} type="button" aria-pressed={display === "list"} onclick={() => (display = "list")}>목록</button><button class:active={display === "grid"} type="button" aria-pressed={display === "grid"} onclick={() => (display = "grid")}>그리드</button></div></div>
   {#if $libraryState.error}<div class="notice error" role="alert">{$libraryState.error}<button class="text-button" type="button" onclick={() => loadLibrary(data.folder)}>다시 시도</button></div>{/if}
   {#if $libraryState.notice}<div class="notice success" role="status">{$libraryState.notice}</div>{/if}
+  {#if $libraryState.newEntryCount > 0}<div class="notice success" role="status"><span>새 항목 {$libraryState.newEntryCount}개가 추가되었습니다.</span><button class="text-button" type="button" onclick={acknowledgeNewLibraryEntries}>확인</button></div>{/if}
+  {#if data.missingOutputCount > 0}<div class="notice" role="status">확인되지 않은 다운로드 {data.missingOutputCount}개가 있습니다.</div>{/if}
   {#if $libraryState.loading}<div class="loading-state" role="status">보관함을 불러오는 중…</div>
   {:else if visibleEntries.length === 0}<div class="empty"><strong>{query || filter !== "all" ? "조건에 맞는 미디어가 없습니다." : "보관함이 비어 있습니다."}</strong><span>{query || filter !== "all" ? "검색어나 필터를 확인해 주세요." : "다운로드한 미디어가 이곳에 표시됩니다."}</span></div>
   {:else}<div class:media-list={display === "list"} class="media-grid">{#each visibleEntries as entry (mediaIdentity(data.folder, entry.fileName))}
@@ -155,8 +178,10 @@
       {#if thumbnail?.status === "ready" && thumbnail.url}<img class="media-thumb-image" src={thumbnail.url} alt="" onerror={(event) => failThumbnail(thumbnailKey, (event.currentTarget as HTMLImageElement).src)} />{:else}<span>{entry.typeLabel}</span><strong>{entry.title.slice(0, 1).toUpperCase()}</strong>{/if}
       {#if thumbnail?.status === "loading"}<span class="media-thumb-status" aria-hidden="true">불러오는 중</span>{/if}
     </button>
-    <div class="media-copy"><div class="media-title-row"><h2 title={entry.title}>{entry.title}</h2><button class:favorite={entry.metadata.favorite} class="icon-button" type="button" aria-label={entry.metadata.favorite ? "즐겨찾기 해제" : "즐겨찾기 추가"} aria-pressed={entry.metadata.favorite} onclick={() => toggleFavorite(entry)}>★</button></div><p>{entry.size ?? "크기 없음"} · {formatDate(entry.modifiedAt)}</p><div class="rating" aria-label={`별점 ${entry.metadata.rating}점`}>{#each [1, 2, 3, 4, 5] as rating}<button class:filled={rating <= entry.metadata.rating} type="button" aria-label={`${rating}점으로 평가`} onclick={() => setRating(entry, rating)}>★</button>{/each}</div></div>
-    <div class="media-actions"><button class="button primary" type="button" onclick={() => openPlayer(entry)}>재생</button><button class="button quiet" type="button" onclick={() => revealFile(entry)}>위치 보기</button><button class="button quiet" type="button" onclick={() => startMove(entry)}>이동</button><button class="button danger-quiet" type="button" onclick={() => (deleteTarget = entry)}>삭제</button></div>
+    <div class="media-copy"><div class="media-title-row"><h2 title={entry.title}>{entry.title}</h2><button class:favorite={entry.metadata.favorite} class="icon-button" type="button" aria-label={entry.metadata.favorite ? "즐겨찾기 해제" : "즐겨찾기 추가"} aria-pressed={entry.metadata.favorite} onclick={() => toggleFavorite(entry)}>★</button></div><p>{display === "list" ? rowMeta(entry) : `${entry.size ?? "크기 없음"} · ${formatDate(entry.modifiedAt)}`}</p>{#if display === "grid"}<div class="rating" aria-label={`별점 ${entry.metadata.rating}점`}>{#each [1, 2, 3, 4, 5] as rating}<button class:filled={rating <= entry.metadata.rating} type="button" aria-label={`${rating}점으로 평가`} onclick={() => setRating(entry, rating)}>★</button>{/each}</div>{/if}</div>
+    {#if display === "list"}<span class="media-watch" class:in-progress={entry.metadata.watchState === "inProgress"}>{watchText(entry)}</span><div class="rating" aria-label={`별점 ${entry.metadata.rating}점`}>{#each [1, 2, 3, 4, 5] as rating}<button class:filled={rating <= entry.metadata.rating} type="button" aria-label={`${rating}점으로 평가`} onclick={() => setRating(entry, rating)}>★</button>{/each}</div>{/if}
+    {#if display === "list"}<div class="media-actions row-icons"><button class="icon-button" type="button" title="재생" aria-label={`${entry.title} 재생`} onclick={() => openPlayer(entry)}><span aria-hidden="true">▶</span></button><button class="icon-button" type="button" title="위치 보기" aria-label={`${entry.title} 위치 보기`} onclick={() => revealFile(entry)}><span aria-hidden="true">▤</span></button><button class="icon-button" type="button" title="이동" aria-label={`${entry.title} 이동`} onclick={() => startMove(entry)}><span aria-hidden="true">⇄</span></button><button class="icon-button danger" type="button" title="삭제" aria-label={`${entry.title} 삭제`} onclick={() => (deleteTarget = entry)}><span aria-hidden="true">⌫</span></button></div>
+    {:else}<div class="media-actions"><button class="button primary" type="button" onclick={() => openPlayer(entry)}>재생</button><button class="button quiet" type="button" onclick={() => revealFile(entry)}>위치 보기</button><button class="button quiet" type="button" onclick={() => startMove(entry)}>이동</button><button class="button danger-quiet" type="button" onclick={() => (deleteTarget = entry)}>삭제</button></div>{/if}
   </article>{/each}</div>{/if}
 
   {#if $libraryState.organization}<section class="organization-panel" aria-labelledby="organization-title"><div class="panel-heading"><div><h2 id="organization-title">자동 정리 계획</h2><p>{$libraryState.organization.items.length ? `이동 예정 ${$libraryState.organization.items.length}개` : "정리할 파일이 없습니다."}</p></div>{#if !$libraryState.organization.applied && $libraryState.organization.items.length}<button class="button primary" type="button" onclick={() => organize(true)}>적용</button>{/if}</div>{#if $libraryState.organization.items.length}<ul>{#each $libraryState.organization.items as item}<li><span>{item.source.folder ? `${item.source.folder}/` : ""}{item.source.fileName}</span><span aria-hidden="true">→</span><span>{item.destination.folder ? `${item.destination.folder}/` : ""}{item.destination.fileName}</span></li>{/each}</ul>{/if}</section>{/if}
@@ -168,14 +193,14 @@
     {#if $cloudState.loading}<div class="loading-state" role="status">텔레그램 보관함을 불러오는 중…</div>
     {:else}
       <section class="cloud-status-card" aria-labelledby="cloud-status-title">
-        <div><div class="eyebrow"><span class="status-dot" class:connected={$cloudState.status?.telegramConfigured && $cloudState.status?.executableAvailable}></span><span class="status-chip" class:tone-success={$cloudState.status?.telegramConfigured && $cloudState.status?.executableAvailable} class:tone-warning={!$cloudState.status?.telegramConfigured || !$cloudState.status?.executableAvailable}>{$cloudState.status?.telegramConfigured && $cloudState.status?.executableAvailable ? "사용 가능" : "설정 필요"}</span></div><h2 id="cloud-status-title">텔레그램 보관함</h2><p>{$cloudState.status?.telegramConfigured ? ($cloudState.status.executableAvailable ? "파일을 올리고 내려받을 준비가 되었습니다." : "텔레그램 전송 기능을 시작할 수 없습니다.") : "텔레그램 저장소 연결을 먼저 설정해 주세요."}</p></div>
+        <div><div class="eyebrow"><span class="status-dot" class:connected={$cloudState.status?.telegramConfigured && $cloudState.status?.executableAvailable}></span><span class="status-chip" class:tone-success={$cloudState.status?.telegramConfigured && $cloudState.status?.executableAvailable} class:tone-warning={!$cloudState.status?.telegramConfigured || !$cloudState.status?.executableAvailable}>{!$cloudState.status?.executableAvailable ? "구성 요소 없음" : !$cloudState.status?.telegramConfigured ? "설정 필요" : "사용 가능"}</span></div><h2 id="cloud-status-title">텔레그램 보관함</h2><p>{!$cloudState.status?.executableAvailable ? "클라우드 구성 요소를 찾을 수 없습니다." : !$cloudState.status?.telegramConfigured ? "텔레그램 저장소 설정이 필요합니다." : "파일을 올리고 내려받을 준비가 되었습니다."}</p></div>
         <button class="button secondary" type="button" onclick={() => loadCloud()} disabled={$cloudState.refreshing || $cloudState.action !== null}>{$cloudState.refreshing ? "새로 고치는 중…" : "새로 고침"}</button>
       </section>
 
-      {#if !$cloudState.status?.telegramConfigured}
-        <div class="empty cloud-empty"><strong>텔레그램 저장소 설정이 필요합니다.</strong><span>설정을 마친 뒤 이 화면에서 파일을 안전하게 올리고 받을 수 있습니다.</span></div>
-      {:else if !$cloudState.status.executableAvailable}
-        <div class="empty cloud-empty"><strong>텔레그램 저장소를 사용할 수 없습니다.</strong><span>잠시 후 새로 고침을 눌러 상태를 다시 확인해 주세요.</span></div>
+      {#if !$cloudState.status?.executableAvailable}
+        <div class="empty cloud-empty"><strong>구성 요소 없음</strong><span>클라우드 구성 요소를 설치하면 텔레그램 보관함을 사용할 수 있습니다.</span><button class="button primary" type="button" onclick={() => installMissingCloudComponent()} disabled={$cloudState.action !== null}>{$cloudState.action === "install" ? "설치 중…" : "구성 요소 설치"}</button></div>
+      {:else if !$cloudState.status.telegramConfigured}
+        <div class="empty cloud-empty"><strong>설정 필요</strong><span>설정에서 봇 토큰과 저장소 채팅 ID를 저장하면 파일을 올리고 받을 수 있습니다.</span><button class="button primary" type="button" onclick={onOpenSettings}>설정 열기</button></div>
       {:else}
         {#if activeCloudJobs.length}
           <section class="cloud-section" aria-labelledby="active-transfers-title"><div class="cloud-section-heading"><h2 id="active-transfers-title">진행 중인 전송</h2><span>{activeCloudJobs.length}개</span></div><div class="cloud-job-list">{#each activeCloudJobs as job (job.jobId)}<article class="cloud-job-card"><div class="cloud-job-copy"><div class="eyebrow"><span class="type-chip">{cloudOperationLabel(job.operation)}</span><span class={`status-chip tone-${cloudTone(job)}`}>{cloudStatusLabel(job)}</span></div><h3 title={job.fileName ?? "파일"}>{job.fileName ?? "파일"}</h3><p>{cloudPhase(job)}</p></div><span class="cloud-progress-value">{cloudProgress(job)}%</span><div class="progress-track" aria-label={`${job.fileName ?? "파일"} ${cloudProgress(job)}%`} role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={cloudProgress(job)}><span style={`width: ${cloudProgress(job)}%`}></span></div><div class="cloud-job-footer"><span>{cloudDate(job.updatedAt)}</span>{#if isCloudJobCancellable(job)}<button class="button quiet" type="button" onclick={() => cancelCloudTransfer(job)} disabled={$cloudState.action !== null}>{$cloudState.action === `cancel:${job.jobId}` ? "취소 중…" : "취소"}</button>{/if}</div></article>{/each}</div></section>

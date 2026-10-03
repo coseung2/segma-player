@@ -286,6 +286,10 @@ test("media-download rejects non-public URLs and unsupported input kinds before 
     { ...sampleMediaDownloadInput(), userAgent: "x".repeat(513) },
     { ...sampleMediaDownloadInput(), acceptLanguage: "ko\r\nInjected: yes" },
     { ...sampleMediaDownloadInput(), acceptLanguage: "ko,*;q=0.9" },
+    { ...sampleMediaDownloadInput(), hlsKeys: [{ uri: "https://keys.example/k", key: "AQID" }] },
+    { ...sampleMediaDownloadInput(), hlsKeys: [{ uri: "http://127.0.0.1/k", key: "AQIDBAUGBwgJCgsMDQ4PEA==" }] },
+    { ...sampleMediaDownloadInput(), hlsKeys: [{ uri: "https://keys.example/k", key: "AQIDBAUGBwgJCgsMDQ4PEA==", extra: 1 }] },
+    { ...sampleMediaDownloadInput(), inputKind: "PROGRESSIVE", hlsKeys: [{ uri: "https://keys.example/k", key: "AQIDBAUGBwgJCgsMDQ4PEA==" }] },
   ]) {
     assert.throws(
       () => startCompanionMediaDownload(input),
@@ -293,6 +297,19 @@ test("media-download rejects non-public URLs and unsupported input kinds before 
     );
   }
   assert.equal(fake.connectCount, 0);
+});
+
+test("media-download forwards bounded page-decoded HLS keys", async () => {
+  const fake = installFakeChrome((port, message) => {
+    port.respond({ ok: true, requestId: message.requestId, accepted: true, jobId: "job-123" });
+  }, { capabilities: [MEDIA_DOWNLOAD_CAPABILITY] });
+  const hlsKeys = [{ uri: "https://keys.example/v/session", key: "AQIDBAUGBwgJCgsMDQ4PEA==" }];
+  const hlsPlaylist = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"https://keys.example/v/session\"\n";
+  await startCompanionMediaDownload({ ...sampleMediaDownloadInput(), hlsKeys, hlsPlaylist });
+  assert.deepEqual(fake.ports[0].messages[1].hlsKeys, hlsKeys);
+  assert.equal(fake.ports[0].messages[1].hlsPlaylist, hlsPlaylist);
+  assert.throws(() => startCompanionMediaDownload({ ...sampleMediaDownloadInput(), hlsKeys }),
+    assertCompanionCode("invalid-media-download-command"));
 });
 
 test("media-download requires the advertised v1 capability and never posts a fallback command", async () => {

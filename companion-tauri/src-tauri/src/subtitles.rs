@@ -1002,6 +1002,10 @@ fn known_remote_error(error: &str) -> Option<SubtitleRunError> {
             "subtitle-too-large",
             "subtitle result exceeded the service limit",
         ),
+        "subtitle-no-speech" => (
+            "subtitle-no-speech",
+            "no speech could be recognized in this media",
+        ),
         "job-failed" => ("job-failed", "subtitle service job failed"),
         "subtitle-job-not-owned" => (
             "subtitle-job-not-owned",
@@ -1396,6 +1400,12 @@ fn cleanup_active(directory: &Path, job_id: &str) {
     }
 }
 
+fn cleanup_marker(directory: &Path, job_id: &str) {
+    if let Ok(path) = cancel_path(directory, job_id) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn set_state(
     directory: &Path,
     state: &mut jobs::JobState,
@@ -1414,7 +1424,7 @@ fn set_state(
 fn fail_state(directory: &Path, state: &mut jobs::JobState, error: SubtitleRunError) {
     state.error = Some(error.code.to_string());
     let _ = set_state(directory, state, "failed", error.message, Some("failed"));
-    cleanup_active(directory, &state.job_id);
+    cleanup_marker(directory, &state.job_id);
 }
 
 fn cancelled_state(directory: &Path, state: &mut jobs::JobState) -> Result<(), SubtitleRunError> {
@@ -1944,6 +1954,92 @@ pub(crate) fn start_subtitle_job(
     Ok(state)
 }
 
+fn local_request_is_restartable_with_root(
+    directory: &Path,
+    downloads_root: &Path,
+    job_id: &str,
+) -> bool {
+    let Ok(path) = request_path(directory, job_id) else {
+        return false;
+    };
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<LocalSubtitleRequest>(&bytes).ok())
+        .is_some_and(|request| {
+            request.job_id == job_id
+                && validate_languages(&request.source_language, &request.target_language).is_ok()
+                && crate::media::validate_media_ref(
+                    downloads_root,
+                    request.folder.as_deref(),
+                    &request.file_name,
+                )
+                .is_ok()
+        })
+}
+
+pub(crate) fn local_request_is_restartable_in(directory: &Path, job_id: &str) -> bool {
+    jobs::downloads_dir()
+        .ok()
+        .is_some_and(|root| local_request_is_restartable_with_root(directory, &root, job_id))
+}
+
+pub(crate) fn retry_local_subtitle_job(job_id: &str) -> io::Result<bool> {
+    let directory = jobs::jobs_dir()?;
+    if !local_request_is_restartable_in(&directory, job_id) {
+        return Ok(false);
+    }
+    let request: LocalSubtitleRequest =
+        serde_json::from_slice(&fs::read(request_path(&directory, job_id)?)?)
+            .map_err(io::Error::other)?;
+    let mut state = read_state(&directory, job_id)?;
+    if state.job_type.as_deref() != Some("subtitle") || state.status != "failed" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "subtitle-job-not-retryable",
+        ));
+    }
+    let (source_language, target_language) =
+        validate_languages(&request.source_language, &request.target_language)?;
+    let root = jobs::downloads_dir()?;
+    let media =
+        crate::media::validate_media_ref(&root, request.folder.as_deref(), &request.file_name)?;
+    let companion_root = jobs::companion_root()?;
+    state.status = "preparing".into();
+    state.status_text = "같은 설정으로 자막을 다시 생성하는 중…".into();
+    state.execution_status = Some("started".into());
+    state.source_language = Some(source_language);
+    state.target_language = Some(target_language);
+    state.remote_job_id = None;
+    state.phase = None;
+    state.progress = None;
+    state.completed = None;
+    state.total = None;
+    state.error = None;
+    write_state(&directory, &mut state, now_millis())?;
+    if let Ok(path) = cancel_path(&directory, job_id) {
+        let _ = fs::remove_file(path);
+    }
+    let failed_directory = directory.clone();
+    let failed_job_id = job_id.to_string();
+    thread::Builder::new()
+        .name(format!("segma-subtitle-{job_id}"))
+        .spawn(move || run_job(request, media, companion_root, directory))
+        .map_err(|error| {
+            if let Ok(mut state) = read_state(&failed_directory, &failed_job_id) {
+                fail_state(
+                    &failed_directory,
+                    &mut state,
+                    run_error(
+                        "subtitle-start-failed",
+                        "Subtitle job could not be started.",
+                    ),
+                );
+            }
+            error
+        })?;
+    Ok(true)
+}
+
 pub(crate) fn cleanup_stale_requests_in(directory: &Path, now: u64) -> io::Result<()> {
     if !directory.is_dir() {
         return Ok(());
@@ -1967,8 +2063,12 @@ pub(crate) fn cleanup_stale_requests_in(directory: &Path, now: u64) -> io::Resul
             .and_then(|bytes| serde_json::from_slice(&bytes).ok());
         match state {
             None => cleanup_active(directory, job_id),
+            Some(state) if matches!(state.status.as_str(), "completed" | "cancelled") => {
+                cleanup_active(directory, job_id)
+            }
             Some(state)
-                if matches!(state.status.as_str(), "completed" | "failed" | "cancelled") =>
+                if state.status == "failed"
+                    && now.saturating_sub(state.updated_at) > MAX_ACTIVE_AGE_MS =>
             {
                 cleanup_active(directory, job_id)
             }
@@ -1986,11 +2086,101 @@ pub(crate) fn cleanup_stale_requests_in(directory: &Path, now: u64) -> io::Resul
             Some(_) => {}
         }
     }
+    for entry in fs::read_dir(directory)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+        if name.ends_with(SUBTITLE_REQUEST_SUFFIX) {
+            continue;
+        }
+        let Some(job_id) = name.strip_suffix(".request.json") else {
+            continue;
+        };
+        let Ok(state_file) = state_path(directory, job_id) else {
+            let _ = fs::remove_file(path);
+            continue;
+        };
+        let state: Option<jobs::JobState> = fs::read(state_file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if state.is_none_or(|state| {
+            matches!(state.status.as_str(), "completed" | "failed" | "cancelled")
+                && now.saturating_sub(state.updated_at) > MAX_ACTIVE_AGE_MS
+        }) {
+            let _ = fs::remove_file(path);
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    /// Read-only diagnosis of a saved remote job. Prints only structure and
+    /// validation results, never the license key or subtitle text.
+    #[test]
+    #[ignore = "contacts the live subtitle service; run manually"]
+    fn diagnose_remote_subtitle_job() {
+        use super::*;
+        let remote = std::env::var("SEGMA_DIAGNOSE_REMOTE_JOB").expect("remote job id");
+        let entitlement = license::load_in(&jobs::companion_root().unwrap());
+        assert!(entitlement.pro && !entitlement.key.is_empty(), "no Pro license");
+        let transport = HttpSubtitleTransport::new().map_err(|e| e.code).unwrap();
+        let response = transport
+            .client
+            .get(WORKER_URL)
+            .query(&[("id", remote.as_str())])
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", entitlement.key))
+            .send();
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                println!("send failed: timeout={} connect={} redirect={} status={:?} source={:?}", error.is_timeout(), error.is_connect(), error.is_redirect(), error.status(), std::error::Error::source(&error).map(|s| s.to_string()));
+                return;
+            }
+        };
+        let status = response.status();
+        let length = response.content_length();
+        let bytes = response.bytes().unwrap();
+        println!("http={status} contentLength={length:?} bodyBytes={}", bytes.len());
+        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+            println!("body is not JSON; head={:?}", String::from_utf8_lossy(&bytes[..bytes.len().min(160)]));
+            return;
+        };
+        let keys: Vec<_> = body.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+        println!("keys={keys:?} status={:?} phase={:?} error={:?}", body.get("status"), body.get("phase"), body.get("error"));
+        if let Some(result) = body.get("result").and_then(Value::as_object) {
+            println!("resultKeys={:?} resultError={:?} speakerCount={:?} diarization={:?} model={:?}", result.keys().collect::<Vec<_>>(), result.get("error"), result.get("speakerCount"), result.get("diarizationAvailable"), result.get("model"));
+            if let Some(vtt) = result.get("vtt").and_then(Value::as_str) {
+                println!("vttBytes={} firstLine={:?} valid={}", vtt.len(), vtt.lines().next(), valid_vtt(vtt));
+                let lines: Vec<_> = vtt.lines().collect();
+                let mut previous = None;
+                for (index, line) in lines.iter().enumerate() {
+                    if !line.contains("-->") { continue; }
+                    let mut parts = line.split("-->");
+                    let start = parts.next().and_then(parse_vtt_timestamp);
+                    let end = parts.next().and_then(|v| v.split_whitespace().next()).and_then(parse_vtt_timestamp);
+                    let text = lines.get(index + 1).is_some_and(|next| !next.trim().is_empty() && !next.contains("-->"));
+                    let problem = match (start, end) {
+                        (None, _) | (_, None) => Some("unparsed timestamp"),
+                        (Some(s), Some(e)) if s >= e => Some("start >= end"),
+                        (Some(s), _) if previous.is_some_and(|p| s < p) => Some("start before previous cue"),
+                        _ if !text => Some("cue without text"),
+                        _ => None,
+                    };
+                    if let Some(problem) = problem {
+                        println!("firstProblem line={} kind={problem} timing={line:?}", index + 1);
+                        break;
+                    }
+                    previous = start;
+                }
+            }
+        }
+        println!("parse={:?}", parse_poll_response(status, body).map(|p| p.status).map_err(|e| e.code));
+    }
+
     use super::*;
     use reqwest::StatusCode;
     use std::env;
@@ -2299,6 +2489,83 @@ mod tests {
             "AM-0123456789ABCDEF0123456789ABCDEF0123"
         );
         assert!(root.join(state.file_name.unwrap()).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_local_subtitle_record_is_restartable_until_bounded_expiry() {
+        let root = temp_root("retry-retention");
+        let directory = root.join("jobs");
+        let downloads_root = root.join("downloads");
+        fs::create_dir_all(&downloads_root).unwrap();
+        fs::write(downloads_root.join("clip.mp4"), b"media").unwrap();
+        let request = LocalSubtitleRequest {
+            job_id: "subtitle-retry-1".into(),
+            folder: None,
+            file_name: "clip.mp4".into(),
+            source_language: "ja".into(),
+            target_language: "ko".into(),
+            title: "clip".into(),
+        };
+        initial_state(&directory, &request);
+        write_request(&directory, &request).unwrap();
+        let mut state = read_state(&directory, &request.job_id).unwrap();
+        fail_state(
+            &directory,
+            &mut state,
+            run_error(
+                "subtitle-service-unavailable",
+                "subtitle service is unavailable",
+            ),
+        );
+        assert!(local_request_is_restartable_with_root(
+            &directory,
+            &downloads_root,
+            &request.job_id
+        ));
+
+        let mut state = read_state(&directory, &request.job_id).unwrap();
+        write_state(&directory, &mut state, 1).unwrap();
+        cleanup_stale_requests_in(&directory, MAX_ACTIVE_AGE_MS + 2).unwrap();
+        assert!(!local_request_is_restartable_with_root(
+            &directory,
+            &downloads_root,
+            &request.job_id
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_local_subtitle_record_is_not_restartable_without_source_media() {
+        let root = temp_root("retry-missing-media");
+        let directory = root.join("jobs");
+        let downloads_root = root.join("downloads");
+        fs::create_dir_all(&downloads_root).unwrap();
+        let request = LocalSubtitleRequest {
+            job_id: "subtitle-retry-missing-media".into(),
+            folder: None,
+            file_name: "missing.mp4".into(),
+            source_language: "ja".into(),
+            target_language: "ko".into(),
+            title: "missing".into(),
+        };
+        initial_state(&directory, &request);
+        write_request(&directory, &request).unwrap();
+        let mut state = read_state(&directory, &request.job_id).unwrap();
+        fail_state(
+            &directory,
+            &mut state,
+            run_error(
+                "subtitle-service-unavailable",
+                "subtitle service is unavailable",
+            ),
+        );
+
+        assert!(!local_request_is_restartable_with_root(
+            &directory,
+            &downloads_root,
+            &request.job_id
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

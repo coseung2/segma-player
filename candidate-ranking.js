@@ -1,5 +1,6 @@
 import { canonicalHttpUrl, normalizeOriginPath } from "./candidate.js";
 import { looksLikePlayerPage } from "./player-page-resolver.js";
+import { siteProfileForCandidate } from "./sites/registry.js";
 
 const SOURCE_WEIGHTS = Object.freeze({
   "player-adapter": 48,
@@ -177,6 +178,12 @@ export function scoreCandidate(candidate, {
   }
 
   const advertisement = candidateLooksLikeAdvertisement(candidate, layout);
+  const mediaHost = canonicalHttpUrl(candidate?.resourceUrl)?.hostname || "";
+  const preferredHosts = siteProfileForCandidate(candidate)?.preferredMediaHosts || [];
+  if (!advertisement && preferredHosts.some((host) => mediaHost === host || mediaHost.endsWith(`.${host}`))) {
+    score += 40;
+    boundedReason(reasons, "site-primary-host", 40);
+  }
   if (advertisement) {
     score -= 90;
     boundedReason(reasons, "advertisement-signals", -90);

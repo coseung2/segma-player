@@ -1,6 +1,7 @@
 use crate::job_store::{self, JobState};
 use crate::Request;
 use serde_json::{json, Value};
+#[cfg(test)]
 use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,311 @@ use std::thread;
 use std::time::Duration;
 
 pub const OUTPUT_TEMPLATE: &str = "[%(height)sp] %(title).170B.%(ext)s";
+
+/// One verified ownership boundary for yt-dlp, ffmpeg and HTTP workers. On
+/// Windows the child starts suspended and cannot spawn outside its Job Object.
+pub struct OwnedProcess {
+    pub child: std::process::Child,
+    #[cfg(windows)]
+    job: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+mod owned_job {
+    use std::ffi::c_void;
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct Limits {
+        process_time: i64,
+        job_time: i64,
+        flags: u32,
+        minimum: usize,
+        maximum: usize,
+        active_limit: u32,
+        affinity: usize,
+        priority: u32,
+        scheduling: u32,
+        io: [u64; 6],
+        process_memory: usize,
+        job_memory: usize,
+        peak_process: usize,
+        peak_job: usize,
+    }
+    impl Limits {
+        pub fn kill_on_close() -> Self {
+            Self {
+                flags: 0x2000,
+                ..Self::default()
+            }
+        }
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct Accounting {
+        pub times: [i64; 4],
+        pub faults: u32,
+        pub total: u32,
+        pub active: u32,
+        pub terminated: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> *mut c_void;
+        pub fn SetInformationJobObject(
+            job: *mut c_void,
+            class: i32,
+            info: *const c_void,
+            length: u32,
+        ) -> i32;
+        pub fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+        pub fn TerminateJobObject(job: *mut c_void, exit: u32) -> i32;
+        pub fn QueryInformationJobObject(
+            job: *mut c_void,
+            class: i32,
+            info: *mut c_void,
+            length: u32,
+            returned: *mut u32,
+        ) -> i32;
+        pub fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        pub fn NtResumeProcess(process: *mut c_void) -> i32;
+    }
+}
+
+impl OwnedProcess {
+    pub fn spawn(command: &mut Command) -> io::Result<Self> {
+        command.stdin(Stdio::null());
+        #[cfg(windows)]
+        {
+            use owned_job::*;
+            use std::os::windows::{io::AsRawHandle, process::CommandExt};
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let limits = Limits::kill_on_close();
+            if unsafe {
+                SetInformationJobObject(
+                    job,
+                    9,
+                    (&limits as *const Limits).cast(),
+                    std::mem::size_of::<Limits>() as u32,
+                )
+            } == 0
+            {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    CloseHandle(job);
+                }
+                return Err(error);
+            }
+            command.creation_flags(0x0800_0000 | 4); // no window, suspended
+            let mut child = match command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    unsafe {
+                        CloseHandle(job);
+                    }
+                    return Err(error);
+                }
+            };
+            if unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) } == 0
+                || unsafe { NtResumeProcess(child.as_raw_handle()) } < 0
+            {
+                let error = io::Error::last_os_error();
+                let _ = child.kill();
+                let _ = child.wait();
+                unsafe {
+                    CloseHandle(job);
+                }
+                return Err(error);
+            }
+            Ok(Self { child, job })
+        }
+        #[cfg(not(windows))]
+        {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            Ok(Self {
+                child: command.spawn()?,
+            })
+        }
+    }
+
+    pub fn finish(&mut self, terminate: bool) -> io::Result<std::process::ExitStatus> {
+        #[cfg(windows)]
+        {
+            use owned_job::*;
+            let status = if terminate {
+                None
+            } else {
+                Some(self.child.wait()?)
+            };
+            // Even an exited root can leave descendants holding inherited pipes.
+            if unsafe { TerminateJobObject(self.job, 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let status = match status {
+                Some(status) => status,
+                None => self.child.wait()?,
+            };
+            let started = std::time::Instant::now();
+            loop {
+                let mut accounting = Accounting::default();
+                if unsafe {
+                    QueryInformationJobObject(
+                        self.job,
+                        1,
+                        (&mut accounting as *mut Accounting).cast(),
+                        std::mem::size_of::<Accounting>() as u32,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                if accounting.active == 0 {
+                    return Ok(status);
+                }
+                if started.elapsed() > Duration::from_secs(5) {
+                    return Err(io::Error::other("owned-processes-still-running"));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            #[cfg(unix)]
+            {
+                extern "C" {
+                    fn kill(pid: i32, signal: i32) -> i32;
+                }
+                unsafe {
+                    kill(-(self.child.id() as i32), 9);
+                }
+            }
+            if terminate {
+                let _ = self.child.kill();
+            }
+            self.child.wait()
+        }
+    }
+}
+
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        let _ = self.finish(true);
+        #[cfg(windows)]
+        unsafe {
+            owned_job::CloseHandle(self.job);
+        }
+    }
+}
+
+pub fn join_readers(readers: Vec<thread::JoinHandle<()>>) -> io::Result<()> {
+    for reader in readers {
+        reader
+            .join()
+            .map_err(|_| io::Error::other("download-reader-failed"))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProcessOutcome {
+    Completed,
+    Cancelled,
+    Paused,
+    Failed(String),
+}
+
+pub fn run_owned_download(
+    command: &mut Command,
+    cancel: Option<&Path>,
+    pause: Option<&Path>,
+    mut line: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<ProcessOutcome> {
+    let mut child = OwnedProcess::spawn(command)?;
+    let (tx, rx) = mpsc::channel();
+    let mut readers = Vec::new();
+    fn reader<R: io::Read + Send + 'static>(
+        input: R,
+        tx: mpsc::Sender<String>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            for line in BufReader::new(input).lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        })
+    }
+    if let Some(stdout) = child.child.stdout.take() {
+        readers.push(reader(stdout, tx.clone()));
+    }
+    if let Some(stderr) = child.child.stderr.take() {
+        readers.push(reader(stderr, tx.clone()));
+    }
+    drop(tx);
+    let mut outcome = None;
+    let mut callback_error = None;
+    let mut last_error = String::new();
+    loop {
+        if cancel.is_some_and(Path::exists) {
+            outcome = Some(ProcessOutcome::Cancelled);
+            break;
+        }
+        if pause.is_some_and(Path::exists) {
+            outcome = Some(ProcessOutcome::Paused);
+            break;
+        }
+        if child.child.try_wait()?.is_some() {
+            break;
+        }
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(value) => {
+                if value.starts_with("ERROR:") {
+                    last_error = value.chars().take(500).collect();
+                }
+                if let Err(error) = line(&value) {
+                    callback_error = Some(error);
+                    break;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let status = child.finish(outcome.is_some() || callback_error.is_some())?;
+    join_readers(readers)?;
+    for value in rx {
+        if value.starts_with("ERROR:") {
+            last_error = value.chars().take(500).collect();
+        }
+        if callback_error.is_none() {
+            if let Err(error) = line(&value) {
+                callback_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    Ok(outcome.unwrap_or_else(|| {
+        if status.success() {
+            ProcessOutcome::Completed
+        } else {
+            ProcessOutcome::Failed(if last_error.is_empty() {
+                format!("yt-dlp exit {status}")
+            } else {
+                last_error
+            })
+        }
+    }))
+}
 
 pub fn command_tools(tools: &Path) -> io::Result<(PathBuf, PathBuf, PathBuf)> {
     let yt_dlp = tools.join("yt-dlp.exe");
@@ -139,8 +445,6 @@ pub struct ExecutionContext<T, D, C, P> {
 enum DownloadAttemptResult {
     Completed,
     Failed(String),
-    SpawnError(String),
-    StatusError(String),
     Cancelled,
     Paused,
 }
@@ -202,6 +506,18 @@ where
     };
     let cancel_path = (context.cancel_path)();
     let pause_path = (context.pause_path)();
+    let workspace = match job_store::DownloadWorkspace::prepare(
+        &context.jobs_directory,
+        &downloads,
+        &request.job_id,
+    ) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            state.status = "failed".into();
+            state.error = Some(error.to_string());
+            return update_state(&context.jobs_directory, &mut state, &notify);
+        }
+    };
     let mut attempt = 0_u8;
     let outcome = loop {
         attempt += 1;
@@ -210,138 +526,86 @@ where
             &mut command,
             &request.url,
             quality_height(&request.quality),
-            &downloads,
+            &workspace.path,
             &node,
             &ffmpeg,
         );
 
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => break DownloadAttemptResult::SpawnError(error.to_string()),
-        };
-        let (tx, rx) = mpsc::channel();
-        if let Some(stdout) = child.stdout.take() {
-            let tx = tx.clone();
-            thread::spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    let _ = tx.send(line);
-                }
-            });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let tx = tx.clone();
-            thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    let _ = tx.send(line);
-                }
-            });
-        }
-        drop(tx);
-
-        let mut last_error = String::new();
-        let mut cancelled = false;
-        let mut paused = false;
-        loop {
-            if cancel_path.as_ref().is_some_and(|path| path.exists()) {
-                let _ = child.kill();
-                cancelled = true;
-                break;
-            }
-            if pause_path.as_ref().is_some_and(|path| path.exists()) {
-                let _ = child.kill();
-                paused = true;
-                break;
-            }
-            match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(line) => {
-                    if let Some(title) = line.strip_prefix("AURA_TITLE:") {
-                        state.title = Some(title.trim().to_string());
-                        state.status_text = "영상 다운로드를 시작합니다…".into();
-                        if let Err(error) =
-                            update_state(&context.jobs_directory, &mut state, &notify)
-                        {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return Err(error);
-                        }
-                    } else if let Some(progress) = line.strip_prefix("AURA_PROGRESS:") {
-                        state.progress = parse_progress(progress);
-                        state.status_text = format!("다운로드 중 · {}", progress.trim());
-                        if let Err(error) =
-                            update_state(&context.jobs_directory, &mut state, &notify)
-                        {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return Err(error);
-                        }
-                    } else if let Some(path) = line.strip_prefix("AURA_FILE:") {
-                        state.file_name = Path::new(path.trim())
-                            .file_name()
-                            .map(|value| value.to_string_lossy().into_owned());
-                    } else if line.starts_with("ERROR:") {
-                        last_error = line.trim().chars().take(500).collect();
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if child.try_wait().ok().flatten().is_some() {
-                        break;
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        let status = child.wait();
-        if cancelled {
-            break DownloadAttemptResult::Cancelled;
-        }
-        if paused {
-            break DownloadAttemptResult::Paused;
-        }
-        match status {
-            Ok(status) if status.success() => break DownloadAttemptResult::Completed,
-            Ok(status) => {
-                let error = if last_error.is_empty() {
-                    format!("yt-dlp exit {status}")
-                } else {
-                    last_error
-                };
-                if should_restart(&error, attempt) {
-                    state.progress = None;
-                    state.status_text = "일시적인 403 오류입니다. 링크를 새로 확인하는 중…".into();
-                    state.error = None;
+        let result = run_owned_download(
+            &mut command,
+            cancel_path.as_deref(),
+            pause_path.as_deref(),
+            |line| {
+                if let Some(title) = line.strip_prefix("AURA_TITLE:") {
+                    state.title = Some(title.trim().to_string());
+                    state.status_text = "영상 다운로드를 시작합니다…".into();
                     update_state(&context.jobs_directory, &mut state, &notify)?;
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
+                } else if let Some(progress) = line.strip_prefix("AURA_PROGRESS:") {
+                    state.progress = parse_progress(progress);
+                    state.status_text = format!("다운로드 중 · {}", progress.trim());
+                    update_state(&context.jobs_directory, &mut state, &notify)?;
+                } else if let Some(path) = line.strip_prefix("AURA_FILE:") {
+                    state.file_name = Path::new(path.trim())
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned());
                 }
-                break DownloadAttemptResult::Failed(error);
+                Ok(())
+            },
+        );
+        match result {
+            Ok(ProcessOutcome::Completed) => break DownloadAttemptResult::Completed,
+            Ok(ProcessOutcome::Cancelled) => break DownloadAttemptResult::Cancelled,
+            Ok(ProcessOutcome::Paused) => break DownloadAttemptResult::Paused,
+            Ok(ProcessOutcome::Failed(error)) if should_restart(&error, attempt) => {
+                state.progress = None;
+                state.error = None;
+                state.status_text = "일시적인 403 오류입니다. 링크를 새로 확인하는 중…".into();
+                update_state(&context.jobs_directory, &mut state, &notify)?;
+                thread::sleep(Duration::from_secs(1));
             }
-            Err(error) => break DownloadAttemptResult::StatusError(error.to_string()),
+            Ok(ProcessOutcome::Failed(error)) => break DownloadAttemptResult::Failed(error),
+            Err(error) => {
+                state.status = "failed".into();
+                state.status_text = "다운로드 실행기 종료를 확인하지 못했습니다.".into();
+                state.error = Some(format!("download-stop-failed: {error}"));
+                return update_state(&context.jobs_directory, &mut state, &notify);
+            }
         }
     };
-    if let Some(path) = cancel_path {
-        let _ = fs::remove_file(path);
-    }
+    let outcome = match job_store::finish_download_output_in(
+        &context.jobs_directory,
+        &mut state,
+        &workspace,
+        matches!(outcome, DownloadAttemptResult::Completed),
+        matches!(outcome, DownloadAttemptResult::Paused),
+    ) {
+        Ok(()) => outcome,
+        Err(error) => DownloadAttemptResult::Failed(error.to_string()),
+    };
+    let outcome = if matches!(
+        outcome,
+        DownloadAttemptResult::Completed | DownloadAttemptResult::Cancelled
+    ) {
+        match job_store::clear_cancel_marker_in(&context.jobs_directory, &request.job_id) {
+            Ok(()) => outcome,
+            Err(error) => {
+                DownloadAttemptResult::Failed(format!("download-cleanup-failed: {error}"))
+            }
+        }
+    } else {
+        outcome
+    };
 
     match outcome {
         DownloadAttemptResult::Completed => {
             state.status = "completed".into();
-            state.status_text = "Downloads\\Aura Media 폴더에 저장했습니다.".into();
+            state.status_text = "다운로드 폴더에 저장했습니다.".into();
             state.progress = Some(100);
             state.error = None;
         }
         DownloadAttemptResult::Failed(error) => {
             state.status = "failed".into();
             state.status_text = "YouTube 다운로드에 실패했습니다.".into();
-            state.error = Some(error);
-        }
-        DownloadAttemptResult::SpawnError(error) => {
-            state.status = "failed".into();
-            state.status_text = "yt-dlp를 실행하지 못했습니다.".into();
-            state.error = Some(error);
-        }
-        DownloadAttemptResult::StatusError(error) => {
-            state.status = "failed".into();
-            state.status_text = "yt-dlp 종료 상태를 확인하지 못했습니다.".into();
             state.error = Some(error);
         }
         DownloadAttemptResult::Cancelled => {
@@ -381,6 +645,8 @@ pub fn configure_download_command(
         .arg("before_dl:AURA_TITLE:%(title)s")
         .arg("--print")
         .arg("after_move:AURA_FILE:%(filepath)s")
+        // --print implies --quiet, which hides progress; --progress restores it.
+        .arg("--progress")
         .arg("--progress-template")
         .arg("download:AURA_PROGRESS:%(progress._percent_str)s %(progress._speed_str)s ETA %(progress._eta_str)s");
     if let Some(height) = height {

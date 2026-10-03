@@ -1,6 +1,7 @@
 import { get, writable } from "svelte/store";
 import {
   cancelCloudJob, cloudStatus, listCloudItems, listCloudJobs,
+  installCloudComponent as installCloudComponentCommand,
   pickCloudDownloadDestination, pickCloudUpload, startCloudDelete,
   startCloudDownload, startCloudUpload,
   type CloudItemDto, type CloudJobDto, type CloudStatusDto,
@@ -134,6 +135,13 @@ export function cancelCloudTransfer(job: CloudJobDto): Promise<void> {
   }, "취소를 요청했습니다.");
 }
 
+export function installMissingCloudComponent(): Promise<void> {
+  return runAction("install", async () => {
+    await installCloudComponentCommand();
+    return true;
+  }, "클라우드 구성 요소를 설치했습니다.");
+}
+
 async function poll(): Promise<void> {
   if (!polling) return;
   await loadCloud(true);
@@ -141,7 +149,10 @@ async function poll(): Promise<void> {
 }
 
 export function startCloudPolling(): void {
-  if (polling) return;
+  if (polling) {
+    void loadCloud();
+    return;
+  }
   polling = true;
   void loadCloud().finally(() => {
     if (polling && pollTimer === null) pollTimer = setTimeout(() => void poll(), 1_500);

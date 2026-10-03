@@ -139,8 +139,20 @@ test("the content script resolver keeps both rules the fixtures rely on", async 
 
 test("the background prefers the tab title for a player-frame candidate", async () => {
   const source = await readFile(path.join(ROOT, "background.js"), "utf8");
+  // Jamak 0.4.82: the Streamtape file was named
+  // "jamak.cc_bbs_board.php_bo_table=…" because the tab still showed its
+  // address. Address-shaped titles are treated as missing.
+  const start = source.indexOf("function looksLikeAddressTitle");
+  const body = source.slice(start, source.indexOf("\n}\n", start) + 2);
+  const looksLikeAddressTitle = new Function(`${body}; return looksLikeAddressTitle;`)();
+  assert.equal(looksLikeAddressTitle("jamak.cc/bbs/board.php?bo_table=gallery&wr_id=83&page=5"), true);
+  assert.equal(looksLikeAddressTitle("https://www.jamak.cc/bbs/board.php"), true);
+  assert.equal(looksLikeAddressTitle("www.jamak.cc"), true);
+  assert.equal(looksLikeAddressTitle(""), true);
+  assert.equal(looksLikeAddressTitle("FC2-PPV-1788676 한글자막 > FC2 자막 영상 | 자막공방"), false);
+  assert.equal(looksLikeAddressTitle("Episode 8"), false);
   assert.match(source, /isPlayerFrameUrl\(sender\.url\)/);
   // The tab title must win for a player frame, and the frame's own reported
   // title must still be the fallback when there is no tab title.
-  assert.match(source, /\? sender\.tab\.title \|\| message\.pageTitle \|\| ""/);
+  assert.match(source, /\? \(looksLikeAddressTitle\(sender\.tab\.title\) \? "" : sender\.tab\.title\) \|\| message\.pageTitle \|\| ""/);
 });

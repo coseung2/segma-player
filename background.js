@@ -224,13 +224,28 @@ async function applyTitleSelectors(candidate) {
 }
 
 async function tabTitle(tabId) {
+  return tabTitleNow(tabId);
+}
+
+// A title such as "site.com/path?query" is Chrome's placeholder before the
+// document title loads; it must not become a job or file name.
+function looksLikeAddressTitle(value) {
+  const title = typeof value === "string" ? value.trim() : "";
+  if (!title) return true;
+  return /^(?:https?:\/\/)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:\/\S*)?$/i.test(title);
+}
+
+async function tabTitleNow(tabId) {
   if (!Number.isInteger(tabId) || tabId <= 0) return "";
   const cached = tabTitleCache.get(tabId);
   if (cached && Date.now() - cached.at < 15000) return cached.title;
   try {
     const tab = await chrome.tabs.get(tabId);
-    const title = tab?.title || "";
-    tabTitleCache.set(tabId, { title, at: Date.now() });
+    let title = tab?.title || "";
+    // Before the document title arrives Chrome reports the address itself
+    // ("site.com/path?query"). Never cache or name files after that.
+    if (looksLikeAddressTitle(title)) title = "";
+    if (title) tabTitleCache.set(tabId, { title, at: Date.now() });
     return title;
   } catch {
     return "";
@@ -293,7 +308,43 @@ const {
 const {
   beginCandidateDownload,
   startYouTubeDownload,
-} = createCompanionHandoff({ resolveCandidate: resolvePlayerCandidate });
+} = createCompanionHandoff({
+  // The candidate may have been observed before the document title loaded;
+  // take the tab's current title when the stored one is just an address.
+  resolveCandidate: async (candidate) => {
+    const resolved = await resolvePlayerCandidate(candidate);
+    if (resolved && looksLikeAddressTitle(resolved.pageTitle)) {
+      // The title often arrives a moment after the player starts; wait briefly.
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        tabTitleCache.delete(resolved.tabId);
+        const title = await tabTitle(resolved.tabId);
+        if (title) {
+          resolved.pageTitle = title;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      if (looksLikeAddressTitle(resolved.pageTitle)) {
+        // Ask the page itself; its <title> is set even when the tab strip lags.
+        const reply = await sendTabMessageWithTimeout(
+          resolved.tabId,
+          { type: "get-page-title" },
+          1_500,
+          { frameId: 0 },
+        );
+        const pageTitle = validResolvedPageTitle(reply?.pageTitle);
+        if (pageTitle && !looksLikeAddressTitle(pageTitle)) resolved.pageTitle = pageTitle;
+      }
+    }
+    return resolved;
+  },
+  requestHlsKeys: (candidate) => sendTabMessageWithTimeout(
+    candidate.tabId,
+    { type: "level5-playlist-keys", url: candidate.resourceUrl },
+    30_000,
+    { frameId: candidate.frameId },
+  ),
+});
 const downloadRouter = createDownloadRouter({
   candidates,
   ensureDirectMediaAccess,
@@ -460,8 +511,13 @@ chrome.webRequest.onHeadersReceived.addListener(
     // A player iframe is HTML, not media, so makeCandidate intentionally drops
     // it. Resolve known player pages here instead of waiting for a media
     // request that providers such as Streamtape may not emit until much later.
-    if (details.type === "sub_frame" && looksLikePlayerPage(details.url)) {
-      void resolveObservedPlayerFrame(details);
+    if (details.type === "sub_frame") {
+      // A new document in an existing frame replaces its old player; drop the
+      // previous player's candidates so a stale server is never downloaded.
+      if (Number.isInteger(details.statusCode) && details.statusCode >= 200 && details.statusCode < 300) {
+        candidateRepository.clearFrame(details.tabId, details.frameId);
+      }
+      if (looksLikePlayerPage(details.url)) void resolveObservedPlayerFrame(details);
     }
     if (!contentType) return;
     void tabTitle(details.tabId).then((title) => {
@@ -735,7 +791,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // title for a candidate reported from inside one. Without this the job is
     // named after the player instead of the video.
     pageTitle: isPlayerFrameUrl(sender.url)
-      ? sender.tab.title || message.pageTitle || ""
+      ? (looksLikeAddressTitle(sender.tab.title) ? "" : sender.tab.title) || message.pageTitle || ""
       : message.pageTitle || sender.tab.title || "",
     siteUrl: canonicalHttpUrl(sender.tab.url)?.href || "",
     pageUrl: canonicalHttpUrl(sender.url)?.href

@@ -9,6 +9,23 @@ pub struct JobIdRequest {
     pub job_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveJobHistoryRequest {
+    pub job_ids: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn remove_job_history(
+    request: RemoveJobHistoryRequest,
+) -> Result<jobs::RemoveJobHistoryResult, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs::remove_job_history(&request.job_ids).map_err(CommandError::from_io)
+    })
+    .await
+    .map_err(|_| CommandError::new("operation-failed", "다운로드 기록을 삭제하지 못했습니다."))?
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobDto {
@@ -85,7 +102,8 @@ fn to_dto(job: &jobs::JobState, restartable: bool, files: &[jobs::MediaFile]) ->
     );
     JobDto {
         job_id: job.job_id.clone(),
-        job_type: job.job_type.clone(),
+        // Legacy YouTube downloads predate `jobType`; they are media jobs.
+        job_type: Some(job.job_type.clone().unwrap_or_else(|| "media".into())),
         request_id: job.request_id.clone(),
         candidate_id: job.candidate_id.clone(),
         input_kind: job.input_kind.clone(),
@@ -137,7 +155,12 @@ pub async fn list_jobs() -> Result<JobsResponse, CommandError> {
             .iter()
             .map(|job| job.job_id.clone())
             .collect::<Vec<_>>();
-        let restartable = jobs::restartable_ids_in(&directory, &ids);
+        let mut restartable = jobs::restartable_ids_in(&directory, &ids);
+        restartable.extend(
+            ids.iter()
+                .filter(|job_id| subtitles::local_request_is_restartable_in(&directory, job_id))
+                .cloned(),
+        );
         Ok(JobsResponse {
             jobs: jobs
                 .iter()
@@ -182,7 +205,17 @@ pub async fn resume_job(request: JobIdRequest) -> Result<JobActionResponse, Comm
 
 #[tauri::command]
 pub async fn retry_job(request: JobIdRequest) -> Result<JobActionResponse, CommandError> {
-    restart_job_command(request, "retry", "작업을 다시 시작하지 못했습니다.").await
+    tauri::async_runtime::spawn_blocking(move || {
+        if !subtitles::retry_local_subtitle_job(&request.job_id).map_err(CommandError::from_io)? {
+            jobs::restart_job(&request.job_id, "retry").map_err(CommandError::from_io)?;
+        }
+        Ok(JobActionResponse {
+            job_id: request.job_id,
+            accepted: true,
+        })
+    })
+    .await
+    .map_err(|_| CommandError::new("operation-failed", "작업을 다시 시작하지 못했습니다."))?
 }
 
 async fn restart_job_command(
@@ -235,9 +268,20 @@ mod tests {
         };
         let dto = to_dto(&state, false, &[]);
         assert_eq!(dto.job_id, "job-1");
-        assert_eq!(dto.status_label, "완료");
+        assert_eq!(dto.status_label, "파일 없음");
+        assert_eq!(dto.tone, model::Tone::Warning);
         assert_eq!(dto.file_name.as_deref(), Some("clip.mp4"));
         assert!(dto.actions.is_empty());
+        // Untyped legacy YouTube records must appear in the media queue.
+        assert_eq!(dto.job_type.as_deref(), Some("media"));
+        let subtitle = jobs::JobState {
+            job_type: Some("subtitle".into()),
+            ..state
+        };
+        assert_eq!(
+            to_dto(&subtitle, false, &[]).job_type.as_deref(),
+            Some("subtitle")
+        );
     }
 
     #[test]

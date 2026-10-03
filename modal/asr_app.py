@@ -26,6 +26,12 @@ MAX_MEDIA_URL_LENGTH = 4096
 MAX_TITLE_LENGTH = 240
 MAX_DURATION_SECONDS = 60 * 60
 MAX_VTT_BYTES = 2_000_000
+# Upper bound for a cue whose ending timestamp Whisper did not predict.
+OPEN_CUE_FALLBACK_SECONDS = 6.0
+# Japanese ASR transcribes pause-bounded windows instead of model timestamps.
+WINDOW_MAX_SECONDS = 15.0
+WINDOW_MIN_SECONDS = 1.0
+WINDOW_BATCH_SIZE = 16
 MAX_AUDIO_UPLOAD_BYTES = 80 * 1024 * 1024
 AUDIO_JOB_MAX_AGE_SECONDS = 2 * 60 * 60
 AUDIO_JOB_DIR = "/audio-jobs"
@@ -545,16 +551,119 @@ def vtt_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{millis:03d}"
 
 
+def speech_windows(audio, sample_rate, max_seconds=WINDOW_MAX_SECONDS, min_seconds=WINDOW_MIN_SECONDS, frame_seconds=0.05, floor_margin_db=6.0, bridge_seconds=0.5, merge_gap_seconds=1.0):
+    """Split mono audio into speech windows for a timestamp-free ASR model.
+
+    Returns (start_seconds, end_seconds) pairs. Short pauses inside a phrase
+    are bridged, neighbouring phrases are packed up to max_seconds, and long
+    silences are skipped so they never become empty cues.
+    """
+    import numpy as np
+
+    samples = np.asarray(audio, dtype=np.float32)
+    if samples.ndim > 1:
+        samples = samples.mean(axis=1)
+    frame = max(1, int(sample_rate * frame_seconds))
+    count = len(samples) // frame
+    if count == 0:
+        return []
+    energy = np.sqrt(np.mean(samples[: count * frame].reshape(count, frame) ** 2, axis=1))
+    # Relative to the noise floor: loud music or effects must not raise the
+    # threshold above quiet dialogue.
+    floor = max(float(np.percentile(energy, 10)), 1e-5)
+    threshold = max(floor * (10 ** (floor_margin_db / 20)), 1e-4)
+    voiced = energy > threshold
+
+    # Voiced runs, with short pauses bridged into one phrase.
+    runs = []
+    index = 0
+    bridge = int(round(bridge_seconds / frame_seconds))
+    while index < count:
+        if not voiced[index]:
+            index += 1
+            continue
+        run_start = index
+        while index < count and voiced[index]:
+            index += 1
+        if runs and run_start - runs[-1][1] <= bridge:
+            runs[-1][1] = index
+        else:
+            runs.append([run_start, index])
+
+    # Split phrases longer than the maximum at their quietest late frame.
+    max_frames = max(1, int(round(max_seconds / frame_seconds)))
+    min_frames = max(1, int(round(min_seconds / frame_seconds)))
+    pieces = []
+    for run_start, run_end in runs:
+        cursor = run_start
+        while run_end - cursor > max_frames:
+            low = cursor + min_frames
+            high = cursor + max_frames
+            cut = int(np.argmin(energy[low:high])) + low if high > low else high
+            pieces.append([cursor, cut])
+            cursor = cut
+        pieces.append([cursor, run_end])
+
+    # Pack neighbouring phrases so the model sees sentence-sized context.
+    merge_gap = int(round(merge_gap_seconds / frame_seconds))
+    packed = []
+    for piece in pieces:
+        if packed and piece[0] - packed[-1][1] <= merge_gap and piece[1] - packed[-1][0] <= max_frames:
+            packed[-1][1] = piece[1]
+        else:
+            packed.append(list(piece))
+
+    # Drop isolated blips that are too short to hold a word.
+    blip = int(round(0.3 / frame_seconds))
+    return [(s * frame_seconds, e * frame_seconds) for s, e in packed if e - s >= blip]
+
+
+def transcribe_windows(asr_pipeline, audio, sample_rate, generate_kwargs, progress=None):
+    chunks = []
+    windows = speech_windows(audio, sample_rate)
+    total = len(windows)
+    for offset in range(0, total, WINDOW_BATCH_SIZE):
+        batch = windows[offset:offset + WINDOW_BATCH_SIZE]
+        inputs = [
+            {"array": audio[int(start * sample_rate):int(end * sample_rate)], "sampling_rate": sample_rate}
+            for start, end in batch
+        ]
+        outputs = asr_pipeline(inputs, batch_size=WINDOW_BATCH_SIZE, generate_kwargs=generate_kwargs)
+        for (start, end), output in zip(batch, outputs or []):
+            text = str((output or {}).get("text", "")).strip()
+            if text:
+                chunks.append({"timestamp": (round(start, 3), round(end, 3)), "text": text})
+        if progress is not None:
+            progress(min(total, offset + len(batch)), total)
+    return chunks
+
+
 def chunks_to_vtt(chunks):
     cues = []
-    for chunk in chunks or []:
+    # Whisper sometimes omits a chunk's ending timestamp ("did not predict an
+    # ending timestamp"). Dropping those chunks silently produced an empty
+    # WEBVTT for whole videos, so close an open chunk at the next chunk's
+    # start, or after a bounded fallback duration.
+    valid = [chunk for chunk in chunks or [] if isinstance(chunk, dict)]
+    for index, chunk in enumerate(valid):
         timestamps = chunk.get("timestamp") if isinstance(chunk, dict) else None
         if not isinstance(timestamps, (list, tuple)) or len(timestamps) < 2:
             continue
         start = timestamp_seconds(timestamps[0])
         end = timestamp_seconds(timestamps[1])
+        if start is not None and end is None:
+            next_start = None
+            for following in valid[index + 1:]:
+                following_timestamps = following.get("timestamp")
+                if isinstance(following_timestamps, (list, tuple)) and following_timestamps:
+                    next_start = timestamp_seconds(following_timestamps[0])
+                    if next_start is not None:
+                        break
+            fallback = start + OPEN_CUE_FALLBACK_SECONDS
+            end = min(next_start, fallback) if next_start is not None and next_start > start else fallback
         text = str(chunk.get("text", "")).strip() if isinstance(chunk, dict) else ""
-        if start is None or end is None or end <= start or not text:
+        # Punctuation-only output ("...", "…") carries no words; skip it.
+        if start is None or end is None or end <= start or not re.search(r"\w", text):
             continue
         text = html.escape(text.replace("-->", "→"), quote=False)
         speaker = str(chunk.get("speaker", "")).strip() if isinstance(chunk, dict) else ""
@@ -812,17 +921,28 @@ class AnimeWhisperWorker:
         set_job_progress(progress_key, "transcribing", 15)
         asr_pipeline = self.japanese_pipeline if source_language == "ja" else self.english_asr_pipeline()
         asr_model_id = MODEL_ID if source_language == "ja" else ENGLISH_ASR_MODEL_ID
-        result = asr_pipeline(
-            {"array": audio, "sampling_rate": sample_rate},
-            chunk_length_s=30,
-            stride_length_s=(5, 2),
-            return_timestamps=True,
-            generate_kwargs={
-                "language": "japanese" if source_language == "ja" else "english",
-                "task": "transcribe",
-                "no_repeat_ngram_size": 5,
-            },
-        )
+        generate_kwargs = {
+            "language": "japanese" if source_language == "ja" else "english",
+            "task": "transcribe",
+            "no_repeat_ngram_size": 5,
+        }
+        if source_language == "ja":
+            # anime-whisper is trained without timestamp tokens; its
+            # long-form timestamps can collapse into one open-ended chunk.
+            # Transcribe our own fixed windows and time cues from them.
+            result = {"chunks": transcribe_windows(
+                asr_pipeline, audio, sample_rate, generate_kwargs,
+                lambda done, total: set_job_progress(
+                    progress_key, "transcribing", 15 + int(done / max(1, total) * 40), done, total),
+            )}
+        else:
+            result = asr_pipeline(
+                {"array": audio, "sampling_rate": sample_rate},
+                chunk_length_s=30,
+                stride_length_s=(5, 2),
+                return_timestamps=True,
+                generate_kwargs=generate_kwargs,
+            )
         if self.diarization_pipeline is not None:
             set_job_progress(progress_key, "diarizing", 58)
         speaker_chunks, speakers = diarize_chunks(
@@ -832,6 +952,9 @@ class AnimeWhisperWorker:
         )
         set_job_progress(progress_key, "translating", 65)
         vtt = chunks_to_vtt(self.translate_chunks(speaker_chunks, source_language, progress_key))
+        if "-->" not in vtt:
+            # A completed job with zero cues is not a usable subtitle.
+            return {"ok": False, "error": "subtitle-no-speech"}
         set_job_progress(progress_key, "finalizing", 99)
         model_parts = [asr_model_id]
         if self.diarization_pipeline is not None:

@@ -76,6 +76,10 @@ struct Request {
     user_agent: String,
     #[serde(rename = "acceptLanguage", default)]
     accept_language: String,
+    #[serde(rename = "hlsKeys", default)]
+    hls_keys: Vec<media_download::HlsKey>,
+    #[serde(rename = "hlsPlaylist", default)]
+    hls_playlist: String,
     #[serde(default)]
     total: Option<u64>,
     #[serde(rename = "showUi", default)]
@@ -133,6 +137,8 @@ fn media_download_command_from_request(request: &Request) -> MediaDownloadComman
         input_kind: request.input_kind.clone(),
         user_agent: request.user_agent.clone(),
         accept_language: request.accept_language.clone(),
+        hls_keys: request.hls_keys.clone(),
+        hls_playlist: request.hls_playlist.clone(),
     }
 }
 
@@ -327,8 +333,29 @@ fn job_pause_path(job_id: &str) -> io::Result<PathBuf> {
 /// the record, so no caller has to resupply the URL or quality.
 fn restart_job(job_id: &str) -> io::Result<()> {
     let directory = jobs_dir()?;
-    let request_path = job_store::request_path_in(&directory, job_id)?;
-    let claim = job_store::reserve_runner_claim_in(&directory, job_id)?;
+    restart_job_in_with(&directory, job_id, process::spawn_detached)
+}
+
+fn restart_job_in_with<F>(directory: &Path, job_id: &str, spawn: F) -> io::Result<()>
+where
+    F: FnOnce(&[&str]) -> io::Result<()>,
+{
+    let media_request_path = job_store::request_path_in(directory, job_id)?;
+    let subtitle_request_path = subtitle_request_path_in(directory, job_id)?;
+    let claim = job_store::reserve_runner_claim_in(directory, job_id)?;
+    let state = read_job_state(&job_store::state_path_in(directory, job_id)?)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job-state-missing"))?;
+    let subtitle_job = state.job_type.as_deref() == Some("subtitle");
+    let request_path = if subtitle_job && subtitle_request_path.is_file() {
+        subtitle_request_path
+    } else if media_request_path.is_file() {
+        media_request_path
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "job-request-missing",
+        ));
+    };
     let bytes = fs::read(&request_path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             io::Error::new(io::ErrorKind::NotFound, "job-request-missing")
@@ -336,12 +363,23 @@ fn restart_job(job_id: &str) -> io::Result<()> {
             error
         }
     })?;
-    let request: Request = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-    if request.job_id != job_id {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "job-request-id-mismatch",
-        ));
+    if subtitle_job {
+        let request: SubtitleRequestEnvelope =
+            serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if request.job_id != job_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "job-request-id-mismatch",
+            ));
+        }
+    } else {
+        let request: Request = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if request.job_id != job_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "job-request-id-mismatch",
+            ));
+        }
     }
 
     // Clear both markers first. A leftover marker would make the fresh runner
@@ -353,23 +391,40 @@ fn restart_job(job_id: &str) -> io::Result<()> {
         let _ = fs::remove_file(path);
     }
 
-    let mut state =
-        read_job_state(&job_store::state_path_in(&directory, job_id)?).unwrap_or_else(|| {
-            let mut fresh = initial_job_state(&request);
-            fresh.job_id = job_id.to_string();
-            fresh
-        });
-    state.status = "queued".into();
-    state.status_text = "이어받기를 준비하는 중…".into();
+    let mut state = state;
+    state.status = if subtitle_job { "preparing" } else { "queued" }.into();
+    state.status_text = if subtitle_job {
+        "같은 설정으로 자막을 다시 생성하는 중…".into()
+    } else {
+        "이어받기를 준비하는 중…".into()
+    };
     state.error = None;
-    job_store::persist_job_state_in(&directory, &mut state, now_millis())?;
-    match spawn_reserved_runner_with(&request_path, claim, process::spawn_detached) {
-        Ok(()) => Ok(()),
+    if subtitle_job {
+        state.execution_status = Some("started".into());
+        state.remote_job_id = None;
+        state.phase = None;
+        state.progress = None;
+        state.completed = None;
+        state.total = None;
+    }
+    job_store::persist_job_state_in(directory, &mut state, now_millis())?;
+    let path_text = request_path.to_string_lossy().into_owned();
+    let token = claim.token().to_string();
+    let args = if subtitle_job {
+        vec!["--run-subtitle-job", &path_text, "--claim-token", &token]
+    } else {
+        vec!["--run-job", &path_text, "--claim-token", &token]
+    };
+    match spawn(&args) {
+        Ok(()) => {
+            claim.handoff();
+            Ok(())
+        }
         Err(error) => {
             state.status = "failed".into();
             state.status_text = "작업 실행기를 시작하지 못했습니다.".into();
             state.error = Some("job-start-failed".into());
-            let _ = job_store::persist_job_state_in(&directory, &mut state, now_millis());
+            let _ = job_store::persist_job_state_in(directory, &mut state, now_millis());
             Err(error)
         }
     }
@@ -453,6 +508,76 @@ fn list_job_states() -> io::Result<Vec<JobState>> {
     list_job_states_in(&jobs_dir()?)
 }
 
+fn cleanup_orphaned_media_jobs_in(directory: &Path, now: u64) -> io::Result<()> {
+    for state in list_job_states_in(directory)? {
+        if !job_store::is_media_job(&state)
+            || !matches!(state.status.as_str(), "queued" | "running")
+            || job_store::runner_claim_is_active_in(directory, &state.job_id, now)?
+        {
+            continue;
+        }
+        let _claim = match job_store::reserve_runner_claim_in(directory, &state.job_id) {
+            Ok(claim) => claim,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let Some(mut state) = read_job_state(&job_state_path_in(directory, &state.job_id)?) else {
+            continue;
+        };
+        if !matches!(state.status.as_str(), "queued" | "running") {
+            continue;
+        }
+        if job_cancel_path_in(directory, &state.job_id)?.is_file() {
+            match job_store::cleanup_download_workspace_in(directory, &state.job_id) {
+                Ok(()) => {
+                    state.status = "cancelled".into();
+                    state.status_text = "다운로드가 취소되었습니다.".into();
+                    state.error = None;
+                }
+                Err(error) => {
+                    state.status = "failed".into();
+                    state.status_text = "다운로드 임시 파일을 정리하지 못했습니다.".into();
+                    state.error = Some(format!("download-cleanup-failed: {error}"));
+                }
+            }
+        } else {
+            state.status = "failed".into();
+            state.status_text = "중단된 다운로드 작업입니다. 다시 시도해 주세요.".into();
+            state.error = Some("media-interrupted".into());
+        }
+        persist_job_state_in(directory, &mut state, now)?;
+    }
+    Ok(())
+}
+
+fn cleanup_retained_requests_in(directory: &Path, now: u64) -> io::Result<()> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for state in list_job_states_in(directory)? {
+        if matches!(state.status.as_str(), "completed" | "failed" | "cancelled")
+            && now.saturating_sub(state.updated_at) > SUBTITLE_ACTIVE_MAX_AGE_MS
+        {
+            let _claim = match job_store::reserve_runner_claim_in(directory, &state.job_id) {
+                Ok(claim) => claim,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+            let current = read_job_state(&job_state_path_in(directory, &state.job_id)?);
+            if !current.is_some_and(|state| {
+                matches!(state.status.as_str(), "completed" | "failed" | "cancelled")
+                    && now.saturating_sub(state.updated_at) > SUBTITLE_ACTIVE_MAX_AGE_MS
+            }) {
+                continue;
+            }
+            if let Ok(path) = job_store::request_path_in(directory, &state.job_id) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn persist_job_state_in(directory: &Path, state: &mut JobState, updated_at: u64) -> io::Result<()> {
     job_store::persist_job_state_in(directory, state, updated_at)
 }
@@ -470,7 +595,7 @@ fn initial_job_state(request: &Request) -> JobState {
     let media_download = request.kind == "media-download";
     JobState {
         job_id: request.job_id.clone(),
-        job_type: media_download.then(|| "media".into()),
+        job_type: Some("media".into()),
         request_id: None,
         candidate_id: media_download.then(|| request.candidate_id.clone()),
         source_language: None,
@@ -580,6 +705,47 @@ fn spawn_job_runner(request: &Request) -> io::Result<()> {
     spawn_job_runner_with(request, process::spawn_detached)
 }
 
+fn launch_retained_subtitle_with<F>(path: &Path, launch: F) -> io::Result<()>
+where
+    F: FnOnce(&Path) -> io::Result<()>,
+{
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jobs directory is unavailable"))?;
+    let job_id = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_suffix(".subtitle.request.json"))
+        .and_then(safe_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid request path"))?;
+    let retained_path = job_store::request_path_in(directory, &job_id)?;
+    write_bytes_atomic(&retained_path, &fs::read(path)?)?;
+    launch(path)
+}
+
+fn spawn_retained_subtitle_process(path: &Path) -> io::Result<()> {
+    launch_retained_subtitle_with(path, spawn_subtitle_process)
+}
+
+fn subtitle_create_response_retaining(request: &Request) -> Value {
+    let directory = match jobs_dir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            return json!({
+                "ok": false,
+                "errorCode": "subtitle-job-persist-failed",
+                "error": error.to_string(),
+            });
+        }
+    };
+    subtitle_create_response_with_launcher(
+        request,
+        &directory,
+        now_millis(),
+        spawn_retained_subtitle_process,
+    )
+}
+
 /// Name of the GUI binary that owns the manager window.
 ///
 /// The window lives in the separate Tauri crate so the native messaging host
@@ -684,8 +850,30 @@ fn hello_response() -> Value {
 }
 
 fn run_native_host() {
+    #[cfg(windows)]
+    {
+        // Detached download runners must not retain Native Messaging pipes.
+        // Otherwise one-shot callers receive a frame but cannot observe EOF
+        // until the entire download (and inherited ffmpeg stdio) has exited.
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(kind: u32) -> *mut std::ffi::c_void;
+            fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+        }
+        for kind in [-10i32, -11, -12] {
+            let handle = unsafe { GetStdHandle(kind as u32) };
+            if !handle.is_null()
+                && handle as isize != -1
+                && unsafe { SetHandleInformation(handle, 1, 0) } == 0
+            {
+                return;
+            }
+        }
+    }
     if let Ok(directory) = jobs_dir() {
         let _ = cleanup_stale_subtitle_requests_in(&directory, now_millis());
+        let _ = cleanup_orphaned_media_jobs_in(&directory, now_millis());
+        let _ = cleanup_retained_requests_in(&directory, now_millis());
     }
     let mut legacy_writer = legacy_writer::Session::default();
     while let Ok(Some(request)) = read_message() {
@@ -709,7 +897,7 @@ fn run_native_host() {
                     }),
                 )
             }
-            "subtitle.create" => reply(&request, subtitle_create_response(&request)),
+            "subtitle.create" => reply(&request, subtitle_create_response_retaining(&request)),
             "youtube-info" => match youtube_info(&request) {
                 Ok(info) => reply(
                     &request,
@@ -778,7 +966,9 @@ fn run_native_host() {
                 ),
             },
             "cancel-job" => match job_cancel_path(&request.job_id) {
-                Ok(path) => match fs::write(path, b"cancel") {
+                Ok(_) => match jobs_dir().and_then(|directory| {
+                    job_store::request_cancel_in(&directory, &request.job_id, now_millis())
+                }) {
                     Ok(()) => reply(&request, json!({ "ok": true, "jobId": request.job_id })),
                     Err(error) => {
                         reply(&request, json!({ "ok": false, "error": error.to_string() }))
@@ -786,6 +976,26 @@ fn run_native_host() {
                 },
                 Err(error) => reply(&request, json!({ "ok": false, "error": error.to_string() })),
             },
+            "remove-job-history" => {
+                let result =
+                    serde_json::from_value::<Vec<String>>(request.raw_message["jobIds"].clone())
+                        .map_err(io::Error::other)
+                        .and_then(|ids| {
+                            jobs_dir().and_then(|directory| {
+                                job_store::remove_job_history_in(&directory, &ids)
+                            })
+                        });
+                match result {
+                    Ok(result) => reply(
+                        &request,
+                        json!({"ok": true, "removedIds": result.removed_ids, "skippedIds": result.skipped_ids}),
+                    ),
+                    Err(error) => reply(
+                        &request,
+                        json!({"ok": false, "errorCode": "job-history-remove-failed", "error": error.to_string()}),
+                    ),
+                }
+            }
             "pause-job" => match job_pause_path(&request.job_id) {
                 Ok(path) => match fs::write(path, b"pause") {
                     Ok(()) => reply(&request, json!({ "ok": true, "jobId": request.job_id })),
@@ -895,13 +1105,17 @@ fn run_job_from_path(path: &Path, claim_token: Option<&str>) -> io::Result<()> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jobs directory is unavailable"))?;
     let path_job_id = request_job_id_from_path(path)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid request path"))?;
-    let mut claim = match claim_token {
+    let claim = match claim_token {
         Some(token) => Some(job_store::adopt_runner_claim_in(
             directory,
             &path_job_id,
             token,
         )?),
-        None => None,
+        None => match job_store::acquire_runner_claim_in(directory, &path_job_id) {
+            Ok(claim) => Some(claim),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => return Err(error),
+        },
     };
     let request: Request = match fs::read(path)
         .and_then(|bytes| serde_json::from_slice(&bytes).map_err(io::Error::other))
@@ -919,18 +1133,20 @@ fn run_job_from_path(path: &Path, claim_token: Option<&str>) -> io::Result<()> {
             "job-request-id-mismatch",
         ));
     }
-    if claim.is_none() {
-        claim = match job_store::acquire_runner_claim_in(directory, &request.job_id) {
-            Ok(claim) => Some(claim),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
-            Err(error) => {
-                mark_job_failed_in(directory, &request, "job-claim-failed")?;
-                return Err(error);
-            }
-        }
-    }
     let _claim = claim.expect("runner claim is present");
-    execute_download(request, directory, |_| {})
+    // A delayed no-token invocation must not recreate a removed history row.
+    if !read_job_state(&job_store::state_path_in(directory, &request.job_id)?)
+        .is_some_and(|state| matches!(state.status.as_str(), "queued" | "running"))
+    {
+        return Ok(());
+    }
+    let result = execute_download(request, directory, |_| {});
+    if let Err(error) = &result {
+        // Record failure while the verified claim is still held; the outer
+        // fallback runs after Drop and must never resurrect deleted history.
+        record_runner_failure(path, Some(_claim.token()), error);
+    }
+    result
 }
 
 fn request_job_id_from_path(path: &Path) -> Option<String> {
@@ -947,19 +1163,14 @@ fn mark_bootstrap_failure(path: &Path, code: &str) -> io::Result<()> {
     let Some(job_id) = request_job_id_from_path(path) else {
         return Ok(());
     };
-    let mut state = read_job_state(&job_state_path_in(directory, &job_id)?).unwrap_or_default();
+    let mut state = match read_job_state(&job_state_path_in(directory, &job_id)?) {
+        Some(state) => state,
+        None if path.is_file() => JobState::default(),
+        None => return Ok(()),
+    };
     state.job_id = job_id;
     state.status = "failed".into();
     state.status_text = "저장된 작업 요청을 시작하지 못했습니다.".into();
-    state.error = Some(code.into());
-    job_store::persist_job_state_in(directory, &mut state, now_millis())
-}
-
-fn mark_job_failed_in(directory: &Path, request: &Request, code: &str) -> io::Result<()> {
-    let mut state = read_job_state(&job_state_path_in(directory, &request.job_id)?)
-        .unwrap_or_else(|| initial_job_state(request));
-    state.status = "failed".into();
-    state.status_text = "작업 상태를 준비하지 못했습니다.".into();
     state.error = Some(code.into());
     job_store::persist_job_state_in(directory, &mut state, now_millis())
 }
@@ -973,18 +1184,26 @@ fn record_runner_failure(path: &Path, claim_token: Option<&str>, error: &io::Err
     };
     // Token-launched children must still own the reservation. A mismatch means
     // another runner owns the job and its state must remain untouched.
-    if let Some(token) = claim_token {
+    let _claim = if let Some(token) = claim_token {
         let Ok(claim) = job_store::adopt_runner_claim_in(directory, &job_id, token) else {
             return;
         };
-        drop(claim);
-    } else if job_store::runner_claim_path_in(directory, &job_id).is_ok_and(|path| path.exists()) {
-        return;
-    }
+        claim
+    } else {
+        let Ok(claim) = job_store::reserve_runner_claim_in(directory, &job_id) else {
+            return;
+        };
+        claim
+    };
     let Ok(state_path) = job_state_path_in(directory, &job_id) else {
         return;
     };
-    let mut state = read_job_state(&state_path).unwrap_or_default();
+    let Some(mut state) = read_job_state(&state_path) else {
+        return;
+    };
+    if matches!(state.status.as_str(), "completed" | "cancelled") {
+        return;
+    }
     state.job_id = job_id;
     state.status = "failed".into();
     state.status_text = "작업 상태를 저장하지 못해 실행을 중단했습니다.".into();
@@ -992,7 +1211,7 @@ fn record_runner_failure(path: &Path, claim_token: Option<&str>, error: &io::Err
     let _ = job_store::persist_job_state_in(directory, &mut state, now_millis());
 }
 
-fn run_subtitle_job_from_path(path: &Path) -> io::Result<()> {
+fn run_subtitle_job_from_path(path: &Path, claim_token: Option<&str>) -> io::Result<()> {
     let directory = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -1002,7 +1221,20 @@ fn run_subtitle_job_from_path(path: &Path) -> io::Result<()> {
     let companion_root = directory
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Companion root is unavailable"))?;
-    subtitle::run_from_path(
+    let job_id = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| {
+            value
+                .strip_suffix(".subtitle.request.json")
+                .or_else(|| value.strip_suffix(".request.json"))
+        })
+        .and_then(safe_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid request path"))?;
+    let _claim = claim_token
+        .map(|token| job_store::adopt_runner_claim_in(directory, &job_id, token))
+        .transpose()?;
+    let result = subtitle::run_from_path(
         path,
         subtitle::Context {
             jobs_directory: directory.to_path_buf(),
@@ -1013,11 +1245,29 @@ fn run_subtitle_job_from_path(path: &Path) -> io::Result<()> {
                 })
             },
         },
-    )
+    );
+    if read_job_state(&job_state_path_in(directory, &job_id)?)
+        .is_some_and(|state| matches!(state.status.as_str(), "completed" | "cancelled"))
+    {
+        if let Ok(path) = job_store::request_path_in(directory, &job_id) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    result
 }
 
 fn main() {
     let args = env::args_os().collect::<Vec<_>>();
+    if args.get(1).and_then(|value| value.to_str()) == Some("--run-progressive-worker") {
+        if let Some(path) = args.get(2) {
+            if args.get(3).and_then(|value| value.to_str()) == Some("--supervised") {
+                let _ = media_download::run_supervised_progressive_worker(Path::new(path));
+            } else {
+                let _ = media_download::run_progressive_worker(Path::new(path));
+            }
+        }
+        return;
+    }
     if args.get(1).and_then(|value| value.to_str()) == Some("--run-job") {
         if let Some(path) = args.get(2) {
             let claim_token = (args.get(3).and_then(|value| value.to_str())
@@ -1033,7 +1283,11 @@ fn main() {
     }
     if args.get(1).and_then(|value| value.to_str()) == Some("--run-subtitle-job") {
         if let Some(path) = args.get(2) {
-            let _ = run_subtitle_job_from_path(Path::new(path));
+            let claim_token = (args.get(3).and_then(|value| value.to_str())
+                == Some("--claim-token"))
+            .then(|| args.get(4).and_then(|value| value.to_str()))
+            .flatten();
+            let _ = run_subtitle_job_from_path(Path::new(path), claim_token);
         }
         return;
     }
@@ -1849,6 +2103,63 @@ mod tests {
     }
 
     #[test]
+    fn failed_browser_subtitle_job_keeps_a_bounded_record_and_retries_same_envelope() {
+        let (root, jobs, output, envelope) = subtitle_run_fixture(true);
+        let active_path = subtitle_request_path_in(&jobs, &envelope.job_id).unwrap();
+        let original_envelope = fs::read(&active_path).unwrap();
+        launch_retained_subtitle_with(&active_path, |_| Ok(())).unwrap();
+        let transport = FakeSubtitleTransport::new(
+            Err(run_error(
+                "subtitle-service-unavailable",
+                "subtitle service is unavailable",
+            )),
+            vec![],
+        );
+        let error = run_subtitle_job_with_transport(
+            &transport,
+            &envelope,
+            &root,
+            &jobs,
+            &output,
+            test_run_policy(),
+        )
+        .expect_err("subtitle run fails");
+        assert_eq!(error.code, "subtitle-service-unavailable");
+
+        let retry_path = job_store::request_path_in(&jobs, &envelope.job_id).unwrap();
+        assert!(retry_path.is_file(), "failed request remains restartable");
+        let mut launched = Vec::new();
+        restart_job_in_with(&jobs, &envelope.job_id, |args| {
+            launched = args.iter().map(|value| (*value).to_string()).collect();
+            Ok(())
+        })
+        .expect("retry launches");
+        assert_eq!(launched[0], "--run-subtitle-job");
+        assert_eq!(Path::new(&launched[1]), retry_path);
+        let retried: SubtitleRequestEnvelope =
+            serde_json::from_slice(&fs::read(&retry_path).unwrap()).unwrap();
+        assert_eq!(retried.job_id, envelope.job_id);
+        assert_eq!(fs::read(&retry_path).unwrap(), original_envelope);
+
+        // The fake launcher has no child to adopt/release the handoff claim.
+        // Model a finished child before expecting retained-request expiry.
+        let finished =
+            job_store::adopt_runner_claim_in(&jobs, &envelope.job_id, &launched[3]).unwrap();
+        drop(finished);
+
+        let mut state = read_job_state(&job_state_path_in(&jobs, &envelope.job_id).unwrap())
+            .expect("retried state reads");
+        state.status = "failed".into();
+        persist_job_state_in(&jobs, &mut state, 1).unwrap();
+        cleanup_retained_requests_in(&jobs, SUBTITLE_ACTIVE_MAX_AGE_MS + 2).unwrap();
+        assert!(
+            !retry_path.exists(),
+            "retained request expires after two hours"
+        );
+        fs::remove_dir_all(root).expect("test root removes");
+    }
+
+    #[test]
     fn subtitle_vtt_validation_rejects_malformed_and_oversized_results() {
         let directory = test_directory();
         for vtt in [
@@ -2080,6 +2391,66 @@ mod tests {
     }
 
     #[test]
+    fn media_job_without_a_runner_owner_becomes_retryable_failure() {
+        let directory = test_directory();
+        let mut state = initial_job_state(&sample_download_request("job-orphaned"));
+        state.status = "running".into();
+        persist_job_state_in(&directory, &mut state, 10).unwrap();
+
+        cleanup_orphaned_media_jobs_in(&directory, 20).expect("orphan cleanup succeeds");
+        let state =
+            read_job_state(&job_state_path_in(&directory, "job-orphaned").unwrap()).unwrap();
+        assert_eq!(state.status, "failed");
+        assert_eq!(state.error.as_deref(), Some("media-interrupted"));
+        fs::remove_dir_all(directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn delayed_runner_and_failure_callback_cannot_resurrect_removed_history() {
+        let directory = test_directory();
+        let request = sample_download_request("job-removed");
+        let request_path = job_store::request_path_in(&directory, &request.job_id).unwrap();
+        job_store::write_json_atomic(&request_path, &request).unwrap();
+        let mut state = initial_job_state(&request);
+        state.status = "completed".into();
+        persist_job_state_in(&directory, &mut state, 10).unwrap();
+        job_store::remove_job_history_in(&directory, &[request.job_id.clone()]).unwrap();
+        assert!(run_job_from_path(&request_path, None).is_err());
+        record_runner_failure(&request_path, None, &io::Error::other("late failure"));
+        assert!(!job_state_path_in(&directory, &request.job_id)
+            .unwrap()
+            .exists());
+        assert!(restart_job_in_with(&directory, &request.job_id, |_| panic!(
+            "deleted job cannot launch"
+        ))
+        .is_err());
+        assert!(!job_state_path_in(&directory, &request.job_id)
+            .unwrap()
+            .exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cancelled_request_cannot_be_started_by_delayed_no_token_runner() {
+        let directory = test_directory();
+        let request = sample_download_request("job-cancelled-before-start");
+        let path = job_store::request_path_in(&directory, &request.job_id).unwrap();
+        job_store::write_json_atomic(&path, &request).unwrap();
+        let mut state = initial_job_state(&request);
+        state.status = "paused".into();
+        persist_job_state_in(&directory, &mut state, 10).unwrap();
+        job_store::request_cancel_in(&directory, &request.job_id, 20).unwrap();
+        run_job_from_path(&path, None).unwrap();
+        assert_eq!(
+            read_job_state(&job_state_path_in(&directory, &request.job_id).unwrap())
+                .unwrap()
+                .status,
+            "cancelled"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn parent_reservation_blocks_a_second_submit_before_the_child_starts() {
         let directory = test_directory();
         let request = sample_download_request("job-single-flight");
@@ -2272,6 +2643,8 @@ mod tests {
             input_kind: String::new(),
             user_agent: String::new(),
             accept_language: String::new(),
+            hls_keys: Vec::new(),
+            hls_playlist: String::new(),
             total: None,
             resume_file_name: String::new(),
             resume_from: None,
@@ -2437,6 +2810,34 @@ mod tests {
         );
         assert_eq!(command.user_agent, "Mozilla/5.0 TestBrowser/151.0");
         assert_eq!(command.accept_language, "ko,en-US;q=0.9,en;q=0.8");
+    }
+
+    #[test]
+    fn completed_media_job_with_retained_record_retries_after_output_is_missing() {
+        let directory = test_directory();
+        let request = sample_download_request("media-retry-missing-output");
+        job_store::write_json_atomic(
+            &job_store::request_path_in(&directory, &request.job_id).unwrap(),
+            &request,
+        )
+        .unwrap();
+        let mut state = initial_job_state(&request);
+        state.status = "completed".into();
+        state.file_name = Some("missing.mp4".into());
+        persist_job_state_in(&directory, &mut state, 10).unwrap();
+
+        let mut launched = Vec::new();
+        restart_job_in_with(&directory, &request.job_id, |args| {
+            launched = args.iter().map(|value| (*value).to_string()).collect();
+            Ok(())
+        })
+        .expect("missing output retry launches");
+        assert_eq!(launched[0], "--run-job");
+        let state = read_job_state(&job_state_path_in(&directory, &request.job_id).unwrap())
+            .expect("retry state reads");
+        assert_eq!(state.status, "queued");
+        assert_eq!(state.file_name.as_deref(), Some("missing.mp4"));
+        fs::remove_dir_all(directory).expect("test directory removes");
     }
 
     #[test]

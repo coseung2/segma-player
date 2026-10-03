@@ -1,6 +1,6 @@
 [package]
 name = "segma-player-tauri"
-version = "0.4.73"
+version = "0.4.85"
 description = "Segma Player desktop companion shell"
 authors = ["Segma Player"]
 edition = "2021"

@@ -20,6 +20,16 @@ import { mediaIdentity } from "../selection-identity";
 
 export type SubtitlePendingAction = "generate" | "import" | "sync" | null;
 
+export type SubtitlePlaybackChoice =
+  | { kind: "unset" }
+  | { kind: "off" }
+  | { kind: "track"; fileName: string };
+
+export interface ResolvedSubtitlePlayback {
+  enabled: boolean;
+  fileName: string;
+}
+
 export interface SubtitleState {
   mediaIdentity: string | null;
   mediaFileName: string | null;
@@ -36,6 +46,7 @@ export interface SubtitleState {
   selectedTargetLanguage: string;
   importRefresh: number;
   syncOffsetSeconds: number;
+  playbackChoice: SubtitlePlaybackChoice;
 }
 
 const DEFAULT_MAX_OFFSET_SECONDS = 24 * 60 * 60;
@@ -56,6 +67,7 @@ const initial: SubtitleState = {
   selectedTargetLanguage: "ko",
   importRefresh: 0,
   syncOffsetSeconds: 0,
+  playbackChoice: { kind: "unset" },
 };
 
 export const subtitleState = writable<SubtitleState>(initial);
@@ -73,6 +85,36 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function updateActionState(pendingAction: SubtitlePendingAction, error: string | null, notice: string | null): void {
   subtitleState.update((state) => ({ ...state, pendingAction, error, notice }));
+}
+
+export function resolveSubtitlePlayback(
+  choice: SubtitlePlaybackChoice,
+  tracks: readonly { fileName: string }[],
+): ResolvedSubtitlePlayback {
+  if (choice.kind === "off") {
+    return { enabled: false, fileName: "" };
+  }
+  const fileName = choice.kind === "track" && tracks.some((track) => track.fileName === choice.fileName)
+    ? choice.fileName
+    : tracks[0]?.fileName ?? "";
+  return { enabled: Boolean(fileName), fileName };
+}
+
+export function selectSubtitlePlayback(fileName: string): void {
+  subtitleState.update((state) => ({
+    ...state,
+    playbackChoice: fileName ? { kind: "track", fileName } : { kind: "off" },
+  }));
+}
+
+function retainPlaybackChoice(
+  choice: SubtitlePlaybackChoice,
+  tracks: readonly { fileName: string }[],
+): SubtitlePlaybackChoice {
+  if (choice.kind === "track" && !tracks.some((track) => track.fileName === choice.fileName)) {
+    return { kind: "unset" };
+  }
+  return choice;
 }
 
 async function refreshAfterAction(folder: string | null, fileName: string): Promise<void> {
@@ -137,12 +179,13 @@ export async function loadSubtitlesFor(folder: string | null, fileName: string, 
     ...state,
     mediaIdentity: identity,
     mediaFileName: fileName,
-    subtitles: [],
+    subtitles: state.mediaIdentity === identity ? state.subtitles : [],
     loading: true,
     loaded: false,
     unavailable: false,
     error: null,
     notice: null,
+    playbackChoice: state.mediaIdentity === identity ? state.playbackChoice : { kind: "unset" },
   }));
   try {
     const result = await loadSidecarSubtitles({ folder, fileName });
@@ -157,6 +200,7 @@ export async function loadSubtitlesFor(folder: string | null, fileName: string, 
         loaded: true,
         unavailable: true,
         error: null,
+        playbackChoice: retainPlaybackChoice(state.playbackChoice, []),
       }));
       return;
     }
@@ -170,6 +214,7 @@ export async function loadSubtitlesFor(folder: string | null, fileName: string, 
       loaded: true,
       unavailable: false,
       error: null,
+      playbackChoice: retainPlaybackChoice(state.playbackChoice, result.subtitles),
     }));
   } catch (error) {
     if (sequence !== requestSequence) return;
@@ -182,6 +227,7 @@ export async function loadSubtitlesFor(folder: string | null, fileName: string, 
       loaded: false,
       unavailable: false,
       error: errorMessage(error, "자막을 불러오지 못했습니다."),
+      playbackChoice: retainPlaybackChoice(state.playbackChoice, []),
     }));
   }
 }

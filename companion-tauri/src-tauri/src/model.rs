@@ -103,6 +103,16 @@ pub fn status_view(job: &JobState) -> (&'static str, Tone) {
     }
 }
 
+fn presentation_status_view(job: &JobState, file_present: bool) -> (&'static str, Tone) {
+    if job_kind(job) == JobKind::Download
+        && job.status.eq_ignore_ascii_case("completed")
+        && !file_present
+    {
+        return ("파일 없음", Tone::Warning);
+    }
+    status_view(job)
+}
+
 pub fn format_bytes(value: Option<u64>) -> Option<String> {
     let value = value? as f64;
     if value < 1000.0 {
@@ -287,7 +297,7 @@ pub fn available_actions(job: &JobState, restartable: bool, file_present: bool) 
         actions.push(Action::Cancel);
         return actions;
     }
-    let (_, tone) = status_view(job);
+    let (_, tone) = presentation_status_view(job, file_present);
     if tone == Tone::Success && file_present {
         let mut actions = Vec::new();
         if job_kind(job) == JobKind::Download {
@@ -303,7 +313,7 @@ pub fn available_actions(job: &JobState, restartable: bool, file_present: bool) 
 }
 
 pub fn to_view(job: &JobState, restartable: bool, file_present: bool) -> JobView {
-    let (status_label, tone) = status_view(job);
+    let (status_label, tone) = presentation_status_view(job, file_present);
     JobView {
         id: job.job_id.clone(),
         kind: job_kind(job),
@@ -477,10 +487,17 @@ mod tests {
     }
 
     #[test]
-    fn dto_view_does_not_offer_playback_for_missing_files() {
+    fn completed_download_with_missing_output_is_truthful_and_retryable_when_possible() {
         let mut done = job("done", "completed");
+        done.job_type = Some("media".into());
         done.file_name = Some("clip.mp4".into());
-        let view = to_view(&done, false, false);
-        assert!(view.actions.is_empty());
+
+        let terminal_view = to_view(&done, false, false);
+        assert_eq!(terminal_view.status_label, "파일 없음");
+        assert_eq!(terminal_view.tone, Tone::Warning);
+        assert!(terminal_view.actions.is_empty());
+
+        let restartable_view = to_view(&done, true, false);
+        assert_eq!(restartable_view.actions, vec![Action::Retry]);
     }
 }

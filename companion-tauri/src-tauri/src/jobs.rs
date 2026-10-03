@@ -85,7 +85,77 @@ pub fn request_cancel_in(directory: &Path, job_id: &str) -> io::Result<()> {
 }
 
 pub fn request_cancel(job_id: &str) -> io::Result<()> {
-    request_cancel_in(&jobs_dir()?, job_id)
+    let directory = jobs_dir()?;
+    let state_path = contract::state_path_in(&directory, job_id)?;
+    if contract::read_json::<JobState>(&state_path)
+        .is_some_and(|state| state.job_type.as_deref() != Some("subtitle"))
+    {
+        let response = submit_host_command(&json!({
+            "type": "cancel-job", "requestId": format!("manager-cancel-{}", now_millis()), "jobId": job_id
+        }))?;
+        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(io::Error::other("Companion rejected job cancellation"));
+        }
+        Ok(())
+    } else {
+        request_cancel_in(&directory, job_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveJobHistoryResult {
+    pub removed_ids: Vec<String>,
+    pub skipped_ids: Vec<String>,
+}
+
+fn remove_job_history_with(
+    job_ids: &[String],
+    submit: impl FnOnce(&Value) -> io::Result<Value>,
+) -> io::Result<RemoveJobHistoryResult> {
+    for id in job_ids {
+        contract::safe_id(id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid job id"))?;
+    }
+    if job_ids.is_empty() {
+        return Ok(RemoveJobHistoryResult {
+            removed_ids: vec![],
+            skipped_ids: vec![],
+        });
+    }
+    let response = submit(&json!({
+        "type": "remove-job-history",
+        "requestId": format!("manager-history-{}", now_millis()),
+        "jobIds": job_ids,
+    }))?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(io::Error::other("Companion rejected history removal"));
+    }
+    let result: RemoveJobHistoryResult =
+        serde_json::from_value(response).map_err(io::Error::other)?;
+    let requested: HashSet<_> = job_ids.iter().collect();
+    let mut returned = HashSet::new();
+    for id in result.removed_ids.iter().chain(&result.skipped_ids) {
+        if !requested.contains(id) || !returned.insert(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid history removal response",
+            ));
+        }
+    }
+    if returned != requested {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "incomplete history removal response",
+        ));
+    }
+    Ok(result)
+}
+
+/// The installed host owns claims and state; the manager never deletes job
+/// files independently of the runner lifecycle.
+pub fn remove_job_history(job_ids: &[String]) -> io::Result<RemoveJobHistoryResult> {
+    remove_job_history_with(job_ids, submit_host_command)
 }
 
 pub fn request_pause_in(directory: &Path, job_id: &str) -> io::Result<()> {
@@ -1320,6 +1390,40 @@ mod tests {
         let root = env::temp_dir().join(format!("segma-tauri-jobs-{label}-{nonce}"));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn history_response_preserves_per_job_outcomes_and_rejects_incomplete_results() {
+        let ids = vec!["done".into(), "active".into()];
+        let result = remove_job_history_with(&ids, |_| {
+            Ok(json!({
+                "ok": true, "removedIds": ["done"], "skippedIds": ["active"]
+            }))
+        })
+        .unwrap();
+        assert_eq!(result.removed_ids, ["done"]);
+        assert_eq!(result.skipped_ids, ["active"]);
+        for response in [
+            json!({"ok": false}),
+            json!({"ok": true, "removedIds": ["done"], "skippedIds": []}),
+            json!({"ok": true, "removedIds": ["done", "unrequested"], "skippedIds": ["active"]}),
+            json!({"ok": true, "removedIds": ["done"], "skippedIds": ["done", "active"]}),
+        ] {
+            assert!(remove_job_history_with(&ids, |_| Ok(response)).is_err());
+        }
+    }
+
+    #[test]
+    fn history_invalid_ids_fail_before_external_mutation_and_empty_batch_is_noop() {
+        assert!(
+            remove_job_history_with(&["done".into(), "../escape".into()], |_| panic!(
+                "invalid batch must not submit"
+            ))
+            .is_err()
+        );
+        let result =
+            remove_job_history_with(&[], |_| panic!("empty batch must not submit")).unwrap();
+        assert!(result.removed_ids.is_empty() && result.skipped_ids.is_empty());
     }
 
     #[test]

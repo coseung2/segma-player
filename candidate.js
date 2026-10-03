@@ -1,6 +1,7 @@
 import { isStreamtapePlayerPage, looksLikePlayerPage } from "./player-page-resolver.js";
 import { classifyDownloadMode } from "./download-mode.js";
 import { downloadPolicyForCandidate } from "./download-policy.js";
+import { googleVideoIdentity, isGoogleVideoAdaptiveResource } from "./providers/googlevideo.js";
 
 export const LIMITS = Object.freeze({
   urlBytes: 4096,
@@ -191,6 +192,10 @@ export function isKnownNonMediaResourceUrl(value, contentType = "") {
   const normalizedContentType = typeof contentType === "string" ? contentType.trim() : "";
   const explicitManifestType = /mpegurl|dash\+xml/i.test(normalizedContentType);
   return pathname === "/favicon.ico"
+    || isGoogleVideoAdaptiveResource(value, contentType)
+    // DoodStream/PlayMogo token endpoint: returns a text URL fragment that the
+    // player completes into the real file URL; it is never the media itself.
+    || pathname.startsWith("/pass_md5/")
     || pathname.startsWith("/cdn-cgi/challenge-platform/")
     || pathname === "/cdn-cgi/rum"
     || pathname === "/cdn-cgi/speculation"
@@ -448,7 +453,8 @@ export function makeCandidate({
 export function candidateKey(candidate) {
   const tab = candidate.tabId == null ? "" : String(candidate.tabId);
   const frame = candidate.frameId == null ? "" : String(candidate.frameId);
-  return `${tab}|${frame}|${normalizeOriginPath(candidate.resourceUrl) || candidate.displayUrl}|${candidate.mediaType}`;
+  const providerIdentity = googleVideoIdentity(candidate.resourceUrl);
+  return `${tab}|${frame}|${normalizeOriginPath(candidate.resourceUrl) || candidate.displayUrl}|${candidate.mediaType}${providerIdentity ? `|${providerIdentity}` : ""}`;
 }
 
 export function upsertCandidate(candidates, candidate, limit = LIMITS.candidates) {

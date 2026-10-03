@@ -4,4 +4,5 @@ export const PROVIDER_IDS = Object.freeze({
   HLSJS: "hlsjs",
   PLAYER_API: "player-api",
   GENERIC: "generic",
+  GOOGLEVIDEO: "googlevideo",
 });

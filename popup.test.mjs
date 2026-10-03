@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import vm from "node:vm";
+import { randomUUID } from "node:crypto";
+import { createCandidateRepository } from "./background-candidate-repository.js";
 
 let chromium = null;
 try {
@@ -97,6 +100,152 @@ test("rescan wakes every player frame and waits for a rebuilt candidate list", a
   assert.match(popupJs, /window\.dispatchEvent\(new Event\(eventType\)\)/);
   assert.match(popupJs, /for \(const delayMs of \[200, 600, 1_200\]\)/);
   assert.doesNotMatch(popupJs, /tabs\.sendMessage\(tab\.id,\s*\{\s*type:\s*"rescan"/);
+});
+
+// Run the popup's actual rescan and injected scripts against a small DOM realm.
+// The real candidate repository turns reported media into the returned selection.
+async function rescanEnvironment({ missingDependency = false, jwSource = "" } = {}) {
+  const files = {};
+  for (const name of ["content-extraction.js", "content.js", "page-media-observer.js"]) {
+    files[name] = await readFile(new URL(`./${name}`, import.meta.url), "utf8");
+  }
+  const repository = createCandidateRepository();
+  const pendingMessages = [];
+  const videoUrl = jwSource ? "blob:https://player.example/video" : "https://cdn.example/recovered.mp4";
+  class MediaElement {
+    constructor() { this.tagName = "VIDEO"; this.src = ""; this.currentSrc = videoUrl; this.paused = false; this.type = "video/mp4"; }
+    getBoundingClientRect() { return { width: 640, height: 360 }; }
+    querySelectorAll() { return []; }
+    getAttribute() { return null; }
+  }
+  const video = new MediaElement();
+  const frame = vm.createContext({
+    URL, Element: MediaElement, crypto: { randomUUID }, atob, console,
+    location: new URL("https://player.example/e/test"),
+    innerWidth: 1280, innerHeight: 720,
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+    setTimeout: (fn) => { fn(); return 1; }, clearTimeout() {},
+    setInterval: () => ({ unref() {} }), clearInterval() {},
+    MutationObserver: class { observe() {} },
+    performance: { getEntriesByType: () => [] },
+    document: {
+      title: "Player fixture", documentElement: {},
+      querySelector: () => null,
+      querySelectorAll: (selector) => selector === "video, audio, source" ? [video] : [],
+      addEventListener() {},
+    },
+    chrome: { runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === "resource") repository.observeResource({ ...message,
+          pageUrl: "https://player.example/e/test", siteUrl: "https://page.example/watch", frameId: 1 }, 7);
+        return Promise.resolve();
+      },
+    } },
+    Event: class { constructor(type) { this.type = type; } },
+  });
+  vm.runInContext(`window = globalThis; top = globalThis;
+    const listeners = new Map();
+    addEventListener = (type, fn) => {
+      const handlers = listeners.get(type) || [];
+      handlers.push(fn); listeners.set(type, handlers);
+    };
+    dispatchEvent = event => { for (const fn of listeners.get(event.type) || []) fn(event); };`, frame);
+  // postMessage is asynchronous in Chrome; deliver after the executing script.
+  frame.__enqueue = data => pendingMessages.push(data);
+  vm.runInContext("postMessage = data => __enqueue(data);", frame);
+  const flush = () => {
+    while (pendingMessages.length) {
+      frame.__messageData = pendingMessages.shift();
+      vm.runInContext("dispatchEvent({type: 'message', source: window, data: __messageData})", frame);
+    }
+  };
+  if (jwSource) {
+    frame.__jwSource = jwSource;
+    vm.runInContext(`jwplayer = () => player;
+      player = { getPlaylistItem: () => ({file:__jwSource,type:'application/vnd.apple.mpegurl'}), getConfig: () => ({}), getPlaylist: () => [] };
+      jwplayer.api = {players:[player]};`, frame);
+    vm.runInContext(files["page-media-observer.js"], frame);
+    vm.runInContext("jwplayer()", frame);
+  }
+  if (!missingDependency) {
+    vm.runInContext(files["content-extraction.js"], frame);
+    vm.runInContext(files["content.js"], frame);
+    flush();
+    vm.runInContext("dispatchEvent(new Event('aura-media-detector-rescan-v1'))", frame);
+    flush();
+  }
+  const { popupJs } = await readOwned();
+  const rescanSource = popupJs.slice(popupJs.indexOf("async function rescan()"), popupJs.indexOf("function applyLocale("));
+  const button = { disabled: false };
+  const popup = vm.createContext({
+    byId: () => button,
+    window: { setTimeout: (fn) => fn() },
+    sendBackground: async message => { if (message.type === "clear-tab") repository.clearTab(7); },
+    requestCandidates: async () => repository.rerankTabCandidates(7).length,
+    RESCAN_EVENT_TYPE: "aura-media-detector-rescan-v1",
+    chrome: {
+      tabs: { query: async () => [{ id: 7 }] },
+      scripting: { executeScript: async ({ files: requested, func, args }) => {
+        if (requested) for (const name of requested) vm.runInContext(files[name], frame);
+        if (func) { frame.__args = args; vm.runInContext(`(${func.toString()})(...__args)`, frame); }
+        flush();
+      } },
+    },
+  });
+  vm.runInContext(rescanSource, popup);
+  return { frame, files, flush, repository, rescan: () => vm.runInContext("rescan()", popup) };
+}
+
+test("popup rescan initializes a missing frame and selects its media on repeated scans", async () => {
+  const env = await rescanEnvironment({ missingDependency: true });
+  for (let scan = 0; scan < 2; scan += 1) {
+    await env.rescan();
+    const primary = env.repository.rerankTabCandidates(7).find(candidate => candidate.main);
+    assert.equal(primary?.resourceUrl, "https://cdn.example/recovered.mp4");
+  }
+});
+
+test("popup rescan restores the unchanged JW source behind a blob video", async () => {
+  const source = "https://cdn.example/master.m3u8?token=fixture";
+  const env = await rescanEnvironment({ jwSource: source });
+  assert.equal(env.repository.rerankTabCandidates(7).find(c => c.main)?.player, "jwplayer");
+  for (let scan = 0; scan < 2; scan += 1) {
+    await env.rescan();
+    const primary = env.repository.rerankTabCandidates(7).find(c => c.main);
+    assert.equal(primary?.resourceUrl, source);
+    assert.equal(primary?.player, "jwplayer");
+  }
+});
+
+test("rescan keeps a manifest that was only observed before the scan", async () => {
+  // LuluStream: the JW manifest was seen once on the network; the frame's
+  // detector does not report it again, so a rescan must not discard it.
+  const env = await rescanEnvironment({ missingDependency: true });
+  const manifest = "https://cdn.example/hls2/master.m3u8?t=fixture";
+  env.repository.observeResource({
+    resourceUrl: manifest,
+    contentType: "application/vnd.apple.mpegurl",
+    pageUrl: "https://player.example/e/test",
+    siteUrl: "https://page.example/watch",
+    frameId: 1,
+    detectionSource: "web-request",
+  }, 7);
+  const before = env.repository.rerankTabCandidates(7).find((candidate) => candidate.resourceUrl === manifest);
+  assert.ok(before, "fixture manifest is observed");
+  await env.rescan();
+  const after = env.repository.rerankTabCandidates(7).find((candidate) => candidate.resourceUrl === manifest);
+  assert.equal(after?.id, before.id, "the same candidate id stays downloadable after rescan");
+});
+
+test("a failed content startup can recover once its dependency is supplied", async () => {
+  const env = await rescanEnvironment({ missingDependency: true });
+  assert.throws(() => vm.runInContext(env.files["content.js"], env.frame), /content-extraction-unavailable/);
+  vm.runInContext(env.files["content-extraction.js"], env.frame);
+  vm.runInContext(env.files["content.js"], env.frame);
+  env.flush();
+  assert.equal(env.repository.rerankTabCandidates(7).find(c => c.main)?.resourceUrl,
+    "https://cdn.example/recovered.mp4");
 });
 
 test("popover sizes to its content and keeps one document scroller", async () => {

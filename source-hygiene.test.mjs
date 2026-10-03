@@ -100,7 +100,7 @@ test("extension-primary compatibility closure resolves only to packaged shared s
   const report = JSON.parse(stdout);
   assert.equal(report.sourceAssets > 0, true);
   assert.equal(report.tests > 0, true);
-  assert.equal(report.runtimeAllowlist, 58);
+  assert.equal(report.runtimeAllowlist, 59);
   assert.equal(report.compatibilityInRuntime, 0);
   assert.deepEqual(report.outsideRuntime, []);
   assert.deepEqual(report.missing, []);

@@ -33,6 +33,7 @@
     "popup.html",
     "popup.js",
     "providers/dood.js",
+    "providers/googlevideo.js",
     "providers/hlsjs.js",
     "providers/ids.js",
     "providers/level5.js",

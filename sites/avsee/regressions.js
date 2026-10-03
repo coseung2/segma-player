@@ -33,6 +33,19 @@ export const avseeRegressions = Object.freeze([
       1: Object.freeze({ playing: true, visible: true, mediaCount: 1 }),
     }),
   }),
+  // User-reported 2026-10-03: detection worked, but the parallel range
+  // download failed with HTTP 429 after about 59 MB of a 1.16 GB file.
+  Object.freeze({
+    id: "avsee-javc-2165198-throttled-progressive",
+    liveOnly: true,
+    liveUrl: "https://02.avsee.is/javc/2165198?page=5",
+    recommendedAdblockMode: "on",
+    settleMs: 10_000,
+    expected: Object.freeze({
+      minimumCandidateCount: 1,
+      requireNonAdvertisementPrimary: true,
+    }),
+  }),
 ]);
 
 /// Title-resolution cases for this site, asserted by `avsee-title.test.mjs`.

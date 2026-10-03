@@ -13,6 +13,7 @@ const SHIPPED_TEST_DIRECTORIES = Object.freeze([
   "companion-ui",
   "scripts",
   "sites",
+  "providers",
 ]);
 
 async function testFilesUnder(directory, prefix = "") {

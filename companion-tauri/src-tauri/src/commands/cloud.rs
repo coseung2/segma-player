@@ -3,6 +3,7 @@ use aura_companion_contract::{self as contract, cloud};
 use cloud::{CloudJobRequest, CloudJobState, CloudOperation, CloudProvider};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +18,7 @@ const CLOUD_EXECUTABLE: &str = if cfg!(target_os = "windows") {
     "aura-media-cloud"
 };
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
+const MAX_TELEGRAM_CONFIG_BYTES: usize = 256;
 #[cfg(target_os = "windows")]
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 #[cfg(target_os = "windows")]
@@ -97,6 +99,13 @@ pub struct StartCloudDeleteRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CancelCloudJobRequest {
     pub job_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigureTelegramRequest {
+    token: String,
+    channel_id: String,
 }
 
 #[derive(Deserialize)]
@@ -234,6 +243,180 @@ fn resolve_cloud_executable() -> Result<PathBuf, CommandError> {
             )
         },
     )
+}
+
+fn valid_telegram_token(value: &str) -> bool {
+    let Some((bot_id, secret)) = value.split_once(':') else {
+        return false;
+    };
+    value.len() >= 12
+        && value.len() <= 256
+        && !bot_id.is_empty()
+        && bot_id.bytes().all(|byte| byte.is_ascii_digit())
+        && !secret.is_empty()
+        && secret
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn valid_telegram_channel_id(value: &str) -> bool {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    !digits.is_empty()
+        && value.len() <= 24
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && digits.bytes().any(|byte| byte != b'0')
+}
+
+fn telegram_config_payload(request: ConfigureTelegramRequest) -> Result<Vec<u8>, CommandError> {
+    if request.token.trim() != request.token
+        || request.channel_id.trim() != request.channel_id
+        || !valid_telegram_token(&request.token)
+        || !valid_telegram_channel_id(&request.channel_id)
+    {
+        return Err(CommandError::invalid_request(
+            "봇 토큰과 저장소 채팅 ID를 확인해 주세요.",
+        ));
+    }
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "token": request.token,
+        "channelId": request.channel_id,
+    }))
+    .map_err(|_| CommandError::invalid_request("텔레그램 설정을 확인해 주세요."))?;
+    if payload.len() > MAX_TELEGRAM_CONFIG_BYTES {
+        return Err(CommandError::invalid_request(
+            "텔레그램 설정 입력이 너무 깁니다.",
+        ));
+    }
+    Ok(payload)
+}
+
+fn configure_telegram_with(
+    executable: &Path,
+    request: ConfigureTelegramRequest,
+) -> Result<(), CommandError> {
+    let payload = telegram_config_payload(request)?;
+    let mut command = Command::new(executable);
+    command
+        .arg("--configure-telegram")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().map_err(|_| {
+        CommandError::new(
+            "telegram-configuration-failed",
+            "텔레그램 저장소 설정을 저장하지 못했습니다.",
+        )
+    })?;
+    let written = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(&payload).is_ok());
+    let succeeded = written && child.wait().is_ok_and(|status| status.success());
+    if !succeeded {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(CommandError::new(
+            "telegram-configuration-failed",
+            "텔레그램 저장소 설정을 저장하지 못했습니다.",
+        ));
+    }
+    Ok(())
+}
+
+fn installer_candidates(application_dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = fs::read_dir(application_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    let name = name.to_ascii_lowercase();
+                    name.starts_with("aura-media-companion-") && name.ends_with("-win-x64.exe")
+                })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.reverse();
+    candidates
+}
+
+fn is_companion_installer(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            name.starts_with("aura-media-companion-") && name.ends_with("-win-x64.exe")
+        })
+}
+
+fn run_local_installer(installer: &Path) -> Result<(), CommandError> {
+    let mut command = Command::new(installer);
+    command
+        .args([
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/CURRENTUSER",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    if command.status().is_ok_and(|status| status.success()) {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            "cloud-component-install-failed",
+            "클라우드 구성 요소를 복구하지 못했습니다.",
+        ))
+    }
+}
+
+fn install_cloud_binary(source: &Path, destination: &Path) -> Result<(), CommandError> {
+    if read_cloud_agent_status(source).is_none() {
+        return Err(CommandError::invalid_request(
+            "호환되는 클라우드 구성 요소 파일을 선택해 주세요.",
+        ));
+    }
+    if source != destination {
+        fs::copy(source, destination).map_err(|_| {
+            CommandError::new(
+                "cloud-component-install-failed",
+                "클라우드 구성 요소를 복구하지 못했습니다.",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn install_cloud_component_from(source: &Path, application_dir: &Path) -> Result<(), CommandError> {
+    let destination = application_dir.join(CLOUD_EXECUTABLE);
+    let is_cloud_binary = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(CLOUD_EXECUTABLE));
+    if is_cloud_binary {
+        install_cloud_binary(source, &destination)?;
+    } else if is_companion_installer(source) {
+        run_local_installer(source)?;
+    } else {
+        return Err(CommandError::invalid_request(
+            "클라우드 구성 요소 또는 Companion 설치 파일을 선택해 주세요.",
+        ));
+    }
+    if read_cloud_agent_status(&destination).is_none() {
+        return Err(CommandError::new(
+            "cloud-component-install-failed",
+            "클라우드 구성 요소를 복구하지 못했습니다.",
+        ));
+    }
+    Ok(())
 }
 
 fn read_cloud_agent_status(executable: &Path) -> Option<CloudAgentStatus> {
@@ -400,18 +583,82 @@ fn start_request(request: CloudJobRequest) -> Result<CloudJobDto, CommandError> 
 #[tauri::command]
 pub async fn cloud_status() -> Result<CloudStatusDto, CommandError> {
     tauri::async_runtime::spawn_blocking(|| {
-        let status = resolve_cloud_executable()
-            .ok()
-            .and_then(|executable| read_cloud_agent_status(&executable));
+        let executable = resolve_cloud_executable().ok();
+        let status = executable.as_deref().and_then(read_cloud_agent_status);
         Ok(CloudStatusDto {
             schema_version: cloud::CLOUD_JOB_SCHEMA_VERSION,
             capability: cloud::CLOUD_JOB_CAPABILITY.into(),
-            executable_available: status.is_some(),
+            executable_available: executable.is_some(),
             telegram_configured: status.is_some_and(|value| value.providers.telegram),
         })
     })
     .await
     .map_err(|_| CommandError::new("operation-failed", "Cloud status could not be read."))?
+}
+
+#[tauri::command]
+pub async fn configure_telegram(request: ConfigureTelegramRequest) -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let executable = resolve_cloud_executable()?;
+        configure_telegram_with(&executable, request)
+    })
+    .await
+    .map_err(|_| {
+        CommandError::new(
+            "telegram-configuration-failed",
+            "텔레그램 저장소 설정을 저장하지 못했습니다.",
+        )
+    })?
+}
+
+#[tauri::command]
+pub async fn install_cloud_component() -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let current_exe = std::env::current_exe().map_err(|_| {
+            CommandError::new(
+                "cloud-component-source-missing",
+                "로컬 설치 파일을 찾지 못했습니다. Companion을 다시 설치해 주세요.",
+            )
+        })?;
+        let application_dir = current_exe.parent().ok_or_else(|| {
+            CommandError::new(
+                "cloud-component-source-missing",
+                "로컬 설치 파일을 찾지 못했습니다. Companion을 다시 설치해 주세요.",
+            )
+        })?;
+
+        if let Some(source) =
+            executable_candidates(&current_exe, Path::new(env!("CARGO_MANIFEST_DIR")))
+                .into_iter()
+                .skip(1)
+                .find(|candidate| {
+                    candidate.is_file() && read_cloud_agent_status(candidate).is_some()
+                })
+        {
+            return install_cloud_component_from(&source, application_dir);
+        }
+        if let Some(installer) = installer_candidates(application_dir).into_iter().next() {
+            return install_cloud_component_from(&installer, application_dir);
+        }
+        let Some(source) = rfd::FileDialog::new()
+            .set_title("클라우드 구성 요소 또는 Companion 설치 파일 선택")
+            .add_filter("실행 파일", &["exe"])
+            .pick_file()
+        else {
+            return Err(CommandError::new(
+                "cloud-component-source-missing",
+                "로컬 설치 파일을 찾지 못했습니다. Companion을 다시 설치해 주세요.",
+            ));
+        };
+        install_cloud_component_from(&source, application_dir)
+    })
+    .await
+    .map_err(|_| {
+        CommandError::new(
+            "cloud-component-install-failed",
+            "클라우드 구성 요소를 복구하지 못했습니다.",
+        )
+    })?
 }
 
 #[tauri::command]
@@ -719,5 +966,47 @@ mod tests {
         }))
         .unwrap();
         assert_ne!(incompatible.protocol, cloud::CLOUD_JOB_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn telegram_configuration_rejects_invalid_shape_before_spawn() {
+        let error = configure_telegram_with(
+            Path::new("missing-agent"),
+            ConfigureTelegramRequest {
+                token: "not-a-token".into(),
+                channel_id: "chat name".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid-request");
+    }
+
+    #[test]
+    fn telegram_configuration_rejects_oversized_json_payload() {
+        let error = telegram_config_payload(ConfigureTelegramRequest {
+            token: format!("1:{}", "a".repeat(220)),
+            channel_id: "-1001234567890".into(),
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "invalid-request");
+        assert!(error.message.contains("너무 깁니다"));
+    }
+
+    #[test]
+    fn telegram_configuration_failure_is_sanitized() {
+        let secret = "123456:TOP_SECRET_TOKEN";
+        let error = configure_telegram_with(
+            Path::new("definitely-missing-cloud-agent"),
+            ConfigureTelegramRequest {
+                token: secret.into(),
+                channel_id: "-1001234567890".into(),
+            },
+        )
+        .unwrap_err();
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert_eq!(error.code, "telegram-configuration-failed");
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("TOP_SECRET_TOKEN"));
+        assert!(!serialized.contains("1001234567890"));
     }
 }

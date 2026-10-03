@@ -831,3 +831,107 @@ The av19 result is a confirmed current live detection regression and remains the
 - Extension-download, subtitle, overlay, tab switching: `NOT_RUN`.
 - Evidence: `output/live-media-0.4.71-installed-companion.json`.
 - Boundary: this proves isolated Chrome staging-to-installed-Companion readiness, not the user's current Chrome profile. The connected Whale profile still points its Segma unpacked extension ID at a missing legacy `aura-mdownloader` staging path, so Whale handoff remains `NOT_RUN` until that extension is manually reloaded from the current staging directory.
+
+## 2026-10-03 01:39–01:49 Asia/Seoul — complete registered-site baseline (0.4.78)
+
+- Browser/channel: isolated Playwright-cache Chrome, headless; repository-root unpacked extension `0.4.78`; Aura AdBlock on; VPN not changed or verified.
+- Evidence: `artifacts/live-media-baseline-all-on.json` (18 live cases across 15 site profiles).
+- Handoff environment: `media-companion-disconnected`, native messaging host forbidden for the repository-root extension ID. This run used the wrong unpacked path for the installed host allowlist. Follow-up uses the existing authorized `artifacts/chrome-web-store/staging-pro` path; no host allowlist or browser security settings were changed.
+- All extension-download/subtitle/overlay/tab-switching surfaces: `NOT_RUN`. `playback observed` below only means a video advanced in a frame; it may be an advertisement and does not prove main-content playback.
+
+| Site / case | detect | playback | progressive-probe | Failure or remaining evidence |
+| --- | --- | --- | --- | --- |
+| missav / simd | candidate detected, environment mismatch | observed, main content unverified | NOT_RUN | fixture recommends site-allow, run was on |
+| missav / docp | BLOCKED | NOT_RUN | NOT_RUN | site challenge |
+| animepahe | PASS, one main progressive candidate | observed | INCONCLUSIVE | size unknown; download not run |
+| av19 | PASS, one main HLS candidate | observed | NOT_RUN | transport and save not run |
+| avsee | BLOCKED | NOT_RUN | NOT_RUN | site challenge |
+| asianporn | candidate detected | not observed | INCONCLUSIVE | size unknown |
+| onlyjerk | FAIL, zero candidates | not observed | NOT_RUN | page/player requires further diagnosis |
+| playmogo / both cases | FAIL, zero candidates | not observed | NOT_RUN | page/player requires further diagnosis |
+| lulustream | FAIL, zero candidates | not observed | NOT_RUN | video element exists but readyState 0 |
+| pimpbunny | BLOCKED | NOT_RUN | NOT_RUN | site challenge |
+| recu | BLOCKED | NOT_RUN | NOT_RUN | site challenge |
+| shackledshow | FAIL, zero candidates | not observed | NOT_RUN | page/player requires further diagnosis |
+| beeg | PASS, non-ad HLS candidates | observed | NOT_RUN | previous all-ad symptom not reproduced in this run |
+| gogoanime / both cases | FAIL, wrong primary | observed | NOT_RUN | bkcdn MP4 outranks the actual Googlevideo episode |
+| jamak | FAIL, unexpected primary host | not observed | NOT_RUN | hosted player/CDN differs from the old fixture |
+| zoro | BLOCKED | NOT_RUN | NOT_RUN | site challenge |
+
+- No site is marked supported or resolved by this baseline. AdBlock-off and authorized-staging checks follow separately.
+
+## 2026-10-03 01:51–02:04 Asia/Seoul — authorized staging, all sites, AdBlock off (0.4.79)
+
+- Browser/channel: isolated Playwright-cache Chrome, headless; Pro staging `0.4.79` before the Gogoanime ranking correction; installed native host reports `0.4.73`, protocol 2, toolsReady true, media-download-v1. VPN unchanged/unverified.
+- Evidence: `artifacts/live-media-0.4.79-off-all.json`; all 18 registered cases executed. Extension-download/subtitle/overlay/tab switching remain `NOT_RUN` in this detection comparison.
+- Detect candidates were observed for MissAV/simd (17), av19 (1), asianporn (137), playmogo/0p6 (2), lulustream (1), beeg (18), and both Gogoanime cases (2/1). The suite labels several `environment-mismatch` because off differs from fixture recommendations; this is not itself proof of a product failure or success.
+- Confirmed site responses: MissAV/docp, playmogo/j8k8 and recu returned HTTP 403; pimpbunny HTTP 451; zoro HTTP 521; shackledshow HTTP 500. avsee navigation was interrupted by a browser error page. These are separate from downloader failures.
+- Animepahe, onlyjerk and Jamak returned HTTP 200 but had no candidates or observed playback in this run. Further player-path inspection is required.
+- Gogoanime Bleach now serves the episode through Googlevideo rather than the old Megaplay fixture. The earlier on-mode run still proves incorrect bkcdn primary selection when both videos are present; preserve both results.
+- The Gogoanime Episode 8 result simultaneously has a playing main video and a `site-challenge` hint; the harness scans every subframe, so the challenge classification requires attribution before treating the main page as blocked.
+- Progressive-probe: `NOT_RUN` for the cases whose evaluation stopped at environment/host/challenge checks. Playback is only observed video advancement, not validated saved media. No site regression closed.
+
+## 2026-10-03 02:04–02:12 Asia/Seoul — Gogoanime/AnimePahe actual downloads (0.4.79)
+
+- Environment: isolated Playwright-cache Chrome, headless, Pro staging `0.4.79`, Aura AdBlock on, VPN unchanged/unverified; installed Companion host `0.4.73`.
+- First run after Gogoanime ranking change: AnimePahe detect/main playback observed, download `FAIL` at 85,983,233/263,183,344 bytes with Windows `os error 5` while waiting for the media tool. Gogoanime Episode 8 detect `PASS`, extension-download `PASS`, 86,888,236-byte H.264/AAC MP4 saved in 13.636s; ffprobe duration 1434.969977 seconds, 640x360. Gogoanime Bleach detect saw a Googlevideo candidate but download `FAIL`, `application/vnd.yt-ump` was handed off as progressive media.
+- Follow-up after provider-specific SABR exclusion and format identity: Gogoanime Bleach detect/main playback observed, progressive MP4 bytes downloaded to 92,274,689/97,218,681, then the same installed-host `os error 5`; UMP misclassification was not repeated in this run. The site remains unresolved until a full saved file passes with the updated host.
+- Evidence: `artifacts/live-download-authoritative-evidence.json` contains current persisted job outcomes and the completed file probe. `artifacts/live-media-0.4.79-on-focused.json` contains the final Bleach follow-up. The original three-case report was overwritten by a reused report name; its recorded job IDs were verified directly rather than reconstructing missing browser evidence. The task launcher now creates timestamped report names.
+- Progressive-probe: `INCONCLUSIVE` in these cases; Companion completion is independent evidence. Subtitle/overlay/tab-switching: `NOT_RUN`. Full saved-file decode and installed-user-profile click remain separate gates.
+
+- 02:20 추가 검증: 위 Episode 8 저장 파일 전체를 bundled ffmpeg `-xerror -f null`로 디코딩하여 exit 0, 오류 출력 없음 확인 (`artifacts/live-download-authoritative-evidence.json`).
+
+## 2026-10-03 02:16–02:30 Asia/Seoul — remaining player-path diagnosis (0.4.79)
+
+- Browser/channel: isolated Chrome for Testing 145.0.7632.6, headless; staging `0.4.79`; Aura AdBlock on/off in task profiles; VPN unchanged/egress unknown.
+- Full per-surface/version/mode/evidence rows: `artifacts/site-diagnostics/qa-rows.json`; technical diagnosis: `artifacts/site-diagnostics/FINDINGS.md`. Those rows preserve before/after-rescan and initial/final-union caveats.
+- Onlyjerk detect: `PASS` after actual `.player-btn.active` activation in both modes; lazy blank frames explain passive zero-candidate result. ON final snapshot has a non-ad JW Player HLS candidate. Playback `NOT_VERIFIED` (readyState 0 in the successful activation snapshot). Main monitor now includes this explicit user action for this fixture.
+- PlayMogo (both cases) detect/playback: `BLOCKED`, HTTP 403/Cloudflare in current on/off checks. No provider fix established.
+- LuluStream detect: main JW Player HLS candidate before rescan, zero after rescan (`FAIL` recovery). Earlier separate checks observed HLS 200 and decoded native-page playback; no full save. Old hlsjs fixture identity is stale. Evidence `live-off-lulustream-20261002T172314324Z.json` under the directory above.
+- Jamak detect/playback: exact board-to-selected-Streamtape path incomplete; default Dood selection cannot satisfy a Streamtape fixture. Direct recorded Streamtape embed loaded HTTP 200 and parser succeeded, but video unready and no candidates. Do not infer board workflow support.
+- Shackledshow: `BLOCKED` by HTTP 500 on/off, no player.
+- Shared rescan initialization failure: blank frames throw `content-extraction-unavailable` because popup injects content.js alone. Confirmed on several surfaces; correction in progress, not yet a resolved site result.
+- All progressive-probe/extension-download/subtitle/overlay surfaces in this diagnostic slice: `NOT_RUN`.
+
+## 2026-10-03 02:31–02:32 Asia/Seoul — actual popup link entry and YouTube (0.4.79)
+
+- Isolated Chrome for Testing 145.0.7632.6, headless; Pro staging `0.4.79`; installed host `0.4.73`; AdBlock not loaded, VPN unchanged/unverified.
+- Evidence: `artifacts/popup-handoff-1790962294869.json`. Used actual popup tab, address input, tab switches and Download button, then native list-jobs status. This is the real popup document in an isolated tab, not the user-profile browser-action window.
+- Link input and tab continuity: `PASS` for both cases; pasted input preserved across detect→link switches, requests accepted by Companion.
+- Direct public sample extension-download: `FAIL`, server returned progressive HTTP 403. No file success claimed.
+- YouTube public 19-second test video extension-download: job `completed`, `[240p] Me at the zoo.mp4`; saved-file existence/probe/decode still separate until checked. Completion message incorrectly names the default Downloads/Aura Media folder although configured folder is Downloads; needs correction in the active engine work.
+- Detect/progressive-probe/subtitle/overlay: `NOT_RUN` in this popup test; no browser-profile or unrelated user-tab changes.
+
+## 2026-10-03 06:09–06:17 Asia/Seoul — AVsee javc large progressive after 429 handling (0.4.79)
+
+- Browser/channel: isolated Playwright-cache Chrome, headless; Pro staging `0.4.79`; Aura AdBlock on; VPN unchanged/unverified. Installed host rebuilt with HTTP 429 throttle handling (SHA256 `4620BBD6…D483`).
+- Site URL / ID: `https://02.avsee.is/javc/2165198?page=5` / `avsee` (`avsee-javc-2165198-throttled-progressive`).
+- Prior user failure (05:49): detect and handoff worked; Companion download failed at 58,720,257 / 1,159,279,811 bytes with `progressive range HTTP 429` (INC-2026-10-03-060).
+- Detect: `PASS`; extension-download: `PASS`, 1,541,966,556 / 1,541,966,556 bytes at about 4.5 MB/s, H.264 1280x720 + AAC, 7093.8 seconds, full ffmpeg decode exit 0. The page's main video in this run had a different title than the user's earlier job, so the exact earlier file was not re-downloaded.
+- The sampled job states did not show the throttle-wait text, so this live run does not prove the 429 path was exercised; that path is covered by the deterministic local-server regression.
+- Evidence: `artifacts/live-media-avsee-javc-throttle.json`, `artifacts/live-download-authoritative-evidence.json`. Subtitle/overlay/tab-switching: `NOT_RUN`.
+
+## 2026-10-03 07:40–09:16 Asia/Seoul — headless re-check of reported failing sites (0.4.79→0.4.81)
+
+- Browser/channel: isolated Playwright Chrome, **headless** (runner now forces `AURA_MONITOR_HEADLESS=1`); Pro staging as listed; installed Companion host replaced per step (final SHA256 `B4B63937…`). VPN unchanged/unverified. Full ffmpeg decode (`-f null`) on every saved file.
+- LuluStream (`lulustream-browser-bound-master-hls`), AdBlock on, 0.4.79+rescan fix: detect `PASS` (JW Player HLS_MEDIA, cdn-tnmr). extension-download `PASS`: 279,410,571 bytes, 1280x720, 1,279.9 s, decode exit 0. AdBlock off: player never started (readyState 0, no media responses) → `insufficient-candidates`; recommended mode is on. Harness label `unexpected-primary-player` is a stale fixture expectation (`hlsjs` vs real `jwplayer`). INC-2026-10-03-062.
+- av19 (`av19-level5-iframe-session`), AdBlock on: 0.4.79 extension-download `FAIL` `Incorrect AES key length (938 bytes)`; 0.4.80 first fix `FAIL` `hls key was not decoded by the page` (tokenized key URIs); 0.4.80 final `PASS`: 758,180,769 bytes, 1080x460, 2,458.6 s, decode exit 0 (≈8 min transfer). INC-2026-10-03-063.
+- Onlyjerk (`onlyjerk-rikakodesu-airi-minami-live`): clicking `.player-btn` before page load is a no-op and the old harness click waited on ad navigation. With load wait + no-wait click, AdBlock on: detect `PASS` (vidara/gbsagbo JW Player HLS), extension-download `PASS`: 498,984,689 bytes, 1280x720, 2,768.6 s, decode exit 0. No product code change.
+- Jamak (`jamak-gallery-83-streamtape-player-frame`), site-allow: fixture now selects DT (Streamtape) then `#videoOverlay`. 0.4.80: candidate replaced by ad redirect `axgbr.com` → saved JSON rejected (`progressive response is not media (application/json)`); 0.4.81 content refresh fix then `progressive range HTTP 200` (ranges replayed one-shot `/get_video` token); 0.4.81 + range pinning: `PASS`, 586,477,596 bytes, 1920x1080, 2,534.5 s, decode exit 0. INC-2026-10-03-064.
+- Subtitle/overlay/tab-switching/user Chrome profile: `NOT_RUN`.
+- 0.4.81 regression sweep (headless, AdBlock on), all saved files fully decoded exit 0: AVsee `avsee-javc-2165198-throttled-progressive` `PASS` 1,541,966,556 bytes 1280x720 7,093.8 s; Gogoanime Blogger `PASS` 86,888,236 bytes; AsianPorn `PASS` 101,508,754 bytes 1080p; Beeg `PASS` 9,667,665 bytes. `avsee-javmgs-90512` `BLOCKED` HTTP 451 at 01.avsee.is.
+
+## 2026-10-03 15:05–15:50 Asia/Seoul — full headless sweep, cancel QA (0.4.81→0.4.82)
+
+- Isolated Playwright Chrome headless, `-Mode auto` (fixture-recommended AdBlock), `--download-candidate`. Report `artifacts/live-media-auto-all-20261003-150518.json`.
+- `PASS` with saved file: AnimePahe Blogger, av19, AsianPorn, Onlyjerk, PlayMogo `0p6sbp4xtvw1`, Beeg, Gogoanime Blogger, Gogoanime Megaplay HLS, Jamak.
+- MissAV `simd-012`: sweep's 300 s observation cancelled an active transfer; isolated rerun with 1500 s `PASS`, 932,222,494 bytes, 1280x720, 3,155.7 s, full decode exit 0.
+- LuluStream: sweep found 0 candidates (player did not start in that run); isolated rerun downloaded `completed`; fixture player identity updated to `jwplayer`.
+- `BLOCKED` by server status, no product change: MissAV `docp-259` 403, AVsee `javmgs` 451 and `javc` 403 (same page `PASS` hours earlier; transient after repeated runs), PlayMogo `j8k8xq9gilty` 403, PimpBunny 451, Recu 403, Shackledshow 500, Zoro/HiAnime 521.
+- Cancel QA: see INC-2026-10-03-065 (progressive and HLS cancel → `cancelled`, no Downloads leftovers).
+- 2026-10-03 16:10 사용자 Chrome 프로필 상태: unpacked 경로는 `artifacts/chrome-web-store/staging-pro`이지만 서비스 워커 등록 버전은 `0.4.75`(Secure Preferences). 0.4.82 반영에는 확장 다시 로드가 필요. 자동화 정책상 `chrome://`/`chrome-extension://` 페이지를 열 수 없어 사용자 조작 필요. 같은 0.4.82 staging의 링크 입력·YouTube 경로는 격리 Chrome에서 `PASS`(`artifacts/popup-handoff-1791010976400.json`, QA 파일 삭제).
+
+## 2026-10-03 20:19–20:46 Asia/Seoul — user Chrome Jamak failure and fix (0.4.82→0.4.83)
+
+- User Chrome profile (Default), extension 0.4.82 confirmed via Secure Preferences after user reload. Jamak post 83, DT selected, user clicked Download → `failed`, `progressive HTTP 403` (candidate was stale BS-player `/pass_md5/` token endpoint). INC-2026-10-03-066.
+- After fix, headless isolated Chrome, site-allow: `jamak-gallery-83-dood-default-server` `PASS` (cloudatacdn, 578,390,581 bytes, 720p, decode exit 0); `jamak-gallery-83-streamtape-player-frame` `PASS` (586,477,596 bytes, 1080p, decode exit 0); file names use the post title. User Chrome re-test on 0.4.83 pending reload.

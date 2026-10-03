@@ -1,9 +1,9 @@
 (() => {
   const RESCAN_EVENT_TYPE = "aura-media-detector-rescan-v1";
   if (globalThis.__auraMediaDetectorInstalledV4) return;
-  globalThis.__auraMediaDetectorInstalledV4 = true;
   const extraction = globalThis.__segmaContentExtractionV1;
   if (!extraction) throw new Error("content-extraction-unavailable");
+  globalThis.__auraMediaDetectorInstalledV4 = true;
   const MAX_URL_BYTES = 4096;
   const MAX_TITLE_CHARACTERS = 512;
   const MAX_SEEN = 1000;
@@ -687,7 +687,13 @@
 
   function bestRefreshRecord(request, collected = []) {
     const pool = [...recentReports.values(), ...collected]
-      .filter((record) => typeof record?.resourceUrl === "string" && /^https?:/i.test(record.resourceUrl));
+      .filter((record) => typeof record?.resourceUrl === "string" && /^https?:/i.test(record.resourceUrl))
+      // A refresh may renew the same player session or the same origin+path.
+      // Unrelated requests (ad redirects, trackers) in the frame must never
+      // replace the source just because they were observed later.
+      .filter((record) => (request.sessionId && record.sessionId === request.sessionId)
+        || (request.player && record.player === request.player)
+        || sameOriginPath(record.resourceUrl, request.resourceUrl));
     return pool.sort((left, right) => refreshRecordScore(right, request) - refreshRecordScore(left, request))[0] || null;
   }
 
@@ -759,9 +765,56 @@
   }
 
   function handleLevel5KeyRequest(message, sendResponse) {
+    if (message?.type === "level5-playlist-keys" && typeof message.url === "string") {
+      void requestLevel5PlaylistKeys(message.url).then(sendResponse);
+      return true;
+    }
     if (message?.type !== "decode-level5-key" || typeof message.url !== "string") return false;
     void requestLevel5Key(message.url).then(sendResponse);
     return true;
+  }
+
+  // Asks the page bridge to decode every AES key of one Level5 media playlist.
+  function requestLevel5PlaylistKeys(url) {
+    return new Promise((resolve) => {
+      const requestId = crypto.randomUUID();
+      const timeout = window.setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        resolve({ ok: false, error: "page-bridge-timeout" });
+      }, 25_000);
+      function onMessage(event) {
+        if (event.source !== window || event.data?.type !== "aura-level5-playlist-keys-response-v1"
+          || event.data.requestId !== requestId) return;
+        window.clearTimeout(timeout);
+        window.removeEventListener("message", onMessage);
+        if (!event.data.ok || !Array.isArray(event.data.keys)) {
+          const error = typeof event.data.error === "string" && /^[a-z0-9-]{3,64}$/.test(event.data.error)
+            ? event.data.error : "level5-key-unavailable";
+          resolve({ ok: false, error });
+          return;
+        }
+        const keys = [];
+        for (const item of event.data.keys.slice(0, 16)) {
+          try {
+            const binary = atob(String(item?.key || ""));
+            const uri = new URL(String(item?.uri || "")).href;
+            if (binary.length !== 16 && binary.length !== 32) throw new Error("invalid-key");
+            keys.push({ uri, key: item.key });
+          } catch {
+            resolve({ ok: false, error: "invalid-level5-key" });
+            return;
+          }
+        }
+        const playlist = typeof event.data.playlist === "string" ? event.data.playlist : "";
+        if (keys.length && (!playlist.startsWith("#EXTM3U") || playlist.length > 512 * 1024)) {
+          resolve({ ok: false, error: "invalid-level5-playlist" });
+          return;
+        }
+        resolve({ ok: true, keys, playlist: keys.length ? playlist : "" });
+      }
+      window.addEventListener("message", onMessage);
+      window.postMessage({ type: "aura-level5-playlist-keys-request-v1", requestId, url }, "*");
+    });
   }
 
   function handleDoodRequest(message, sendResponse) {
@@ -792,6 +845,12 @@
     // The background owns the site registry, so it tells this frame where the
     // page keeps its real media title. Applying it triggers a rescan so an
     // already-reported candidate gets the corrected title.
+    if (message?.type === "get-page-title") {
+      // Read-only: the background uses this when the tab strip still shows
+      // the page address instead of its title.
+      sendResponse({ ok: true, pageTitle: resolvedPageTitle() });
+      return false;
+    }
     if (message?.type === "set-title-selectors") {
       titleSelectors = Array.isArray(message.selectors)
         ? message.selectors

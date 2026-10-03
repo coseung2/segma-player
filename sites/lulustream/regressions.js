@@ -6,7 +6,7 @@ export const lulustreamRegressions = Object.freeze([
     settleMs: 10_000,
     expected: Object.freeze({
       primaryHost: "cdn1029.cdn-tnmr.org",
-      primaryPlayer: "hlsjs",
+      primaryPlayer: "jwplayer",
       livePrimaryHostFlexible: true,
     }),
     candidates: Object.freeze([
@@ -18,8 +18,8 @@ export const lulustreamRegressions = Object.freeze([
         contentType: "application/vnd.apple.mpegurl",
         frameId: 0,
         source: "player-adapter",
-        player: "hlsjs",
-        sessionId: "hlsjs:1",
+        player: "jwplayer",
+        sessionId: "jwplayer:1",
         confidence: 100,
         main: true,
       }),

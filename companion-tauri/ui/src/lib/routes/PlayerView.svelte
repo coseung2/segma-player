@@ -5,9 +5,10 @@
   import type { ShellView } from "../views";
   import { editMetadata } from "../stores/library";
   import { playerState, replaceSelectedFile, selectAdjacent, selectMedia } from "../stores/player";
-  import { loadSubtitlesFor, resetSubtitles, subtitleState } from "../stores/subtitles";
+  import { loadSubtitlesFor, resetSubtitles, resolveSubtitlePlayback, selectSubtitlePlayback, subtitleState } from "../stores/subtitles";
   import { mediaFolderMatches, mediaIdentity, mediaIdentityMatches } from "../selection-identity";
   import { cueAt, parseSubtitle, subtitleFormat, type SubtitleCue } from "../subtitle-parser";
+  import { createSeekPreview, type PreviewState } from "../seek-preview";
 
   let { view, onOpenLibrary }: { view: ShellView; onOpenLibrary: () => void } = $props();
   let videoEl = $state<HTMLVideoElement | undefined>();
@@ -31,16 +32,19 @@
 
   let hoverTime = $state<number | null>(null);
   let hoverPercent = $state(0);
-  let previewUrl = $state<string | null>(null);
-  let previewTimer: number | null = null;
-  let previewInFlight = false;
-  let pendingPreviewTime: number | null = null;
-  let previewSequence = 0;
-  let lastPreviewRequestAt = 0;
-  const PREVIEW_INTERVAL_MS = 180;
+  let preview = $state<PreviewState>({ status: "idle", frame: null });
+  let previewImageLoaded = $state(false);
+  const seekPreview = createSeekPreview(async (target) => {
+    const { folder, fileName, timestampSeconds, durationSeconds } = target;
+    const result = await generateSeekPreview({ folder, fileName, timestampSeconds, durationSeconds });
+    if (isPreviewUnavailable(result) || !mediaIdentityMatches(target.identity, target.folder, result.fileName)) return null;
+    const url = authorizedAssetUrl(result);
+    return url ? { url, timestampSeconds: result.timestampSeconds } : null;
+  }, (state) => { preview = state; previewImageLoaded = false; }, isCurrentSelection);
 
-  let subtitleEnabled = $state(true);
-  let selectedSubtitleFile = $state("");
+  let subtitlePlayback = $derived(resolveSubtitlePlayback($subtitleState.playbackChoice, $subtitleState.subtitles));
+  let subtitleEnabled = $derived(subtitlePlayback.enabled);
+  let selectedSubtitleFile = $derived(subtitlePlayback.fileName);
   let activeCue = $state<SubtitleCue | null>(null);
   let subtitleCues = $derived.by(() => {
     const track = $subtitleState.subtitles.find((item) => item.fileName === selectedSubtitleFile);
@@ -72,6 +76,9 @@
     const key = current ? mediaIdentity(current.folder, current.entry.fileName) : null;
     if (key === preparedKey) return;
     preparedKey = key;
+    miniPlayer = false;
+    fullscreen = false;
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
     clearSeekPreview();
     prepareSequence += 1;
     remuxState = "idle";
@@ -94,10 +101,6 @@
     void loadSubtitlesFor(current.folder, current.entry.fileName);
   });
 
-  $effect(() => {
-    const tracks = $subtitleState.subtitles;
-    if (!tracks.some((track) => track.fileName === selectedSubtitleFile)) selectedSubtitleFile = tracks[0]?.fileName ?? "";
-  });
 
   $effect(() => {
     activeCue = subtitleEnabled ? cueAt(subtitleCues, currentTime) : null;
@@ -213,7 +216,10 @@
     const identity = selection ? mediaIdentity(selection.folder, selection.entry.fileName) : null;
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
-      else await stageEl.requestFullscreen();
+      else {
+        miniPlayer = false;
+        await stageEl.requestFullscreen();
+      }
     } catch { if (!identity || isCurrentSelection(identity)) playerNotice = "전체 화면을 사용할 수 없습니다."; }
   }
 
@@ -237,8 +243,7 @@
   }
 
   function selectTrack(fileName: string): void {
-    selectedSubtitleFile = fileName;
-    subtitleEnabled = Boolean(fileName);
+    selectSubtitlePlayback(fileName);
   }
 
   function persistPosition(): void {
@@ -354,55 +359,35 @@
     scheduleSeekPreview(hoverTime);
   }
 
-  function scheduleSeekPreview(time: number): void {
-    if (!isTauriMediaContext() || !selection || duration <= 0) return;
-    pendingPreviewTime = time;
-    // Any pointer move makes an in-flight frame stale. The identity check
-    // below protects folder/file changes; this sequence protects the hover
-    // timestamp while the same file remains selected.
-    previewSequence += 1;
-    previewUrl = null;
-    if (previewInFlight || previewTimer !== null) return;
-    const wait = Math.max(0, PREVIEW_INTERVAL_MS - (Date.now() - lastPreviewRequestAt));
-    previewTimer = window.setTimeout(() => {
-      previewTimer = null;
-      void flushSeekPreview();
-    }, wait);
+  function handleSeekInput(event: Event): void {
+    const time = Number((event.currentTarget as HTMLInputElement).value);
+    seekTo(time);
+    showSeekPreview(time);
   }
 
-  async function flushSeekPreview(): Promise<void> {
-    if (previewInFlight || pendingPreviewTime === null || !selection || duration <= 0 || hoverTime === null) return;
-    const current = selection;
-    const identity = mediaIdentity(current.folder, current.entry.fileName);
-    const time = pendingPreviewTime;
-    pendingPreviewTime = null;
-    previewInFlight = true;
-    lastPreviewRequestAt = Date.now();
-    const requestId = ++previewSequence;
-    try {
-      const result = await generateSeekPreview({ folder: current.folder, fileName: current.entry.fileName, timestampSeconds: time, durationSeconds: duration });
-      if (requestId !== previewSequence || hoverTime === null || !isCurrentSelection(identity) || isPreviewUnavailable(result)) return;
-      if (!mediaIdentityMatches(identity, current.folder, result.fileName)) return;
-      previewUrl = authorizedAssetUrl(result);
-    } catch {
-      if (requestId === previewSequence && isCurrentSelection(identity)) previewUrl = null;
-    } finally {
-      previewInFlight = false;
-      if (pendingPreviewTime !== null && hoverTime !== null) scheduleSeekPreview(pendingPreviewTime);
-    }
+  function handleSeekPointerLeave(event: PointerEvent): void {
+    // Touch has no hover: retain its selected preview while the native slider
+    // owns focus, and dismiss on blur. Mouse/pen leave always dismisses.
+    const slider = (event.currentTarget as HTMLElement).querySelector("input");
+    if (event.pointerType === "touch" && document.activeElement === slider) return;
+    clearSeekPreview();
+  }
+
+  function showSeekPreview(time: number): void {
+    if (duration <= 0) return;
+    hoverTime = time;
+    hoverPercent = Math.max(0, Math.min(100, time / duration * 100));
+    scheduleSeekPreview(time);
+  }
+
+  function scheduleSeekPreview(time: number): void {
+    if (!selection || duration <= 0) return;
+    seekPreview.request({ identity: mediaIdentity(selection.folder, selection.entry.fileName), folder: selection.folder, fileName: selection.entry.fileName, timestampSeconds: time, durationSeconds: duration });
   }
 
   function clearSeekPreview(): void {
-    if (previewTimer !== null) window.clearTimeout(previewTimer);
-    previewTimer = null;
-    pendingPreviewTime = null;
-    previewSequence += 1;
+    seekPreview.clear();
     hoverTime = null;
-    previewUrl = null;
-  }
-
-  function isTauriMediaContext(): boolean {
-    return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   }
 
   function isCurrentSelection(identity: string): boolean {
@@ -433,13 +418,17 @@
   </div>
 
   <div class="player-controls" aria-label="재생 컨트롤">
-    <div class="seek-control" role="group" aria-label="탐색 미리보기" onpointermove={handleSeekPointerMove} onpointerleave={clearSeekPreview}>
-      {#if previewUrl && hoverTime !== null}<div class="seek-preview" style={`left: ${hoverPercent}%`}><img src={previewUrl} alt={`${formatTime(hoverTime)} 미리보기`} /><span>{formatTime(hoverTime)}</span></div>{/if}
-      <input class="seek-range" type="range" min="0" max={Math.max(duration, 0.1)} step="0.1" value={currentTime} oninput={(event) => seekTo(Number((event.currentTarget as HTMLInputElement).value))} aria-label="재생 위치" disabled={!sourceUrl || duration <= 0} />
+    <div class="seek-control" role="group" aria-label="탐색 미리보기" onpointerdown={handleSeekPointerMove} onpointermove={handleSeekPointerMove} onpointerleave={handleSeekPointerLeave} onpointercancel={clearSeekPreview}>
+      {#if hoverTime !== null}<div id="seek-preview-status" class="seek-preview" style={`left: clamp(82px, ${hoverPercent}%, calc(100% - 82px))`} role="status" aria-live="off" aria-busy={preview.status === "loading" || (preview.status === "ready" && !previewImageLoaded)}>
+        {#if preview.frame}{#key preview.frame.url}<img src={preview.frame.url} alt={`${formatTime(preview.frame.timestampSeconds)} 미리보기`} onload={() => (previewImageLoaded = true)} onerror={() => { preview = { status: "unavailable", frame: null }; previewImageLoaded = false; }} />{/key}{/if}
+        {#if preview.status === "loading" || (preview.status === "ready" && !previewImageLoaded)}<span>미리보기 준비 중…</span>{:else if preview.status === "unavailable"}<span>미리보기를 불러올 수 없습니다.</span>{/if}
+        <span>{formatTime(preview.frame?.timestampSeconds ?? hoverTime)}</span>
+      </div>{/if}
+      <input class="seek-range" type="range" min="0" max={Math.max(duration, 0.1)} step="0.1" value={currentTime} oninput={handleSeekInput} onfocus={(event) => showSeekPreview(Number((event.currentTarget as HTMLInputElement).value))} onblur={clearSeekPreview} aria-label="재생 위치" aria-valuetext={`${formatTime(currentTime)} / ${formatTime(duration)}`} aria-describedby={hoverTime !== null ? "seek-preview-status" : undefined} disabled={!sourceUrl || duration <= 0} />
     </div>
     <div class="control-row">
       <div class="control-cluster"><button class="icon-control" type="button" aria-label="이전 미디어" onclick={() => selectAdjacent(-1)} disabled={!canPrevious}>⏮</button><button class="icon-control control-primary" type="button" aria-label={isPlaying ? "일시정지" : "재생"} onclick={() => void togglePlay()} disabled={!sourceUrl || Boolean(mediaError)}>{isPlaying ? "❚❚" : "▶"}</button><button class="icon-control" type="button" aria-label="다음 미디어" onclick={() => selectAdjacent(1)} disabled={!canNext}>⏭</button><span class="time-readout" aria-live="off">{formatTime(currentTime)} / {formatTime(duration)}</span></div>
-      <div class="control-cluster control-secondary"><button class="icon-control" type="button" aria-label={muted ? "음소거 해제" : "음소거"} aria-pressed={muted} onclick={toggleMute}>{muted ? "🔇" : "🔊"}</button><label class="volume-control"><span class="sr-only">볼륨</span><input type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} oninput={(event) => setVolume(Number((event.currentTarget as HTMLInputElement).value))} aria-label="볼륨" /></label><select value={playbackRate} onchange={(event) => setSpeed(Number((event.currentTarget as HTMLSelectElement).value))} aria-label="재생 속도"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1">1.0x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2.0x</option></select><button class="icon-control" type="button" aria-label="Picture-in-Picture" onclick={() => void togglePictureInPicture()} disabled={!sourceUrl}>{pipSupported ? "▣" : "▣"}</button><button class="icon-control" type="button" aria-label="전체 화면" onclick={() => void toggleFullscreen()} disabled={!sourceUrl}>⛶</button></div>
+      <div class="control-cluster control-secondary"><button class="icon-control" type="button" aria-label={muted ? "음소거 해제" : "음소거"} aria-pressed={muted} onclick={toggleMute}>{muted ? "🔇" : "🔊"}</button><label class="volume-control"><span class="sr-only">볼륨</span><input type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} oninput={(event) => setVolume(Number((event.currentTarget as HTMLInputElement).value))} aria-label="볼륨" /></label><select value={playbackRate} onchange={(event) => setSpeed(Number((event.currentTarget as HTMLSelectElement).value))} aria-label="재생 속도">{#each [0.5, 0.75, 1, 1.25, 1.5, 2] as rate}<option value={rate}>{rate.toFixed(rate % 1 && rate !== 0.5 ? 2 : 1)}x</option>{/each}</select><button class="icon-control" type="button" aria-label="Picture-in-Picture" onclick={() => void togglePictureInPicture()} disabled={!sourceUrl}>{pipSupported ? "▣" : "▣"}</button><button class="icon-control" type="button" aria-label="전체 화면" onclick={() => void toggleFullscreen()} disabled={!sourceUrl}>⛶</button></div>
     </div>
     {#if playerNotice}<p class="player-notice" role="status">{playerNotice}</p>{/if}
   </div>
